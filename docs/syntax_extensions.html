@@ -623,32 +623,57 @@ it needs to pick the accumulation operation.</p>
 <span id="cb3-22"><a href="#cb3-22" aria-hidden="true" tabindex="-1"></a>  | Uint4x32_to_prec_uniform -&gt; <span class="dt">failwith</span> <span class="st">&quot;NOT IMPLEMENTED&quot;</span></span>
 <span id="cb3-23"><a href="#cb3-23" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb3-24"><a href="#cb3-24" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> interpret_binop op v1 v2 =</span>
-<span id="cb3-25"><a href="#cb3-25" aria-hidden="true" tabindex="-1"></a>  <span class="kw">let</span> <span class="kw">open</span> Float <span class="kw">in</span></span>
-<span id="cb3-26"><a href="#cb3-26" aria-hidden="true" tabindex="-1"></a>  <span class="kw">match</span> op <span class="kw">with</span></span>
-<span id="cb3-27"><a href="#cb3-27" aria-hidden="true" tabindex="-1"></a>  | Arg1 -&gt; v1</span>
-<span id="cb3-28"><a href="#cb3-28" aria-hidden="true" tabindex="-1"></a>  | Arg2 -&gt; v2</span>
-<span id="cb3-29"><a href="#cb3-29" aria-hidden="true" tabindex="-1"></a>  | Add -&gt; v1 + v2</span>
-<span id="cb3-30"><a href="#cb3-30" aria-hidden="true" tabindex="-1"></a>  | Sub -&gt; v1 - v2</span>
-<span id="cb3-31"><a href="#cb3-31" aria-hidden="true" tabindex="-1"></a>  | Mul -&gt; v1 * v2</span>
-<span id="cb3-32"><a href="#cb3-32" aria-hidden="true" tabindex="-1"></a>  | Div -&gt; v1 / v2</span>
-<span id="cb3-33"><a href="#cb3-33" aria-hidden="true" tabindex="-1"></a>  | ToPowOf <span class="kw">when</span> is_integer v2 -&gt; int_pow v1 @@ to_int v2</span>
-<span id="cb3-34"><a href="#cb3-34" aria-hidden="true" tabindex="-1"></a>  | ToPowOf -&gt; v1 ** v2</span>
-<span id="cb3-35"><a href="#cb3-35" aria-hidden="true" tabindex="-1"></a>  | Relu_gate -&gt; <span class="kw">if</span> v1 &gt; <span class="fl">0.0</span> <span class="kw">then</span> v2 <span class="kw">else</span> <span class="fl">0.0</span></span>
-<span id="cb3-36"><a href="#cb3-36" aria-hidden="true" tabindex="-1"></a>  | Satur01_gate -&gt; <span class="kw">if</span> v1 &gt; <span class="fl">0.0</span> &amp;&amp; v1 &lt; <span class="fl">1.0</span> <span class="kw">then</span> v2 <span class="kw">else</span> <span class="fl">0.0</span></span>
-<span id="cb3-37"><a href="#cb3-37" aria-hidden="true" tabindex="-1"></a>  | Max -&gt; <span class="dt">max</span> v1 v2</span>
-<span id="cb3-38"><a href="#cb3-38" aria-hidden="true" tabindex="-1"></a>  | Min -&gt; <span class="dt">min</span> v1 v2</span>
-<span id="cb3-39"><a href="#cb3-39" aria-hidden="true" tabindex="-1"></a>  | Mod -&gt; v1 % v2</span>
-<span id="cb3-40"><a href="#cb3-40" aria-hidden="true" tabindex="-1"></a>  | Cmplt -&gt; <span class="kw">if</span> v1 &lt; v2 <span class="kw">then</span> <span class="dv">1</span>. <span class="kw">else</span> <span class="dv">0</span>.</span>
-<span id="cb3-41"><a href="#cb3-41" aria-hidden="true" tabindex="-1"></a>  | Cmple -&gt; <span class="kw">if</span> v1 &lt;= v2 <span class="kw">then</span> <span class="dv">1</span>. <span class="kw">else</span> <span class="dv">0</span>.</span>
-<span id="cb3-42"><a href="#cb3-42" aria-hidden="true" tabindex="-1"></a>  | Cmpeq -&gt; <span class="kw">if</span> v1 = v2 <span class="kw">then</span> <span class="dv">1</span>. <span class="kw">else</span> <span class="dv">0</span>.</span>
-<span id="cb3-43"><a href="#cb3-43" aria-hidden="true" tabindex="-1"></a>  | Cmpne -&gt; <span class="kw">if</span> v1 &lt;&gt; v2 <span class="kw">then</span> <span class="dv">1</span>. <span class="kw">else</span> <span class="dv">0</span>.</span>
-<span id="cb3-44"><a href="#cb3-44" aria-hidden="true" tabindex="-1"></a>  | Or -&gt; <span class="kw">if</span> v1 &lt;&gt; <span class="dv">0</span>. || v2 &lt;&gt; <span class="dv">0</span>. <span class="kw">then</span> <span class="dv">1</span>. <span class="kw">else</span> <span class="dv">0</span>.</span>
-<span id="cb3-45"><a href="#cb3-45" aria-hidden="true" tabindex="-1"></a>  | And -&gt; <span class="kw">if</span> v1 &lt;&gt; <span class="dv">0</span>. &amp;&amp; v2 &lt;&gt; <span class="dv">0</span>. <span class="kw">then</span> <span class="dv">1</span>. <span class="kw">else</span> <span class="dv">0</span>.</span>
-<span id="cb3-46"><a href="#cb3-46" aria-hidden="true" tabindex="-1"></a>  | Threefry4x32 -&gt; ...</span>
-<span id="cb3-47"><a href="#cb3-47" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-48"><a href="#cb3-48" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> interpret_ternop op v1 v2 v3 =</span>
-<span id="cb3-49"><a href="#cb3-49" aria-hidden="true" tabindex="-1"></a>  <span class="kw">let</span> <span class="kw">open</span> Float <span class="kw">in</span></span>
-<span id="cb3-50"><a href="#cb3-50" aria-hidden="true" tabindex="-1"></a>  <span class="kw">match</span> op <span class="kw">with</span> Where -&gt; <span class="kw">if</span> v1 &lt;&gt; <span class="dv">0</span>. <span class="kw">then</span> v2 <span class="kw">else</span> v3 | FMA -&gt; (v1 * v2) + v3</span></code></pre></div>
+<span id="cb3-25"><a href="#cb3-25" aria-hidden="true" tabindex="-1"></a>  <span class="kw">let</span> integer_power base exponent =</span>
+<span id="cb3-26"><a href="#cb3-26" aria-hidden="true" tabindex="-1"></a>    <span class="kw">let</span> <span class="kw">open</span> Float <span class="kw">in</span></span>
+<span id="cb3-27"><a href="#cb3-27" aria-hidden="true" tabindex="-1"></a>    <span class="kw">let</span> <span class="kw">rec</span> loop base magnitude <span class="dt">result</span> =</span>
+<span id="cb3-28"><a href="#cb3-28" aria-hidden="true" tabindex="-1"></a>      <span class="kw">if</span> magnitude = <span class="dv">0</span>. <span class="kw">then</span> <span class="dt">result</span></span>
+<span id="cb3-29"><a href="#cb3-29" aria-hidden="true" tabindex="-1"></a>      <span class="kw">else</span></span>
+<span id="cb3-30"><a href="#cb3-30" aria-hidden="true" tabindex="-1"></a>        <span class="kw">let</span> <span class="dt">result</span> = <span class="kw">if</span> Stdlib.Float.rem magnitude <span class="dv">2</span>. = <span class="dv">1</span>. <span class="kw">then</span> <span class="dt">result</span> * base <span class="kw">else</span> <span class="dt">result</span> <span class="kw">in</span></span>
+<span id="cb3-31"><a href="#cb3-31" aria-hidden="true" tabindex="-1"></a>        <span class="kw">let</span> magnitude = Stdlib.Float.<span class="dt">floor</span> (magnitude / <span class="dv">2</span>.) <span class="kw">in</span></span>
+<span id="cb3-32"><a href="#cb3-32" aria-hidden="true" tabindex="-1"></a>        <span class="kw">if</span> magnitude = <span class="dv">0</span>. <span class="kw">then</span> <span class="dt">result</span> <span class="kw">else</span> loop (base * base) magnitude <span class="dt">result</span></span>
+<span id="cb3-33"><a href="#cb3-33" aria-hidden="true" tabindex="-1"></a>    <span class="kw">in</span></span>
+<span id="cb3-34"><a href="#cb3-34" aria-hidden="true" tabindex="-1"></a>    <span class="kw">let</span> <span class="dt">result</span> = loop base (Float.<span class="dt">abs</span> exponent) <span class="dv">1</span>. <span class="kw">in</span></span>
+<span id="cb3-35"><a href="#cb3-35" aria-hidden="true" tabindex="-1"></a>    <span class="kw">if</span> exponent &lt; <span class="dv">0</span>. <span class="kw">then</span> <span class="dv">1</span>. / <span class="dt">result</span> <span class="kw">else</span> <span class="dt">result</span></span>
+<span id="cb3-36"><a href="#cb3-36" aria-hidden="true" tabindex="-1"></a>  <span class="kw">in</span></span>
+<span id="cb3-37"><a href="#cb3-37" aria-hidden="true" tabindex="-1"></a>  <span class="kw">let</span> <span class="kw">open</span> Float <span class="kw">in</span></span>
+<span id="cb3-38"><a href="#cb3-38" aria-hidden="true" tabindex="-1"></a>  <span class="kw">match</span> op <span class="kw">with</span></span>
+<span id="cb3-39"><a href="#cb3-39" aria-hidden="true" tabindex="-1"></a>  | Arg1 -&gt; v1</span>
+<span id="cb3-40"><a href="#cb3-40" aria-hidden="true" tabindex="-1"></a>  | Arg2 -&gt; v2</span>
+<span id="cb3-41"><a href="#cb3-41" aria-hidden="true" tabindex="-1"></a>  | Add -&gt; v1 + v2</span>
+<span id="cb3-42"><a href="#cb3-42" aria-hidden="true" tabindex="-1"></a>  | Sub -&gt; v1 - v2</span>
+<span id="cb3-43"><a href="#cb3-43" aria-hidden="true" tabindex="-1"></a>  | Mul -&gt; v1 * v2</span>
+<span id="cb3-44"><a href="#cb3-44" aria-hidden="true" tabindex="-1"></a>  | Div -&gt; v1 / v2</span>
+<span id="cb3-45"><a href="#cb3-45" aria-hidden="true" tabindex="-1"></a>  | ToPowOf <span class="kw">when</span> is_finite v2 &amp;&amp; is_integer v2 -&gt; integer_power v1 v2</span>
+<span id="cb3-46"><a href="#cb3-46" aria-hidden="true" tabindex="-1"></a>  | ToPowOf -&gt; v1 ** v2</span>
+<span id="cb3-47"><a href="#cb3-47" aria-hidden="true" tabindex="-1"></a>  | Relu_gate -&gt; <span class="kw">if</span> v1 &gt; <span class="fl">0.0</span> <span class="kw">then</span> v2 <span class="kw">else</span> <span class="fl">0.0</span></span>
+<span id="cb3-48"><a href="#cb3-48" aria-hidden="true" tabindex="-1"></a>  | Satur01_gate -&gt; <span class="kw">if</span> v1 &gt; <span class="fl">0.0</span> &amp;&amp; v1 &lt; <span class="fl">1.0</span> <span class="kw">then</span> v2 <span class="kw">else</span> <span class="fl">0.0</span></span>
+<span id="cb3-49"><a href="#cb3-49" aria-hidden="true" tabindex="-1"></a>  | Max -&gt; <span class="dt">max</span> v1 v2</span>
+<span id="cb3-50"><a href="#cb3-50" aria-hidden="true" tabindex="-1"></a>  | Min -&gt; <span class="dt">min</span> v1 v2</span>
+<span id="cb3-51"><a href="#cb3-51" aria-hidden="true" tabindex="-1"></a>  | Mod -&gt; v1 % v2</span>
+<span id="cb3-52"><a href="#cb3-52" aria-hidden="true" tabindex="-1"></a>  | Cmplt -&gt; <span class="kw">if</span> v1 &lt; v2 <span class="kw">then</span> <span class="dv">1</span>. <span class="kw">else</span> <span class="dv">0</span>.</span>
+<span id="cb3-53"><a href="#cb3-53" aria-hidden="true" tabindex="-1"></a>  | Cmple -&gt; <span class="kw">if</span> v1 &lt;= v2 <span class="kw">then</span> <span class="dv">1</span>. <span class="kw">else</span> <span class="dv">0</span>.</span>
+<span id="cb3-54"><a href="#cb3-54" aria-hidden="true" tabindex="-1"></a>  | Cmpeq -&gt; <span class="kw">if</span> v1 = v2 <span class="kw">then</span> <span class="dv">1</span>. <span class="kw">else</span> <span class="dv">0</span>.</span>
+<span id="cb3-55"><a href="#cb3-55" aria-hidden="true" tabindex="-1"></a>  | Cmpne -&gt; <span class="kw">if</span> v1 &lt;&gt; v2 <span class="kw">then</span> <span class="dv">1</span>. <span class="kw">else</span> <span class="dv">0</span>.</span>
+<span id="cb3-56"><a href="#cb3-56" aria-hidden="true" tabindex="-1"></a>  | Or -&gt; <span class="kw">if</span> v1 &lt;&gt; <span class="dv">0</span>. || v2 &lt;&gt; <span class="dv">0</span>. <span class="kw">then</span> <span class="dv">1</span>. <span class="kw">else</span> <span class="dv">0</span>.</span>
+<span id="cb3-57"><a href="#cb3-57" aria-hidden="true" tabindex="-1"></a>  | And -&gt; <span class="kw">if</span> v1 &lt;&gt; <span class="dv">0</span>. &amp;&amp; v2 &lt;&gt; <span class="dv">0</span>. <span class="kw">then</span> <span class="dv">1</span>. <span class="kw">else</span> <span class="dv">0</span>.</span>
+<span id="cb3-58"><a href="#cb3-58" aria-hidden="true" tabindex="-1"></a>  | Threefry4x32 -&gt; ...</span>
+<span id="cb3-59"><a href="#cb3-59" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-60"><a href="#cb3-60" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> interpret_ternop op v1 v2 v3 =</span>
+<span id="cb3-61"><a href="#cb3-61" aria-hidden="true" tabindex="-1"></a>  <span class="kw">let</span> <span class="kw">open</span> Float <span class="kw">in</span></span>
+<span id="cb3-62"><a href="#cb3-62" aria-hidden="true" tabindex="-1"></a>  <span class="kw">match</span> op <span class="kw">with</span> Where -&gt; <span class="kw">if</span> v1 &lt;&gt; <span class="dv">0</span>. <span class="kw">then</span> v2 <span class="kw">else</span> v3 | FMA -&gt; (v1 * v2) + v3</span></code></pre></div>
+<p>Known finite integral powers use multiplication and squaring,
+followed by a reciprocal for negative exponents. The exponent retains
+its host-float value without conversion to a machine <code>int</code>.
+Exponent zero returns 1 even for zero or NaN bases; nonzero NaN powers
+propagate NaN, and odd zero and infinity powers preserve their sign.
+Generated arithmetic rounds at f32 for single and narrow storage, and at
+f64 for double storage; this multiplication policy includes its overflow
+and underflow behavior. Host interpretation uses f64, so constant
+integer powers remain in the IR for target-precision code generation,
+including bases that simplify to constants. Fractional and dynamic
+exponents use the backend’s floating-power operation. Optional unrolling
+applies only to small nonnegative exponents and does not duplicate
+scoped computations.</p>
 <h2 id="the-syntax-for-op">The syntax for %op</h2>
 <p>The <code>%op</code> syntax is simpler than the <code>%cd</code>
 syntax since it relies more on regular OCaml expressions. For example,
