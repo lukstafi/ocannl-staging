@@ -618,6 +618,58 @@ let () =
      apart from dK; admitted: beside dK, off the lanes)"
   in
   let executed_dv = List.filter fused_executed ~f:(List.exists ~f:(computes ~writes:writes_dv)) in
+  (let limits = Context.hardware_limits (Context.auto ()) in
+   let open Ir.Backend_intf in
+   let opt_i = function None -> "None" | Some i -> Int.to_string i in
+   eprintf
+     "DIAG backend=%s resolved=%s threads=%s wmem=%s dims=%s grid_yz=%s pools=%s simd=%s \
+      cheap=%b (not part of the golden)\n\
+      %!"
+     backend_name
+     (Sexp.to_string (S.sexp_of_serial_lanes (S.serial_lanes_for limits)))
+     (opt_i limits.max_threads_per_workgroup)
+     (opt_i limits.max_workgroup_memory_bytes)
+     (match limits.max_workgroup_dims with
+     | None -> "None"
+     | Some (x, y, z) -> Printf.sprintf "%d,%d,%d" x y z)
+     (opt_i limits.max_grid_yz) (opt_i limits.max_bound_pools) (opt_i limits.simdgroup_width)
+     limits.lane_scalar_recompute_cheap;
+   let ints a = Sexp.to_string (Array.sexp_of_t Int.sexp_of_t a) in
+   let describe ?(dump = false) tag segs =
+     eprintf "DIAG %s: %d segments\n%!" tag (List.length segs);
+     List.iteri segs ~f:(fun i seg ->
+         let dv = List.filter seg ~f:(computes ~writes:writes_dv) in
+         let dk = List.filter seg ~f:(computes ~writes:writes_dk) in
+         let ld = LL.launch_dims (LL.unflat_lines seg) in
+         if not (List.is_empty dv && List.is_empty dk) then (
+           eprintf "DIAG %s seg %d: dv_stmts=%d dv_lanes=[%s] dk_stmts=%d grid=%s block=%s\n%!" tag
+             i (List.length dv)
+             (String.concat ~sep:"," (List.map dv ~f:(fun s -> Bool.to_string (lane_inside_serial s))))
+             (List.length dk) (ints ld.grid) (ints ld.block);
+           if dump && not (List.is_empty dv) then (
+             PPrint.ToChannel.pretty 1.0 110 stderr (LL.to_doc () (LL.unflat_lines seg));
+             eprintf "\nDIAG end of dump\n%!")))
+   in
+   describe ~dump:true "executed" fused_executed;
+   let variants =
+     [
+       ("real", limits);
+       ("cheap", cheap);
+       ("no-grid-yz", { limits with max_grid_yz = None });
+       ("no-wg-dims", { limits with max_workgroup_dims = None });
+       ("no-threads", { limits with max_threads_per_workgroup = None });
+       ("no-wmem", { limits with max_workgroup_memory_bytes = None });
+       ("no-pools", { limits with max_bound_pools = None });
+       ("no-mma", { limits with mma = None });
+     ]
+   in
+   List.iter variants ~f:(fun (tag, limits) ->
+       List.iter [ "cuda"; "metal" ] ~f:(fun bn ->
+           let segs =
+             S.maybe_default_schedules ~backend_name:bn ~limits ~static_indices:[] (copy fused_opt)
+             |> List.map ~f:(fun (s : LL.optimized) -> LL.flat_lines [ s.llc ])
+           in
+           describe ~dump:(String.equal tag "cheap" && String.equal bn "metal") (tag ^ "/" ^ bn) segs)));
   if not (S.backend_is_gpu backend_name) then skipped ~backend:backend_name claim
   else
     p_all claim executed_dv ~f:(fun seg ->
