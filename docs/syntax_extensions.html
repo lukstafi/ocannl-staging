@@ -97,11 +97,7 @@ padding: 20px;
 <ul>
 <li><a href="#syntax-extensions-cd-and-op" id="toc-syntax-extensions-cd-and-op">Syntax extensions %cd and %op</a>
 <ul>
-<li><a href="#preliminaries" id="toc-preliminaries">Preliminaries</a>
-<ul>
-<li><a href="#the-oc-anti-quotation-and-the-unit-parameter-heuristic" id="toc-the-oc-anti-quotation-and-the-unit-parameter-heuristic">The %oc
-anti-quotation and the unit-parameter heuristic</a></li>
-</ul></li>
+<li><a href="#preliminaries" id="toc-preliminaries">Preliminaries</a></li>
 <li><a href="#primitive-operations" id="toc-primitive-operations">Primitive operations</a></li>
 <li><a href="#the-syntax-for-op" id="toc-the-syntax-for-op">The syntax
 for %op</a></li>
@@ -240,78 +236,38 @@ as pure OCaml without transformation.</li>
 </ul></li>
 </ul>
 <h2 id="preliminaries">Preliminaries</h2>
-<p>OCANNL, and arrayjit specifically, is built around a fixed number of
-numeric operations, declared in <code>arrayjit/ops.ml</code>. We assign
-lexical operators to the binary operations, inventing novel operators if
-needed. For example, Rectified Linear Unit <code>Relu</code> operation,
-which computes <code>f(x) = max(0,x)</code>, is called
-<code>relu</code>, while the ReLU-Gate <code>Relu_gate</code> operation,
-which computes <code>f(x,y) = if x &gt; 0.0 then y else 0.0</code>, gets
-the operator <code>-?/</code> in addition to name
-<code>relu_gate</code>. These built-in numeric operations are used to
-construct assignments (<code>Assignments.t</code> packaged as
-<code>Assignments.comp</code>). The syntax <code>%cd</code> is needed to
-build assignments concisely, and the assignment operators always start
-with <code>=</code> (unlike in C where they end with <code>=</code>). On
-the other hand, while the syntax <code>%op</code> helps build tensors
-(<code>Tensor.t</code>), they can be expressed concisely in pure OCaml.
-Unlike for assignments, the building blocks for tensor expressions are
-easy to extend. The meaningful basic ones are provided in
-<code>tensor/operation.ml</code>.</p>
-<p>In OCANNL, we call a tensor that is prohibited from propagating
-gradients, does not have a gradient node nor backprop code, a
-<em>non-differentiable tensor</em>. Accordingly we can call the “plain”
-tensors with a gradient node <em>differentiable tensors</em>.
-Expressions in the <code>%cd</code> syntax will sometimes build new
-non-differentiable tensors as components of assignments (they will never
-build new differentiable tensors). The syntax extensions make the
-following assumption:</p>
-<ul>
-<li><code>%cd</code> assumes that any extension point will be in the
-scope of a module <code>NTDSL</code> that provides at least the
-functionality of <code>Operation.NTDSL</code>.</li>
-<li><code>%op</code> assumes that any extension point will be in the
-scope of a module <code>TDSL</code> that provides at least the
-functionality of <code>Operation.TDSL</code>.</li>
-<li>Both extensions assume <code>Tensor</code> (from the
-<code>Ocannl</code> wrapper) is in scope.</li>
-</ul>
-<p>Functions inside <code>Operation.NTDSL</code> use
-<code>~grad_spec:Prohibit_grad</code> when calling into
-<code>Tensor</code>, making the resulting tensors non-differentiable.
-Functions inside <code>Operation.TDSL</code> use
-<code>~grad_spec:If_needed</code>, which will make the tensors
-non-differentiable when the gradient is not needed – except for
-<code>TDSL.param</code>, which makes the final parameter tensor
-differentiable after evaluating its initializer as forward-only code. A
-<code>Prohibit_grad</code> operation cuts the gradient at that operation
-whatever its operands are: <code>Tensor.op</code> builds no gradient
-node and composes no backpropagation code for it, so applying an
-<code>NTDSL</code> operation to a differentiable operand –
-<code>NTDSL.O.(x @^^ spec)</code> inside a <code>%op</code> body, as
-<code>Nn_blocks.softmax</code> does for its row max – detaches the
-result without a copy. <code>Operation.stop_gradient</code> is the
-identity instance of the same mechanism.</p>
-<p>The extension points open <code>NTDSL.O</code>, resp.
-<code>TDSL.O</code>, for the scope of the extension point, to expose the
-corresponding operators.</p>
-<h3 id="the-oc-anti-quotation-and-the-unit-parameter-heuristic">The %oc
-anti-quotation and the unit-parameter heuristic</h3>
-<p>Within <code>%op</code> and <code>%cd</code> contexts, expressions
-typically undergo transformation to build tensors or assignments.
-However, OCANNL uses two mechanisms to preserve pure OCaml
-expressions:</p>
-<h4 id="unit-parameter-heuristic-automatic-in-op">Unit-parameter
-heuristic (automatic in %op)</h4>
-<p>In the <code>%op</code> syntax, when a function application contains
-a unit <code>()</code> argument, all arguments appearing
-<strong>before</strong> the unit are automatically preserved as pure
-OCaml expressions. This aligns with OCANNL’s design pattern where
-configuration happens before the unit parameter:</p>
-<div class="sourceCode" id="cb1"><pre class="sourceCode ocaml"><code class="sourceCode ocaml"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="co">(* Arguments before () are automatically preserved as OCaml *)</span></span>
-<span id="cb1-2"><a href="#cb1-2" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span>%op my_fn ~label x = </span>
-<span id="cb1-3"><a href="#cb1-3" aria-hidden="true" tabindex="-1"></a>  other_fn ~label:((<span class="st">&quot;prefix_&quot;</span> ^ name) :: label) ~config:value () x</span>
-<span id="cb1-4"><a href="#cb1-4" aria-hidden="true" tabindex="-1"></a>  <span class="co">(* label and config are preserved; x after () is transformed *)</span></span></code></pre></div>
+<p>A self-contained dimension-capture example (compiled by the
+documentation check):</p>
+<p>```ocaml doc-check=dimension_capture open
+Ocannl.Nn_blocks.DSL_modules</p>
+<p>let%op sum_last x = x ++ “ab =&gt; a” [“b”]</p>
+<pre><code>
+
+OCANNL, and arrayjit specifically, is built around a fixed number of numeric operations, declared in `arrayjit/ops.ml`. We assign lexical operators to the binary operations, inventing novel operators if needed. For example, Rectified Linear Unit `Relu` operation, which computes `f(x) = max(0,x)`, is called `relu`, while the ReLU-Gate `Relu_gate` operation, which computes `f(x,y) = if x &gt; 0.0 then y else 0.0`, gets the operator `-?/` in addition to name `relu_gate`. These built-in numeric operations are used to construct assignments (`Assignments.t` packaged as `Assignments.comp`). The syntax `%cd` is needed to build assignments concisely, and the assignment operators always start with `=` (unlike in C where they end with `=`). On the other hand, while the syntax `%op` helps build tensors (`Tensor.t`), they can be expressed concisely in pure OCaml. Unlike for assignments, the building blocks for tensor expressions are easy to extend. The meaningful basic ones are provided in `tensor/operation.ml`.
+
+In OCANNL, we call a tensor that is prohibited from propagating gradients, does not have a gradient node nor backprop code, a _non-differentiable tensor_. Accordingly we can call the &quot;plain&quot; tensors with a gradient node _differentiable tensors_. Expressions in the `%cd` syntax will sometimes build new non-differentiable tensors as components of assignments (they will never build new differentiable tensors). The syntax extensions make the following assumption:
+
+- `%cd` assumes that any extension point will be in the scope of a module `NTDSL` that provides at least the functionality of `Operation.NTDSL`.
+- `%op` assumes that any extension point will be in the scope of a module `TDSL` that provides at least the functionality of `Operation.TDSL`.
+- Both extensions assume `Tensor` (from the `Ocannl` wrapper) is in scope.
+
+Functions inside `Operation.NTDSL` use `~grad_spec:Prohibit_grad` when calling into `Tensor`, making the resulting tensors non-differentiable. Functions inside `Operation.TDSL` use `~grad_spec:If_needed`, which will make the tensors non-differentiable when the gradient is not needed -- except for `TDSL.param`, which makes the final parameter tensor differentiable after evaluating its initializer as forward-only code. A `Prohibit_grad` operation cuts the gradient at that operation whatever its operands are: `Tensor.op` builds no gradient node and composes no backpropagation code for it, so applying an `NTDSL` operation to a differentiable operand -- `NTDSL.O.(x @^^ spec)` inside a `%op` body, as `Nn_blocks.softmax` does for its row max -- detaches the result without a copy. `Operation.stop_gradient` is the identity instance of the same mechanism.
+
+The extension points open `NTDSL.O`, resp. `TDSL.O`, for the scope of the extension point, to expose the corresponding operators.
+
+### The %oc anti-quotation and the unit-parameter heuristic
+
+Within `%op` and `%cd` contexts, expressions typically undergo transformation to build tensors or assignments. However, OCANNL uses two mechanisms to preserve pure OCaml expressions:
+
+#### Unit-parameter heuristic (automatic in %op)
+
+In the `%op` syntax, when a function application contains a unit `()` argument, all arguments appearing **before** the unit are automatically preserved as pure OCaml expressions. This aligns with OCANNL&#39;s design pattern where configuration happens before the unit parameter:
+
+```ocaml
+(* Arguments before () are automatically preserved as OCaml *)
+let%op my_fn ~label x = 
+  other_fn ~label:((&quot;prefix_&quot; ^ name) :: label) ~config:value () x
+  (* label and config are preserved; x after () is transformed *)</code></pre>
 <h4 id="explicit-oc-anti-quotation">Explicit %oc anti-quotation</h4>
 <p>For cases where you need explicit control or the heuristic doesn’t
 apply, the <code>%oc</code> (mnemonic: “OCaml”) anti-quotation escapes
