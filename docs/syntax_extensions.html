@@ -1047,10 +1047,10 @@ branches need not be duplicated just to share one.</p>
 <p>The declaration may appear in only <strong>one</strong> arm, though:
 a second <code>{ x }</code> for the same name is rejected with
 <code>ppx_ocannl %cd: duplicate inline declaration of no-gradient tensor x</code>
-(<code>tensor/ppx_cd.ml:162</code>). Declare the tensor in whichever arm
-reads most naturally – typically the one whose right-hand side carries
-the best label information – and refer to it by bare name in the
-others.</p>
+(raised by <code>assignment</code> in <code>tensor/ppx_cd.ml</code>).
+Declare the tensor in whichever arm reads most naturally – typically the
+one whose right-hand side carries the best label information – and refer
+to it by bare name in the others.</p>
 <p><code>Train.sgd_one</code> in <code>lib/train.ml</code> is the worked
 example: its <code>%cd</code> payload is written once, with
 <code>{ sgd_delta }</code> and <code>{ sgd_momentum }</code> each
