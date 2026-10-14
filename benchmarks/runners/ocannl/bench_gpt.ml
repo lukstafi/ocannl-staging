@@ -66,7 +66,7 @@ let () =
        beam a round expands is the composite and its playoff near-copies (1-4 of 122-150 segments
        apart). *)
     Train.tune_placements ~report:(H.collect_arm arms) ~flip_report:(H.collect_search arms)
-      ~on_ship:(H.collect_ship arms) ~rounds:0 ~timing_ctx:scratch ctx batch_loss comp bindings
+      ~on_ship:(H.collect_ship arms) ~timing_ctx:scratch ctx batch_loss comp bindings
   in
   let ctx, routines = H.compile_step ~tune ~tuned ctx bindings step_shape in
   (* What the timed artifact emitted, off the routines themselves (gh-ocannl-626): a flip refinement
