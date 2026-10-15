@@ -3,10 +3,10 @@
   <span><span class="optlabel">?ext</span>:<span class="error">???</span> <span class="arrow">&#45;&gt;</span></span>
   <span><span class="label">routine</span>:<span class="xref-unresolved">Base</span>.String.t <span class="arrow">&#45;&gt;</span></span>
   <span><span class="label">contains</span>:<span class="xref-unresolved">Base</span>.String.t <span class="arrow">&#45;&gt;</span></span>
-  <span>string <span class="arrow">&#45;&gt;</span></span>
+  <span><span class="xref-unresolved">Base</span>.String.t <span class="arrow">&#45;&gt;</span></span>
   <span class="xref-unresolved">Base</span>.unit</span></code></div><div class="spec-doc"><p><code>assert_emits ~routine ~contains claim</code> records <code>claim</code> as holding exactly when <code>routine</code>'s generated source contains <code>contains</code> -- the common case, as an assertion rather than a <code>match</code> whose <code>None</code> arm has to be remembered.</p></div></div><div class="odoc-spec"><div class="spec value anchored" id="val-assert_omits"><a href="#val-assert_omits" class="anchor"></a><code><span><span class="keyword">val</span> assert_omits : 
   <span><span class="optlabel">?ext</span>:<span class="error">???</span> <span class="arrow">&#45;&gt;</span></span>
   <span><span class="label">routine</span>:<span class="xref-unresolved">Base</span>.String.t <span class="arrow">&#45;&gt;</span></span>
   <span><span class="label">contains</span>:<span class="xref-unresolved">Base</span>.String.t <span class="arrow">&#45;&gt;</span></span>
-  <span>string <span class="arrow">&#45;&gt;</span></span>
+  <span><span class="xref-unresolved">Base</span>.String.t <span class="arrow">&#45;&gt;</span></span>
   <span class="xref-unresolved">Base</span>.unit</span></code></div><div class="spec-doc"><p><code>assert_omits ~routine ~contains claim</code> is <a href="#val-assert_emits"><code>assert_emits</code></a> for a substring that must NOT appear. Note that it still requires the artifact to exist: &quot;the kernel does not contain <code>x</code>&quot; is not a fact a missing kernel establishes.</p></div></div></div></body></html>
