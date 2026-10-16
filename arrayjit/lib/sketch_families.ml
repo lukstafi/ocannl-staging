@@ -4103,10 +4103,40 @@ let sketch_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
      candidate compile and are skipped. For the matmul family the fusion choice is the tree's root
      level (gh-ocannl-613), so its leaves already carry the twins, each flavor under its own
      preconditions; the conv family is not tree-factored yet and flag-flips its seeds. *)
+  let w503 = Option.is_some (Stdlib.Sys.getenv_opt "W503_CENSUS") in
+  (if w503 then
+     let stmts = strip_stmts (LL.flat_lines [ opt.LL.llc ]) in
+     let zeroed = List.filter_map stmts ~f:(function LL.Zero_out tn -> Some tn | _ -> None) in
+     let convs =
+       List.filter_map stmts ~f:(fun s ->
+           Option.map (detect_conv_procedural s) ~f:(fun site ->
+               Printf.sprintf "%s%s" (Ir.Tnode.debug_name site.c_d)
+                 (if List.exists zeroed ~f:(phys_equal site.c_d) then "[Z]" else "")))
+     in
+     Stdlib.Printf.eprintf "W503 routine: stmts=%d whole_zeros=%d matmul=%b conv_nests=%d [%s]\n%!"
+       (List.length stmts) (List.length zeroed)
+       (Option.is_some (detect_matmul_canonical opt))
+       (List.length convs) (String.concat ~sep:" " convs));
   match detect_matmul_canonical opt with
   | Some (site, _, opt) -> matmul_seed_params ~is_gpu ~is_cpu ~limits ~opt site
   | None -> (
-      match conv_seed_params ~is_gpu ~is_cpu ~limits opt with
+      let r = conv_seed_params ~is_gpu ~is_cpu ~limits opt in
+      (if w503 then
+         match detect_conv opt.LL.llc with
+         | None -> ()
+         | Some site ->
+             let offset_free = List.for_all site.c_axes ~f:(fun cx -> cx.cx_offset = 0) in
+             Stdlib.Printf.eprintf
+               "W503 conv-site: d=%s zeroed=%b real_stmts=%d offset_free=%b is_gpu=%b seeds=%d \
+                gpu_seeds=%d\n%!"
+               (Ir.Tnode.debug_name site.c_d) site.c_zeroed
+               (List.length (conv_real_stmts site opt))
+               offset_free is_gpu
+               (match r with Some (s, _) -> List.length s | None -> 0)
+               (match r with
+               | Some (s, _) -> List.count s ~f:(fun p -> p.sk_gpu)
+               | None -> 0));
+      match r with
       | None -> []
       | Some (seeds, d) ->
           if (not (List.is_empty seeds)) && Sched.can_fuse_epilogue ~target:d opt then
