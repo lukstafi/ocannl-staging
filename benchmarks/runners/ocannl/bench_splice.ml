@@ -121,7 +121,7 @@ type row = {
   treatment_saved : SC.saved_schedule option;
       (** The treatment's schedule for the segment at the same position, when the treatment has one.
       *)
-  targeted : bool;
+  targeted : bool;  (** Selected by a target, in an entry that is spliced. *)
   group : int;  (** How many segments of this entry (control side) share this segment's digest. *)
 }
 
@@ -130,14 +130,20 @@ type pair = {
   control : SC.entry;
   treatment : SC.entry;
   rows : row list option;  (** [None] unless the control's entry is fissioned. *)
-  targeted : bool;
+  ships : bool;
+      (** Whether the control's placement decisions ship this routine: its source digest is one of
+          their [outcome_digest]s, the lowering the decision replays to. With no decision in the
+          control cache every entry counts as shipping. *)
+  splice : [ `Untargeted | `Spliced | `Left of string ];
+      (** [`Left reason]: a target selects segments of it that cannot be spliced (the reason), and
+          since the routine does not ship it is left as the control's rather than refused. *)
 }
 
 type plan = {
   control_dir : string;
   treatment_dir : string;
   adopt_version : int option;
-  targets : (target * int) list;  (** Each target with the number of segments it selects. *)
+  targets : (target * int) list;  (** Each target with the number of segments it splices. *)
   pairs : pair list;
   control_only : (string * SC.entry) list;
       (** Entries only the control has: copied into both arms unchanged. *)
@@ -272,12 +278,30 @@ let make_plan ?adopt_version ~control ~treatment ~targets () =
                         (kind_name ts.SC.seg_kind) ts.SC.seg_units ts.SC.seg_digest)))
             ~finish:(fun _ -> Ok ())
   in
+  (* The routines the control's placement decisions replay to. An entry outside them is replayed
+     only when the placement store is bypassed, so a target there that cannot be spliced -- the
+     other placement arm's winner cut differently, say -- is left as the control's and reported
+     rather than refused; in a shipping routine it is refused. *)
+  let shipped =
+    List.map cc.placements ~f:(fun (_, (p : SC.placement_entry)) -> p.SC.outcome_digest)
+  in
+  let ships (c : SC.entry) =
+    List.is_empty shipped || List.mem shipped c.SC.source_digest ~equal:String.equal
+  in
   let* pairs =
     Result.all
       (List.map raw_pairs ~f:(fun (key, c, t) ->
            let hits = pair_positions c t in
-           let targeted = not (List.is_empty hits) in
-           let* () = if targeted then check_aligned key c t else Ok () in
+           let ships = ships c in
+           let* splice =
+             if List.is_empty hits then Ok `Untargeted
+             else
+               match check_aligned key c t with
+               | Ok () -> Ok `Spliced
+               | Error e when not ships -> Ok (`Left e)
+               | Error e -> Error e
+           in
+           let spliced = Poly.equal splice `Spliced in
            let rows =
              Option.map c.SC.segments ~f:(fun cs ->
                  let tsegs = Option.value t.SC.segments ~default:[] in
@@ -288,38 +312,51 @@ let make_plan ?adopt_version ~control ~treatment ~targets () =
                        treatment_saved =
                          Option.map (List.nth tsegs i) ~f:(fun (ts : SC.saved_segment) ->
                              ts.SC.seg_saved);
-                       targeted = List.mem hits i ~equal:Int.equal;
+                       targeted = spliced && List.mem hits i ~equal:Int.equal;
                        group =
                          List.count cs ~f:(fun (s' : SC.saved_segment) ->
                              String.equal s'.SC.seg_digest s.SC.seg_digest);
                      }))
            in
-           Ok { key; control = c; treatment = t; rows; targeted }))
+           Ok { key; control = c; treatment = t; rows; ships; splice }))
   in
   let counts =
     List.map resolved ~f:(fun (tg, index_entry) ->
         ( tg,
           List.sum
             (module Int)
-            raw_pairs
-            ~f:(fun (_, c, t) -> List.length (positions ~index_entry tg c t)) ))
+            pairs
+            ~f:(fun p ->
+              if Poly.equal p.splice `Spliced then
+                List.length (positions ~index_entry tg p.control p.treatment)
+              else 0) ))
   in
   let* () =
     match List.find counts ~f:(fun (_, n) -> n = 0) with
     | Some (tg, _) ->
         Error
           (Printf.sprintf
-             "target %s selects no segment of any entry present in both caches: a splice of it \
-              would replay the control in both arms%s"
+             "target %s selects no segment that can be spliced, of any entry present in both \
+              caches: a splice of it would replay the control in both arms%s"
              (target_to_string tg)
              (match (cc.undecodable, tc.undecodable) with
              | [], [] -> ""
              | c, t ->
                  Printf.sprintf
-                   " (%d control and %d treatment entries did not decode at version %d: stale, or \
-                    an older version to adopt with BENCH_SPLICE_ADOPT_VERSION)"
-                   (List.length c) (List.length t) SC.entry_version))
+                   " (%d control and %d treatment entries did not decode at this build's entry \
+                    version: stale, or an older version to adopt with BENCH_SPLICE_ADOPT_VERSION)"
+                   (List.length c) (List.length t)))
     | None -> Ok ()
+  in
+  let* () =
+    if
+      List.is_empty targets
+      || List.exists pairs ~f:(fun p -> p.ships && Poly.equal p.splice `Spliced)
+    then Ok ()
+    else
+      Error
+        "the targets splice no routine the control's placement decisions ship: the treatment arm \
+         would replay the control wherever it is timed"
   in
   Ok
     {
@@ -343,7 +380,9 @@ let arm_entry plan arm key (c : SC.entry) =
   match arm with
   | Control -> c
   | Treatment -> (
-      match List.find plan.pairs ~f:(fun p -> String.equal p.key key && p.targeted) with
+      match
+        List.find plan.pairs ~f:(fun p -> String.equal p.key key && Poly.equal p.splice `Spliced)
+      with
       | None -> c
       | Some p ->
           let ts = Option.value_exn p.treatment.SC.segments in
@@ -379,7 +418,7 @@ let differing_targets plan =
     targeted, and when the cache refused a store (read back from {!SC.recording_cache_io}, since
     {!SC.store} absorbs refusals). Returns the number of entries written. *)
 let write_arm plan ~arm ~out =
-  if not (List.exists plan.pairs ~f:(fun p -> p.targeted)) then
+  if not (List.exists plan.pairs ~f:(fun p -> Poly.equal p.splice `Spliced)) then
     Error "nothing is targeted: both arms would replay the control"
   else if
     Stdlib.Sys.file_exists out
@@ -444,8 +483,20 @@ let describe plan =
              line " (control entries of version %d adopted as %d)" v SC.entry_version));
     ]
   in
+  let ship_note p =
+    if List.is_empty plan.placements then ""
+    else if p.ships then " [ships]"
+    else " [does not ship under the control's placement decisions]"
+  in
+  let left p =
+    match p.splice with
+    | `Left reason -> [ line "splice: NOT spliced: %s" reason ]
+    | `Untargeted | `Spliced -> []
+  in
   let pair_lines p =
-    let id = entry_id p.control in
+    let id = entry_id p.control ^ ship_note p in
+    left p
+    @
     match p.rows with
     | None ->
         [
@@ -591,6 +642,15 @@ let from_env ~tune =
         fail
           "a splice arm must replay, never search: pass --ocannl_autotune_search=false (a key its \
            cache lacks then ships the untuned default, and the run fails)";
+      if
+        List.exists plan.pairs ~f:(fun p ->
+            match p.splice with `Left _ -> true | `Untargeted | `Spliced -> false)
+        && not (Utils.get_global_flag ~arg_name:"tune_placement_store" ~default:true)
+      then
+        fail
+          "a routine the control's placement decisions do not ship was left unspliced, and with \
+           tune_placement_store=false the arms are compared afresh, so it could ship: keep the \
+           placement store on";
       let out = Stdlib.Filename.temp_dir "ocannl-splice-" "" in
       (* [temp_dir] created it; [write_arm] wants it absent or empty, which it is. *)
       Stdlib.at_exit (fun () -> remove_tree out);
