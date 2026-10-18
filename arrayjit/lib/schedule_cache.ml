@@ -979,6 +979,22 @@ let store ~dir ~key entry = store_sexp ~dir ~key (sexp_of_entry entry)
 let lookup ~dir ~key =
   lookup_sexp ~dir ~key ~of_sexp:entry_of_sexp ~current:(fun e -> e.version = entry_version)
 
+(* Backport of gh-ocannl-1277's tooling onto the gh-ocannl-1165 treatment, for its acceptance
+   measurement only: this era names an entry file by its sanitized key. *)
+let lookup_adopting ~adopt_version ~dir ~key =
+  lookup_sexp ~dir ~key ~of_sexp:entry_of_sexp ~current:(fun e ->
+      e.version = entry_version || e.version = adopt_version)
+  |> Option.map ~f:(fun e -> { e with version = entry_version })
+
+let entry_keys ~dir =
+  match Stdlib.Sys.readdir dir with
+  | exception Stdlib.Sys_error _ -> []
+  | names ->
+      Array.to_list names
+      |> List.filter_map ~f:(fun name ->
+          if String.is_prefix name ~prefix:"." then None else String.chop_suffix name ~suffix:".sexp")
+      |> List.sort ~compare:String.compare
+
 (** {2 Abandoned searches} *)
 
 (* This is timed evidence, not a crowned schedule. Keep it beside the winner, under the very same

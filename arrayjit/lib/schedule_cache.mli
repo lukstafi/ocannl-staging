@@ -421,6 +421,12 @@ val lookup : dir:string -> key:string option -> entry option
     race. A binary predating this protocol does not participate and must not share a live directory
     during an upgrade. *)
 
+val lookup_adopting : adopt_version:int -> dir:string -> key:string option -> entry option
+(** Backport (gh-ocannl-1277 acceptance only): {!lookup}, also accepting [adopt_version], re-stamped. *)
+
+val entry_keys : dir:string -> string list
+(** Backport (gh-ocannl-1277 acceptance only): the keys of the entry files in [dir]. *)
+
 (** {2 The cache-I/O record}
 
     gh-ocannl-1040. The refusals {!store} and {!lookup} absorb are invisible by design, which is

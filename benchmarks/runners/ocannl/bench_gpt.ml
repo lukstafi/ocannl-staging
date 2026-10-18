@@ -20,8 +20,9 @@ module St = Safetensors
 module H = Bench_harness
 
 let () =
-  let fixture = Stdlib.Sys.getenv "BENCH_FIXTURE" in
   let tune = H.env_flag "BENCH_TUNE" in
+  let splice_dir = Bench_splice.from_env ~tune in
+  let fixture = Stdlib.Sys.getenv "BENCH_FIXTURE" in
   H.install_timing_trace ();
   let materialize = H.env_flag "BENCH_MATERIALIZE" in
   let debug = H.env_flag "BENCH_DEBUG" in
@@ -57,9 +58,13 @@ let () =
        (gh-ocannl-644): they run whenever [tune_inline_flips] is configured, whether or not a
        callback is wired, and a flip search loads this process like an arm search. *)
     Train.tune_placements ~report:(H.collect_arm arms) ~flip_report:(H.collect_search arms)
-      ~on_ship:(H.collect_ship arms) ~rounds:0 ~timing_ctx:scratch ctx batch_loss comp bindings
+      ~on_ship:(H.collect_ship arms) ~rounds:0 ?cache_dir:splice_dir ~timing_ctx:scratch ctx
+      batch_loss comp bindings
   in
   let ctx, routines = H.compile_step ~tune ~tuned ctx bindings step_shape in
+  if Option.is_some splice_dir then
+    Bench_splice.check_replayed ~searches:arms.H.searches ~replays:arms.H.replays
+      ~no_searches:arms.H.no_searches;
   (* What the timed artifact emitted, off the routines themselves (gh-ocannl-626): a flip refinement
      or a timing_ctx replay fallback ships something no arm report describes. *)
   H.collect_shipped arms routines;
