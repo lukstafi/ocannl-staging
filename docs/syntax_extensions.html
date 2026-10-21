@@ -1627,6 +1627,16 @@ each model instance, make the construction point explicit with
 <code>let%op mk_f () x = ...</code> and apply <code>mk_f ()</code> once
 per instance. Initializers may use labeled arguments, for example
 <code>kaiming ~scale_sq:2.0 normal1 ()</code>.</li>
+<li><strong>Dimension captures follow the same rule.</strong> Their
+bindings sit where inline declarations do, so in
+<code>let%op f x = x ++ &quot;... | h, w, ..c.. =&gt; ... | ..c..&quot; [&quot;h&quot;; &quot;w&quot;]</code>
+the captured <code>h</code> and <code>w</code> are bound once, when
+<code>f</code> is defined, and every application of <code>f</code>
+unifies with the same two dimensions: a second input of a different
+spatial size fails shape inference. A stateless function that captures
+puts the extension point inside its body instead,
+<code>let f x = let%op r = ... in r</code>, as
+<code>Nn_blocks.global_avg_pool2d</code> does (gh-ocannl-880).</li>
 </ul>
 <h2 id="further-features-of-the-syntax-extension-cd">Further features of
 the syntax extension %cd</h2>
