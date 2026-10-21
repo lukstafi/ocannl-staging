@@ -713,7 +713,7 @@ let () =
      not restated. *)
   let hb = 2 and eb = 16 in
   let wb_f = Ll_test.cycle ~dims:[| jj; hb; eb |] ~modulus:5 ~offset:(-5.) ~stride:0.5 in
-  let attb_f = Ll_test.cycle ~dims:[| bb; ss; hb; eb |] ~modulus:3 ~offset:1. ~stride:0.125 in
+  let attb_f = Ll_test.cycle ~dims:[| bb; ss; hb; eb |] ~modulus:3 ~offset:(-1.) ~stride:0.125 in
   (let products =
      List.concat_map (List.range 0 jj) ~f:(fun j ->
          List.concat_map

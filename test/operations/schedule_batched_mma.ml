@@ -364,7 +364,7 @@ let () =
   in
   let wb =
     bf16_init ~l:"wb" ~o:[ kk2; jj2 ]
-      ~f:(Ll_test.cycle ~dims:[| kk2; jj2 |] ~modulus:5 ~offset:0. ~stride:0.5)
+      ~f:(Ll_test.cycle ~dims:[| kk2; jj2 |] ~modulus:5 ~offset:(-2.) ~stride:0.5)
   in
   bf16_leg ~tag:"batched_lb" ~build:(fun () ->
       let%op t = xb +* "bsk;kj=>bsj" wb in
@@ -378,7 +378,7 @@ let () =
   in
   let vb =
     bf16_init ~l:"vb" ~o:[ bt; kk2; hh; jj2 ]
-      ~f:(Ll_test.cycle ~dims:[| bt; kk2; hh; jj2 |] ~modulus:5 ~offset:0. ~stride:0.5)
+      ~f:(Ll_test.cycle ~dims:[| bt; kk2; hh; jj2 |] ~modulus:5 ~offset:(-2.) ~stride:0.5)
   in
   bf16_leg ~tag:"batched_ib" ~build:(fun () ->
       let%op t = attb +* "bihk;bkhj=>bihj" vb in

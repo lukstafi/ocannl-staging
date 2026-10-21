@@ -207,12 +207,12 @@ let indep ~tag ~cols =
   Tensor.unsafe_reinitialize ();
   let a =
     NTDSL.init ~l:(tag ^ "_a") ~prec:Ir.Ops.half ~b:[] ~i:[] ~o:[ n; kk ]
-      ~f:(Ll_test.weighted ~weights:[| 3; 1 |] ~modulus:7 ~offset:0. ~stride:1.)
+      ~f:(Ll_test.weighted ~weights:[| 3; 1 |] ~modulus:7 ~offset:(-3.) ~stride:1.)
       ()
   in
   let b =
     NTDSL.init ~l:(tag ^ "_b") ~prec:Ir.Ops.half ~b:[] ~i:[] ~o:[ kk; n ]
-      ~f:(Ll_test.weighted ~weights:[| 1; 2 |] ~modulus:5 ~offset:0. ~stride:1.)
+      ~f:(Ll_test.weighted ~weights:[| 1; 2 |] ~modulus:5 ~offset:(-2.) ~stride:1.)
       ()
   in
   let%op z = a +* "ik;kj=>ij" b in

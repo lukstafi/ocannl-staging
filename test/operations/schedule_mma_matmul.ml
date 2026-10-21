@@ -552,7 +552,7 @@ let () =
   in
   let mbh =
     NTDSL.init ~l:"mbh" ~prec:Ir.Ops.half ~i:[ n ] ~o:[ n ]
-      ~f:(Ll_test.cycle ~dims:[| n; n |] ~modulus:7 ~offset:0. ~stride:0.25)
+      ~f:(Ll_test.cycle ~dims:[| n; n |] ~modulus:7 ~offset:(-3.) ~stride:0.25)
       ()
   in
   let%op mch0 = mah * mbh in
@@ -640,7 +640,7 @@ let () =
      claim is what tells the two apart. CUDA is skipped: its f16 -> f32 arm is the staged legs'
      subject below, and whether wmma returns this exact sum has not been run. --- *)
   let h32a = Ll_test.weighted ~weights:[| 3; 1 |] ~modulus:8 ~offset:1024. ~stride:0x1p-10 in
-  let h32b = Ll_test.weighted ~weights:[| 1; 2 |] ~modulus:7 ~offset:0. ~stride:1. in
+  let h32b = Ll_test.weighted ~weights:[| 1; 2 |] ~modulus:7 ~offset:(-3.) ~stride:1. in
   let exact_h32 =
     Array.init (n * n) ~f:(fun t ->
         let i = t / n and j = t % n in
@@ -898,7 +898,7 @@ let () =
   in
   let mbb =
     NTDSL.init ~l:"mbb" ~prec:Ir.Ops.bfloat16 ~i:[ n ] ~o:[ n ]
-      ~f:(Ll_test.cycle ~dims:[| n; n |] ~modulus:5 ~offset:0. ~stride:0.5)
+      ~f:(Ll_test.cycle ~dims:[| n; n |] ~modulus:5 ~offset:(-2.) ~stride:0.5)
       ()
   in
   let mtab =
@@ -908,7 +908,7 @@ let () =
   in
   let mtbb =
     NTDSL.init ~l:"mtbb" ~prec:Ir.Ops.bfloat16 ~o:[ n; n ]
-      ~f:(Ll_test.cycle ~dims:[| n; n |] ~modulus:5 ~offset:0. ~stride:0.5)
+      ~f:(Ll_test.cycle ~dims:[| n; n |] ~modulus:5 ~offset:(-2.) ~stride:0.5)
       ()
   in
   let bf16_leg ?bm ~tag ~acc_prec ~build ~check () =
