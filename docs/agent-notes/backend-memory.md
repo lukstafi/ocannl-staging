@@ -129,7 +129,10 @@ files.
   arm (28.2 GB against 12 / 8 GiB) paid its first candidate's codegen first. Total, not free: the
   score covers the routine's whole in-context node set (the nodes the context already holds sit
   on the device too), while a free reading moves with everything else on the device; a footprint
-  between free and total is still the link probe's. On a unified-memory APU the total is what the
+  between free and total is still the link probe's. Off under `buffer_aliasing`: the serial form's
+  arena is no lower bound there (GPU live spans are per kernel, so one kernel overlaps them all,
+  and fission can let them share), while without the planner every node owns its bytes and
+  scheduling only adds nodes. On a unified-memory APU the total is what the
   driver reports, which is the allocation ceiling only if `hipMalloc` honors it. Test it on any
   backend through the `Autotune.device_memory_reading` seam (`autotune_device_memory` scenario 6).
 - **`Context.t.context_id` names a release unit, not a value** (gh-ocannl-1203). The merge-buffer

@@ -355,6 +355,9 @@ let () =
      on a 12 GiB card (28.2 GB) is the case: it paid a codegen before a link refused it. A device
      exactly the larger footprint's size refuses neither arm: the bound is strict, and a footprint
      that fits is never refused by it. --- *)
+  (* The check is off under [buffer_aliasing] (the last claims below), so it is pinned off here
+     whatever the ambient configuration says. *)
+  Unix.putenv "OCANNL_BUFFER_ALIASING" "false";
   let scored ?(decide = Fn.id) () =
     let c = decide (Context.auto ()) in
     let lowered = Context.lowered_for_decisions c comp Ir.Indexing.Empty in
@@ -402,4 +405,16 @@ let () =
   p "on a device exactly arm B's footprint, both arms reported" (List.length reports = 2);
   p_all "each of them searched" reports ~f:searched;
   p "and one of them shipped" (match shipped with [ ("A" | "B") ] -> true | _ -> false);
-  Result.iter result ~f:(check_values "that arm computes the right values")
+  Result.iter result ~f:(check_values "that arm computes the right values");
+  (* Under [buffer_aliasing] the serial form's layout bounds no scheduled candidate's from below (a
+     GPU's live spans are per kernel, and fission can let the serial form's overlapping spans share
+     bytes), so the check is off: on the device only arm A's score fits, arm B searches. The gate is
+     read afresh at each compile, so it is flipped through the environment and back. *)
+  Unix.putenv "OCANNL_BUFFER_ALIASING" "true";
+  let _, reports, _ =
+    Exn.protect
+      ~f:(fun () -> run6 ~total:((score_a + score_b) / 2))
+      ~finally:(fun () -> Unix.putenv "OCANNL_BUFFER_ALIASING" "false")
+  in
+  p "under buffer_aliasing, both arms reported" (List.length reports = 2);
+  p_none "and neither was refused before codegen" reports ~f:refused_before_codegen

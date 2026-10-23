@@ -3249,7 +3249,9 @@ val tune :
     device's {e total} is refused there, before codegen, device compile and link, the same way —
     {!Pre_search_failure} at [Transform] with a [Device_memory] decline of the baseline whose
     [requested] is the score and [limit] the total (gh-ocannl-1487). A footprint between the free
-    and the total bytes is left to the link-time refusal above.
+    and the total bytes is left to the link-time refusal above, and so is every footprint under
+    config [buffer_aliasing], where the serial form's layout bounds no scheduled candidate's from
+    below (live spans are per kernel on a GPU, and fission can let them share bytes).
 
     The bound is on working pools, and that qualifier is load-bearing: {!Context.release} cannot
     free per-device constants, and a hoisted [Stage] candidate mints a fresh packed constant per

@@ -51,7 +51,9 @@ val score_footprint :
     the default schedule, from inside that transform: [lowered] is then the routine exactly as the
     transform received it, zeros already sunk. With [buffer_aliasing] off the score is the bump
     packing the allocator then performs too, so it still answers "does this layout fit a device",
-    which is how [Autotune.tune] reads its serial base form before codegen. *)
+    which is how [Autotune.tune] reads its serial base form before codegen -- only then: with the
+    planner on, a one-kernel GPU form overlaps every live span, so its arena bounds no fissioned
+    candidate's from below. *)
 
 val with_segments_census : (unit -> 'a) -> 'a * Ir.Low_level.optimized list
 (** gh-ocannl-1006: runs [f] and returns, beside its result, the kernel segments the backend compile

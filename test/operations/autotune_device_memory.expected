@@ -35,3 +35,5 @@ on a device exactly arm B's footprint, both arms reported: true
 each of them searched: true
 and one of them shipped: true
 that arm computes the right values: true
+under buffer_aliasing, both arms reported: true
+and neither was refused before codegen: true

@@ -6719,14 +6719,21 @@ let tune_in_stream_scope ~defer ~substituted ?name ?search ?beam_width ?rounds ?
     let base_undispatched = ref false in
     (* gh-ocannl-1487: the device's total bytes, where the backend can read them. A read that fails
        leaves the footprint check below off rather than failing the search: the allocator's own
-       refusal (gh-ocannl-1326) still answers at link. *)
+       refusal (gh-ocannl-1326) still answers at link. So does config [buffer_aliasing]: with the
+       liveness planner on, the serial form's layout is no lower bound on a scheduled candidate's --
+       a GPU's live spans are per kernel, so the one-kernel serial form overlaps every span, and
+       fission can separate them and let their bytes share (test/operations/buffer_aliasing's
+       materialized reduction chain) -- and a refusal on it could refuse a search whose candidates
+       fit. Without the planner every node owns its bytes, and scheduling only adds nodes. *)
     let device_total =
-      match Seam.get device_memory_reading search_ctx with
-      | reading -> Option.map reading ~f:snd
-      | exception exn when not (process_fatal_exn exn) ->
-          logf "the device's memory could not be read, so the base footprint is not checked: %s"
-            (Exn.to_string exn);
-          None
+      if Utils.get_global_flag ~default:false ~arg_name:"buffer_aliasing" then None
+      else
+        match Seam.get device_memory_reading search_ctx with
+        | reading -> Option.map reading ~f:snd
+        | exception exn when not (process_fatal_exn exn) ->
+            logf "the device's memory could not be read, so the base footprint is not checked: %s"
+              (Exn.to_string exn);
+            None
     in
     (* gh-ocannl-1487: a base lowering whose scored footprint exceeds the device's TOTAL memory
        cannot fit however the device is shared, and neither can any candidate: scheduling only adds
