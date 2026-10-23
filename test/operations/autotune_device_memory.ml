@@ -349,7 +349,8 @@ let () =
   (* --- 6. A placement arm that cannot fit the device at all (gh-ocannl-1487): its search is
      refused before its base compile's codegen, where scenario 3 is refused at a link. The device's
      total is set through [Autotune.device_memory_reading] between the two arms' scored base
-     footprints -- the serial form as the base compile's allocator would lay it out -- so arm A
+     footprints -- the serial form's nodes already settled on the device, as the base compile's
+     allocator would lay them out; materialize-all settles [mc] there, arm A leaves it open -- so arm A
      searches and ships, and arm B's search reports a typed [Pre_search_failure] at [Transform] with
      a device-memory decline and no backend compile. The b256 [gpt2_mini_train] materialize-all arm
      on a 12 GiB card (28.2 GB) is the case: it paid a codegen before a link refused it. A device
@@ -361,8 +362,9 @@ let () =
   let scored ?(decide = Fn.id) () =
     let c = decide (Context.auto ()) in
     let lowered = Context.lowered_for_decisions c comp Ir.Indexing.Empty in
-    (Context.Backends.score_footprint ~segments:[ lowered ] ~backend_name:(Context.backend_name c)
-       ~limits:(Context.hardware_limits c) ~static_indices:[] lowered)
+    (Context.Backends.score_footprint ~segments:[ lowered ] ~settled_only:true
+       ~backend_name:(Context.backend_name c) ~limits:(Context.hardware_limits c) ~static_indices:[]
+       lowered)
       .Ir.Low_level.fp_total
   in
   let score_a = scored () and score_b = scored ~decide:materialize_all () in

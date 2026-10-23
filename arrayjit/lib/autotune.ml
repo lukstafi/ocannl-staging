@@ -6724,7 +6724,8 @@ let tune_in_stream_scope ~defer ~substituted ?name ?search ?beam_width ?rounds ?
        a GPU's live spans are per kernel, so the one-kernel serial form overlaps every span, and
        fission can separate them and let their bytes share (test/operations/buffer_aliasing's
        materialized reduction chain) -- and a refusal on it could refuse a search whose candidates
-       fit. Without the planner every node owns its bytes, and scheduling only adds nodes. *)
+       fit. Without the planner every node owns its bytes, so the settled nodes' bytes (below) are
+       on the device whatever the schedule. *)
     let device_total =
       if Utils.get_global_flag ~default:false ~arg_name:"buffer_aliasing" then None
       else
@@ -6735,15 +6736,20 @@ let tune_in_stream_scope ~defer ~substituted ?name ?search ?beam_width ?rounds ?
               (Exn.to_string exn);
             None
     in
-    (* gh-ocannl-1487: a base lowering whose scored footprint exceeds the device's TOTAL memory
-       cannot fit however the device is shared, and neither can any candidate: scheduling only adds
-       device buffers to the base lowering (the same approximation the gh-ocannl-1326 refusal rests
-       on), and a cache replay or the untuned fallback needs about as much. So it is refused here,
-       inside the transform -- after the lowering, which the score needs and the search would reuse,
-       and before codegen, device compile and link, the minutes the gh-ocannl-1326 link-time refusal
-       spent first (b256 [gpt2_mini_train]'s materialize-all arm, 28.2 GB on a 12 GiB card). The
-       score is the allocator's own layout of this serial form ({!Backends.score_footprint} with its
-       segments), so it is what the base compile would have asked for. Raised as the allocator's
+    (* gh-ocannl-1487: a base lowering whose SETTLED device footprint exceeds the device's TOTAL
+       memory cannot fit however the device is shared, and neither can any candidate, cache replay
+       or untuned fallback. Settled: only the nodes the lowering has already placed [On_device] are
+       counted ([~settled_only]). Those placements are final within the lineage, so every schedule
+       keeps their bytes on the device; a node still open is one a schedule may keep off it --
+       [Fuse_epilogue]'s shared variant moves an unsettled accumulator to workgroup-shared storage
+       (PR review round 1) -- and counting it would refuse a search whose fused candidate fits. So
+       this is a lower bound, where the gh-ocannl-1326 link probe's "about as much" is an
+       approximation; materialize-all, the arm that motivated this, settles nearly every node. It is
+       refused here, inside the transform -- after the lowering, which the score needs and the
+       search would reuse, and before codegen, device compile and link, the minutes the
+       gh-ocannl-1326 link-time refusal spent first (b256 [gpt2_mini_train]'s materialize-all arm,
+       28.2 GB on a 12 GiB card). The score is the allocator's own layout of this serial form's
+       settled nodes ({!Backends.score_footprint} with its segments). Raised as the allocator's
        cause, a [Device_memory] [Resource_exceeded] decline of the baseline, it takes the
        gh-ocannl-1326 refusal path below unchanged: a typed [Pre_search_failure], which is how
        {!Train.tune_placements}' other arm still ships.
@@ -6756,14 +6762,16 @@ let tune_in_stream_scope ~defer ~substituted ?name ?search ?beam_width ?rounds ?
     let refuse_if_over_device_total opt =
       Option.iter device_total ~f:(fun total ->
           match
-            Context.Backends.score_footprint ~segments:[ opt ] ~backend_name:backend ~limits
-              ~static_indices opt
+            Context.Backends.score_footprint ~segments:[ opt ] ~settled_only:true
+              ~backend_name:backend ~limits ~static_indices opt
           with
           | exception exn when not (process_fatal_exn exn) ->
               logf "the base footprint could not be scored, so it is not checked: %s"
                 (Exn.to_string exn)
           | fp ->
-              logf "base footprint: %d bytes (working %d, constants %d), device total %d bytes"
+              logf
+                "base footprint, settled nodes: %d bytes (working %d, constants %d), device total \
+                 %d bytes"
                 fp.LL.fp_total fp.LL.fp_working fp.LL.fp_constants total;
               if fp.LL.fp_total > total then
                 raise
@@ -6776,9 +6784,10 @@ let tune_in_stream_scope ~defer ~substituted ?name ?search ?beam_width ?rounds ?
                            limit = Some total;
                            detail =
                              Printf.sprintf
-                               "%s: the base lowering's scored footprint of %d bytes (working %d, \
-                                constants %d) exceeds the device's total memory of %d bytes, so no \
-                                candidate can fit; refused before codegen (gh-ocannl-1487)"
+                               "%s: the base lowering's settled device footprint of %d bytes \
+                                (working %d, constants %d) exceeds the device's total memory of %d \
+                                bytes, so no candidate can fit; refused before codegen \
+                                (gh-ocannl-1487)"
                                backend fp.LL.fp_total fp.LL.fp_working fp.LL.fp_constants total;
                          } )))
     in

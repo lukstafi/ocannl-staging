@@ -322,10 +322,23 @@ let arena_items ~spans group =
 
    gh-ocannl-1487: [segments] scores a compile whose [lowered_transform] returned them, from inside
    that transform, where [lowered] is the routine as the transform received it (zeros already sunk)
-   -- [Autotune.tune]'s base compile scores its own serial form this way, before codegen. *)
-let score_footprint ?segments ~(backend_name : string) ~(limits : hardware_limits)
-    ~(static_indices : Indexing.static_symbol list) (lowered : Low_level.optimized) :
-    Low_level.footprint =
+   -- [Autotune.tune]'s base compile scores its own serial form this way, before codegen.
+   [settled_only] counts only the nodes [lowered]'s placements had already settled [On_device] when
+   scoring began: the snapshot is taken first, since the scoring itself forces open placements. *)
+let score_footprint ?segments ?(settled_only = false) ~(backend_name : string)
+    ~(limits : hardware_limits) ~(static_indices : Indexing.static_symbol list)
+    (lowered : Low_level.optimized) : Low_level.footprint =
+  let skip =
+    if not settled_only then None
+    else
+      let plc = lowered.Low_level.optimize_ctx.placements in
+      let settled = Hash_set.create (module Tn) in
+      Hashtbl.iter_keys lowered.Low_level.traced_store ~f:(fun tn ->
+          match Tn.Placements.get plc tn with
+          | Some (Tn.On_device, _) -> Hash_set.add settled tn
+          | _ -> ());
+      Some (fun tn -> not (Hash_set.mem settled tn))
+  in
   let lowered, segments =
     match segments with
     | Some segments -> (lowered, segments)
@@ -340,7 +353,7 @@ let score_footprint ?segments ~(backend_name : string) ~(limits : hardware_limit
   let store = Hashtbl.copy lowered.Low_level.traced_store in
   fold_segment_stores ~into:store segments;
   let plc = lowered.Low_level.optimize_ctx.placements in
-  let working, constants = partition_layout_groups ~plc store in
+  let working, constants = partition_layout_groups ~plc ?skip store in
   let cap = pool_cap () in
   let bump ~what group =
     let _, segment_sizes =

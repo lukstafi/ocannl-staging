@@ -28,6 +28,7 @@ val plan_arena_offsets :
 
 val score_footprint :
   ?segments:Ir.Low_level.optimized list ->
+  ?settled_only:bool ->
   backend_name:string ->
   limits:Ir.Backend_intf.hardware_limits ->
   static_indices:Ir.Indexing.static_symbol list ->
@@ -53,7 +54,13 @@ val score_footprint :
     packing the allocator then performs too, so it still answers "does this layout fit a device",
     which is how [Autotune.tune] reads its serial base form before codegen -- only then: with the
     planner on, a one-kernel GPU form overlaps every live span, so its arena bounds no fissioned
-    candidate's from below. *)
+    candidate's from below.
+
+    [settled_only] (default [false]) counts only the nodes whose placement [lowered] had already
+    settled [On_device] when scoring began; the open ones, which the scoring itself would settle,
+    are left out. Settled placements are final within a lineage, so every schedule of [lowered]
+    keeps those bytes on the device, while an open node is one a schedule may still keep off it
+    ([Fuse_epilogue]'s workgroup-shared accumulator): what bounds every candidate from below. *)
 
 val with_segments_census : (unit -> 'a) -> 'a * Ir.Low_level.optimized list
 (** gh-ocannl-1006: runs [f] and returns, beside its result, the kernel segments the backend compile

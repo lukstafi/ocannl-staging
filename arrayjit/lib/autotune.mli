@@ -3245,9 +3245,11 @@ val tune :
 
     Where the device's total memory can be read ({!Context.get_free_and_total_memory}: CUDA and HIP)
     the base lowering's footprint is scored first, inside the base compile's transform, as the
-    allocator would lay out the serial form ({!Context.Backends.score_footprint}); one over the
-    device's {e total} is refused there, before codegen, device compile and link, the same way —
-    {!Pre_search_failure} at [Transform] with a [Device_memory] decline of the baseline whose
+    allocator would lay out the serial form's nodes already settled [On_device]
+    ({!Context.Backends.score_footprint} [~settled_only]: settled placements are final, so every
+    candidate keeps those bytes, while an open node is one a schedule may keep off the device); one
+    over the device's {e total} is refused there, before codegen, device compile and link, the same
+    way — {!Pre_search_failure} at [Transform] with a [Device_memory] decline of the baseline whose
     [requested] is the score and [limit] the total (gh-ocannl-1487). A footprint between the free
     and the total bytes is left to the link-time refusal above, and so is every footprint under
     config [buffer_aliasing], where the serial form's layout bounds no scheduled candidate's from
