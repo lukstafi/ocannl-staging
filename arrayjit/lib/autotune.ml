@@ -6093,6 +6093,13 @@ let untuned_compile ?name ctx comp bindings =
    [Train.tune_placements] exists for. *)
 let on_candidate_attempt : (string -> unit) Seam.t = Seam.make (fun _label -> ())
 
+(* gh-ocannl-1487: the device's [(free, total)] bytes as a search reads them before its base
+   compile. A test of the footprint refusal needs a device of a chosen size on any backend,
+   including those with no driver reading. Not a production seam: default the driver's own reading,
+   and no config key selects it. *)
+let device_memory_reading : (Context.t -> (int * int) option) Seam.t =
+  Seam.make Context.get_free_and_total_memory
+
 (* gh-ocannl-1409: the elapsed seconds a budget check reads, given the call's real elapsed seconds.
    A wall clock cannot place a cut at a chosen candidate, and a test of what a cut search attempts,
    crowns and stores needs exactly that: it substitutes a virtual clock (the attempts so far, say).
@@ -6710,6 +6717,64 @@ let tune_in_stream_scope ~defer ~substituted ?name ?search ?beam_width ?rounds ?
        plan's decisions key on placement-sensitive digests. GPU only: the plan is CUDA/HIP's. *)
     let base_pristine = ref None in
     let base_undispatched = ref false in
+    (* gh-ocannl-1487: the device's total bytes, where the backend can read them. A read that fails
+       leaves the footprint check below off rather than failing the search: the allocator's own
+       refusal (gh-ocannl-1326) still answers at link. *)
+    let device_total =
+      match Seam.get device_memory_reading search_ctx with
+      | reading -> Option.map reading ~f:snd
+      | exception exn when not (process_fatal_exn exn) ->
+          logf "the device's memory could not be read, so the base footprint is not checked: %s"
+            (Exn.to_string exn);
+          None
+    in
+    (* gh-ocannl-1487: a base lowering whose scored footprint exceeds the device's TOTAL memory
+       cannot fit however the device is shared, and neither can any candidate: scheduling only adds
+       device buffers to the base lowering (the same approximation the gh-ocannl-1326 refusal rests
+       on), and a cache replay or the untuned fallback needs about as much. So it is refused here,
+       inside the transform -- after the lowering, which the score needs and the search would reuse,
+       and before codegen, device compile and link, the minutes the gh-ocannl-1326 link-time refusal
+       spent first (b256 [gpt2_mini_train]'s materialize-all arm, 28.2 GB on a 12 GiB card). The
+       score is the allocator's own layout of this serial form ({!Backends.score_footprint} with its
+       segments), so it is what the base compile would have asked for. Raised as the allocator's
+       cause, a [Device_memory] [Resource_exceeded] decline of the baseline, it takes the
+       gh-ocannl-1326 refusal path below unchanged: a typed [Pre_search_failure], which is how
+       {!Train.tune_placements}' other arm still ships.
+
+       Total, not free: a free-bytes reading moves with everything else on the device, and a
+       footprint between the two is left to the link-time refusal, which reads the driver at the
+       allocation itself. Scored on a copy ({!scratch_of}): the score forces undecided placements,
+       which the base lowering every candidate derives from must not see decided early. A score that
+       fails leaves the check off, for the same reason as an unreadable device. *)
+    let refuse_if_over_device_total opt =
+      Option.iter device_total ~f:(fun total ->
+          match
+            Context.Backends.score_footprint ~segments:[ opt ] ~backend_name:backend ~limits
+              ~static_indices opt
+          with
+          | exception exn when not (process_fatal_exn exn) ->
+              logf "the base footprint could not be scored, so it is not checked: %s"
+                (Exn.to_string exn)
+          | fp ->
+              logf "base footprint: %d bytes (working %d, constants %d), device total %d bytes"
+                fp.LL.fp_total fp.LL.fp_working fp.LL.fp_constants total;
+              if fp.LL.fp_total > total then
+                raise
+                  (Outcome.Cause_at
+                     ( Outcome.Transform,
+                       Outcome.Resource_exceeded
+                         {
+                           resource = Outcome.Device_memory;
+                           requested = fp.LL.fp_total;
+                           limit = Some total;
+                           detail =
+                             Printf.sprintf
+                               "%s: the base lowering's scored footprint of %d bytes (working %d, \
+                                constants %d) exceeds the device's total memory of %d bytes, so no \
+                                candidate can fit; refused before codegen (gh-ocannl-1487)"
+                               backend fp.LL.fp_total fp.LL.fp_working fp.LL.fp_constants total;
+                         } )))
+    in
     progress_stage "base_compile";
     let base_outcome =
       costed ~stage:"base_compile" ~attempt:"baseline" ~verdict_of:outcome_verdict @@ fun () ->
@@ -6721,7 +6786,7 @@ let tune_in_stream_scope ~defer ~substituted ?name ?search ?beam_width ?rounds ?
              break the exactly-once contract for direct [tune] callers. *)
           Seam.get on_candidate_attempt "baseline";
           base_capture := Some (opt, SC.canonicalize ~static_indices opt);
-
+          refuse_if_over_device_total (scratch_of opt);
           if is_gpu then base_pristine := Some (scratch_of opt);
           (* gh-ocannl-1340: an undispatchable baseline is refused here, before codegen, like any
              candidate ([compile_candidate_gated]): it is never timed, so its codegen, device

@@ -344,4 +344,62 @@ let () =
     (match (measured_winner, shipped) with Some w, [ s ] -> not (String.equal w s) | _ -> false);
   Result.iter result ~f:(check_values "the arm shipped instead computes the right values");
   let _, reports, _, _ = run5 ~arm:false in
-  p "nothing was recorded: the next call compares both arms again" (List.length reports = 2)
+  p "nothing was recorded: the next call compares both arms again" (List.length reports = 2);
+
+  (* --- 6. A placement arm that cannot fit the device at all (gh-ocannl-1487): its search is
+     refused before its base compile's codegen, where scenario 3 is refused at a link. The device's
+     total is set through [Autotune.device_memory_reading] between the two arms' scored base
+     footprints -- the serial form as the base compile's allocator would lay it out -- so arm A
+     searches and ships, and arm B's search reports a typed [Pre_search_failure] at [Transform] with
+     a device-memory decline and no backend compile. The b256 [gpt2_mini_train] materialize-all arm
+     on a 12 GiB card (28.2 GB) is the case: it paid a codegen before a link refused it. A device
+     exactly the larger footprint's size refuses neither arm: the bound is strict, and a footprint
+     that fits is never refused by it. --- *)
+  let scored ?(decide = Fn.id) () =
+    let c = decide (Context.auto ()) in
+    let lowered = Context.lowered_for_decisions c comp Ir.Indexing.Empty in
+    (Context.Backends.score_footprint ~segments:[ lowered ] ~backend_name:(Context.backend_name c)
+       ~limits:(Context.hardware_limits c) ~static_indices:[] lowered)
+      .Ir.Low_level.fp_total
+  in
+  let score_a = scored () and score_b = scored ~decide:materialize_all () in
+  Stdio.eprintf "scored base footprints (not part of the golden): arm A %d B, arm B %d B\n%!"
+    score_a score_b;
+  p "arm B's scored base footprint exceeds arm A's" (score_b > score_a);
+  let cache_dir6 = "autotune_cache_device_memory_total" in
+  let run6 ~total =
+    clean_cache cache_dir6;
+    let reports = ref [] and shipped = ref [] in
+    let result =
+      Autotune.Seam.with_value Autotune.device_memory_reading
+        (fun _ -> Some (total, total))
+        (fun () ->
+          Result.try_with (fun () ->
+              Train.tune_placements ~beam_width:2 ~rounds:0 ~repeats:1 ~cache_dir:cache_dir6
+                ~report:(fun r -> reports := r :: !reports)
+                ~on_ship:(fun s -> shipped := s.Train.ship_arm :: !shipped)
+                (Context.auto ()) t2 comp Ir.Indexing.Empty))
+    in
+    (result, List.rev !reports, !shipped)
+  in
+  let refused_before_codegen (r : Autotune.report) =
+    (match r.Autotune.outcome with
+      | Autotune.Pre_search_failure { phase; _ } -> SO.equal_phase phase SO.Transform
+      | _ -> false)
+    && memory_declines r = 1
+    && r.Autotune.compiles = 0
+  in
+  let result, reports, shipped = run6 ~total:((score_a + score_b) / 2) in
+  p "both arms reported, in position, on a device only arm A fits" (List.length reports = 2);
+  arm_holds "arm A searched" (List.nth reports 0) ~f:searched;
+  arm_holds
+    "arm B was refused before codegen: a pre-search failure at Transform, with one device-memory \
+     decline and no backend compile"
+    (List.nth reports 1) ~f:refused_before_codegen;
+  p "arm A shipped" (match shipped with [ "A" ] -> true | _ -> false);
+  Result.iter result ~f:(check_values "the shipped arm A computes the right values");
+  let result, reports, shipped = run6 ~total:score_b in
+  p "on a device exactly arm B's footprint, both arms reported" (List.length reports = 2);
+  p_all "each of them searched" reports ~f:searched;
+  p "and one of them shipped" (match shipped with [ ("A" | "B") ] -> true | _ -> false);
+  Result.iter result ~f:(check_values "that arm computes the right values")

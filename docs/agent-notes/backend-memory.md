@@ -119,6 +119,19 @@ files.
   not carry fission's promotions (4096 B on Metal where the default holds 8192). A capacity meant
   to leave no room beside "the shipped routine" is sized from the unscheduled footprint, or it
   passes or fails by which candidate the timings crowned (gh-ocannl-1415).
+- **A base lowering over the device's TOTAL memory is refused before codegen** (gh-ocannl-1487).
+  Where `Context.get_free_and_total_memory` answers (CUDA, HIP), `Autotune.tune` scores its base
+  lowering inside the base compile's transform, as the allocator would lay out the serial form
+  (`Backends.score_footprint ~segments:[opt]`, on a `scratch_of` copy: scoring forces undecided
+  placements), and raises the same `Resource_exceeded Device_memory` cause there, so the
+  link-time path above refuses the search unchanged: `Pre_search_failure` at `Transform`,
+  `requested` the score, `limit` the total, no backend compile. Before, the b256 materialize-all
+  arm (28.2 GB against 12 / 8 GiB) paid its first candidate's codegen first. Total, not free: the
+  score covers the routine's whole in-context node set (the nodes the context already holds sit
+  on the device too), while a free reading moves with everything else on the device; a footprint
+  between free and total is still the link probe's. On a unified-memory APU the total is what the
+  driver reports, which is the allocation ceiling only if `hipMalloc` honors it. Test it on any
+  backend through the `Autotune.device_memory_reading` seam (`autotune_device_memory` scenario 6).
 - **`Context.t.context_id` names a release unit, not a value** (gh-ocannl-1203). The merge-buffer
   ledger retires a consumer's registration by the released context's id, so every value that shares
   a backend release flag (`finalized`: a linear upload chain, an upload into an existing buffer)

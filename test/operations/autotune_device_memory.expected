@@ -25,3 +25,13 @@ both arms searched, and the device refused exactly one allocation after they rep
 the arm whose shipping compile was substituted did not ship: the other arm did: true
 the arm shipped instead computes the right values: true
 nothing was recorded: the next call compares both arms again: true
+arm B's scored base footprint exceeds arm A's: true
+both arms reported, in position, on a device only arm A fits: true
+arm A searched: true
+arm B was refused before codegen: a pre-search failure at Transform, with one device-memory decline and no backend compile: true
+arm A shipped: true
+the shipped arm A computes the right values: true
+on a device exactly arm B's footprint, both arms reported: true
+each of them searched: true
+and one of them shipped: true
+that arm computes the right values: true

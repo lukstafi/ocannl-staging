@@ -318,15 +318,22 @@ let arena_items ~spans group =
    bases are page-rounded by the driver.
 
    Every layout-relevant step is the shared helper the allocator pipeline also runs (the layout head
-   above), so scorer/allocator agreement is structural rather than by comment. *)
-let score_footprint ~(backend_name : string) ~(limits : hardware_limits)
+   above), so scorer/allocator agreement is structural rather than by comment.
+
+   gh-ocannl-1487: [segments] scores a compile whose [lowered_transform] returned them, from inside
+   that transform, where [lowered] is the routine as the transform received it (zeros already sunk)
+   -- [Autotune.tune]'s base compile scores its own serial form this way, before codegen. *)
+let score_footprint ?segments ~(backend_name : string) ~(limits : hardware_limits)
     ~(static_indices : Indexing.static_symbol list) (lowered : Low_level.optimized) :
     Low_level.footprint =
-  let lowered = maybe_sink_zeros lowered in
-  let segments =
-    maybe_elide_zeros ~backend_name
-      (Schedule.maybe_default_schedules ~backend_name ~limits ~static_indices lowered)
+  let lowered, segments =
+    match segments with
+    | Some segments -> (lowered, segments)
+    | None ->
+        let lowered = maybe_sink_zeros lowered in
+        (lowered, Schedule.maybe_default_schedules ~backend_name ~limits ~static_indices lowered)
   in
+  let segments = maybe_elide_zeros ~backend_name segments in
   let spans = plan_alias_spans ~name:"<footprint>" ~limits ~lowered ~segments in
   (* Score the union store, as the compile's own fold-back does -- but on a copy: scoring must not
      mutate the routine's own traced store. *)

@@ -3037,6 +3037,13 @@ val on_candidate_attempt : (string -> unit) Seam.t
     must survive without losing the other arm's winner. Not a production seam: candidate failures
     that a backend {e can} attribute are contained without it (see [declines]). *)
 
+val device_memory_reading : (Context.t -> (int * int) option) Seam.t
+(** Test seam for the base-footprint refusal (gh-ocannl-1487): the device's [(free, total)] bytes as
+    {!tune} reads them before its base compile, given the search lineage. The default is
+    {!Context.get_free_and_total_memory}, [None] on the backends with no driver reading, which
+    leaves the check off; a test substitutes a device of a chosen size on any backend. Not a
+    production seam: no configuration selects it. *)
+
 val on_staffed_start :
   (menu:(seg_key * sketch_params list) list ->
   (seg_key * sketch_params) list ->
@@ -3235,6 +3242,14 @@ val tune :
     refused one candidate's working set, which every candidate, a replay and the untuned fallback
     need about as much of: the call reports {!Pre_search_failure} at [Backend_link] with that
     decline in its census, and raises, instead of declining every candidate in turn.
+
+    Where the device's total memory can be read ({!Context.get_free_and_total_memory}: CUDA and HIP)
+    the base lowering's footprint is scored first, inside the base compile's transform, as the
+    allocator would lay out the serial form ({!Context.Backends.score_footprint}); one over the
+    device's {e total} is refused there, before codegen, device compile and link, the same way —
+    {!Pre_search_failure} at [Transform] with a [Device_memory] decline of the baseline whose
+    [requested] is the score and [limit] the total (gh-ocannl-1487). A footprint between the free
+    and the total bytes is left to the link-time refusal above.
 
     The bound is on working pools, and that qualifier is load-bearing: {!Context.release} cannot
     free per-device constants, and a hoisted [Stage] candidate mints a fresh packed constant per

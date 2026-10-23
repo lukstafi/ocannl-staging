@@ -1160,7 +1160,9 @@ files.
   need a device that can fail: `Autotune.on_candidate_attempt` injects one
   (`test/operations/autotune_arm_containment`). An arm whose base compile the device refuses is
   refused before its search, typed, as a `Pre_search_failure` (gh-ocannl-1326; backend-memory.md
-  has the mechanism), and the placement store records no decision over a failed arm.
+  has the mechanism), and the placement store records no decision over a failed arm. An arm whose
+  base lowering scores over the device's total memory is refused that way before any codegen
+  (gh-ocannl-1487).
   **No arm's routine is resident while another arm searches** (gh-ocannl-1408): the arms and
   flips search through `Autotune.tune_deferred`, which reports, releases everything it compiled
   and hands back the compile of what it ships; `tune_placements` compiles only the placement that

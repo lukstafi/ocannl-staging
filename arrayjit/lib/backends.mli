@@ -27,6 +27,7 @@ val plan_arena_offsets :
     {!plan_pool_segments}). Exposed for unit testing the coloring with synthetic sizes. *)
 
 val score_footprint :
+  ?segments:Ir.Low_level.optimized list ->
   backend_name:string ->
   limits:Ir.Backend_intf.hardware_limits ->
   static_indices:Ir.Indexing.static_symbol list ->
@@ -44,7 +45,13 @@ val score_footprint :
     selector ([Memory_budget.fit]). It is therefore a {e model} of the peak, not a prediction of
     {!Context.get_used_memory}: the real allocator skips nodes a prior context already holds, and
     the driver page-rounds pool bases. Enumeration is canonical (by {!Ir.Tnode.uid}) so the greedy
-    coloring is reproducible across processes. *)
+    coloring is reproducible across processes.
+
+    [segments] (gh-ocannl-1487) scores a compile whose [lowered_transform] returned them in place of
+    the default schedule, from inside that transform: [lowered] is then the routine exactly as the
+    transform received it, zeros already sunk. With [buffer_aliasing] off the score is the bump
+    packing the allocator then performs too, so it still answers "does this layout fit a device",
+    which is how [Autotune.tune] reads its serial base form before codegen. *)
 
 val with_segments_census : (unit -> 'a) -> 'a * Ir.Low_level.optimized list
 (** gh-ocannl-1006: runs [f] and returns, beside its result, the kernel segments the backend compile

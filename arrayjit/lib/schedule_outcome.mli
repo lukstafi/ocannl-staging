@@ -37,7 +37,9 @@ type phase =
     {!Device_memory} is the one resource that is not a launch dimension: the device refused a buffer
     allocation ({!Device_memory_exhausted}, gh-ocannl-1326). Its [requested] is the bytes of the
     allocation the driver refused, its [limit] the driver's free bytes read right after the refusal
-    ([None] where the backend cannot read them). *)
+    ([None] where the backend cannot read them). {!Autotune.tune} also refuses its base lowering
+    before codegen with this resource (gh-ocannl-1487, phase [Transform]): there [requested] is the
+    lowering's scored footprint and [limit] the device's total bytes, which it exceeds. *)
 type resource =
   | Workgroup_threads
   | Workgroup_memory
