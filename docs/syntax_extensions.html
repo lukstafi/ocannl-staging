@@ -1589,6 +1589,15 @@ or its alias <code>Operation.TDSL.O.dim</code> to embed the solved
 dimension of the corresponding variable (as a number) into a tensor
 expression. For a row variable, the number will be the product of the
 dimensions it resolved into.</p>
+<p>The ppx never shares a capture between calls, but a reference made by
+hand with <code>Shape.get_variable_ref</code> can be passed through
+<code>~capture_dims</code> to several operations. It then names one
+dimension, whichever order shape inference solves them in
+(gh-ocannl-1545): until inference closes, their dimension variables are
+equated, as are their row variables, and a dimension with a row has the
+row’s product. Across a closure (say a <code>Train.forward_once</code>
+between the operations) the reference carries its solved value, which
+for a row variable is the product.</p>
 <p>Capturing requires the specification to be a <strong>literal
 string</strong>: every capture pattern in <code>tensor/ppx_op.ml</code>
 and <code>tensor/ppx_cd.ml</code> matches on a string constant, so
