@@ -1339,6 +1339,21 @@ result extent is
 Result-side unpadded and stride-only (<code>=&gt; s, 2*i</code>) axes
 are supported, and so is the gradient of an operand-side padded window
 (it reuses the forward projections).</p></li>
+<li><p><strong>Offsets stay inside the axis</strong>: shape inference
+sizes an affine axis without its constant offset, so an offset must be
+smaller than the stride on an axis without a window (<code>2*i+1</code>,
+the odd half of <code>interleave</code>, is fine; <code>2*i+2</code> and
+<code>1*i+1</code> are not), and an unpadded window takes none
+(<code>2*o&lt;+1+k</code>). Shape inference refuses such a spec, in
+either slot, with a message naming the axis (gh-ocannl-1618). A padded
+window keeps its offset, which its padding absorbs.</p></li>
+<li><p><strong>Result-side forms</strong> (writing through the index):
+stride-only and stride-and-offset axes scatter with gaps; unpadded
+windows, strided, dilated or both, several in one result, or with both
+terms bound by one operand (<code>ij =&gt; i&lt;+3*j</code>), are
+transposed convolutions; their gradients read the result’s gradient
+through the same index. Each form is executed against an oracle in
+<code>test/einsum/result_side_affine_forms.ml</code>.</p></li>
 </ul>
 <p><strong>Important constraint for valid convolution</strong>: The
 formula must hold exactly, meaning
