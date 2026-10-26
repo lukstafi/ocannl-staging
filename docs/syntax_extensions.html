@@ -1613,6 +1613,15 @@ equated, as are their row variables, and a dimension with a row has the
 row’s product. Across a closure (say a <code>Train.forward_once</code>
 between the operations) the reference carries its solved value, which
 for a row variable is the product.</p>
+<p><code>Shape.set_equal</code> on two row references equates the rows
+themselves, not their products, whatever either reference has been
+solved to so far (gh-ocannl-1617): rows <code>2, 3</code> and
+<code>6</code> do not unify. Product equality is what relates a
+dimension to a row (<code>set_equal</code> on a dimension and a row
+reference, or <code>Shape.set_dim</code> on a row reference). A row
+reference bound before a closure has kept only its product, so
+<code>set_equal</code> refuses it in a Row-Row pair; relate rows before
+the closure.</p>
 <p>Capturing requires the specification to be a <strong>literal
 string</strong>: every capture pattern in <code>tensor/ppx_op.ml</code>
 and <code>tensor/ppx_cd.ml</code> matches on a string constant, so
