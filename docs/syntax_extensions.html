@@ -1648,7 +1648,14 @@ dimension to a row (<code>set_equal</code> on a dimension and a row
 reference, or <code>Shape.set_dim</code> on a row reference). A row
 reference bound before a closure has kept only its product, so
 <code>set_equal</code> refuses it in a Row-Row pair; relate rows before
-the closure.</p>
+the closure. A reference whose closure kept no value at all (a row
+holding a symbolic extent has no numeric product) is refused in any
+later capture, <code>set_dim</code> or <code>set_equal</code>, naming
+the closure (gh-ocannl-1655). And a reference made by
+<code>Shape.get_variable_ref</code> that <code>set_equal</code> relates
+to a row reference before it is bound is a number, the row’s product:
+binding it to a row afterwards is refused, since the rows would be tied
+by product only; pass it to <code>~capture_dims</code> first.</p>
 <p>Capturing requires the specification to be a <strong>literal
 string</strong>: every capture pattern in <code>tensor/ppx_op.ml</code>
 and <code>tensor/ppx_cd.ml</code> matches on a string constant, so
