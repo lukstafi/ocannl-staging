@@ -1317,9 +1317,21 @@ directly in einsum notation. The semantics:</p>
 <ul>
 <li><p><strong>Input index formula</strong>:
 <code>input_index = stride * output_position + dilation * kernel_position</code></p></li>
-<li><p><strong>Padded convolution</strong> (<code>=+</code>): Input and
-output dimensions are equal (padding compensates for kernel
-extent)</p></li>
+<li><p><strong>Padded convolution</strong> (<code>=+</code>):
+<code>input_size = stride * output_size</code> (padding compensates for
+kernel extent). The operand is zero-padded by margins totalling the
+effective kernel span (below), split with the smaller half on the left,
+<code>left = effective_kernel_span / 2</code>, and a padded window reads
+<code>input[stride * output_position + offset + dilation * kernel_position - left]</code>,
+a position outside the operand reading the padding value (0 for the add
+family; a max-family window is clamped to the operand instead). So with
+stride 1 and an odd kernel the window is centered, dilated or not:
+<code>o=+2*k</code> over a kernel of 3 reads <code>o - 2</code>,
+<code>o</code>, <code>o + 2</code> (gh-ocannl-1657).</p></li>
+<li><p><strong>Stride and dilation are at least 1</strong>: a
+coefficient of 0 (written as a literal, or the runtime value of an
+identifier under <code>%op</code>/<code>%cd</code>) is refused with a
+message naming the axis (gh-ocannl-1657).</p></li>
 <li><p><strong>Valid convolution</strong> (<code>&lt;+</code>): No
 padding. The dimension relationship is:</p>
 <pre><code>input_size = stride * (output_size - 1) + effective_kernel_span</code></pre>
@@ -1367,7 +1379,13 @@ the odd half of <code>interleave</code>, is fine; <code>2*i+2</code> and
 <code>1*i+1</code> are not), and an unpadded window takes none
 (<code>2*o&lt;+1+k</code>). Shape inference refuses such a spec, in
 either slot, with a message naming the axis (gh-ocannl-1618). A padded
-window keeps its offset, which its padding absorbs.</p></li>
+window keeps its offset, at or past the stride too: it shifts the window
+against the margins, and a tap it moves past them reads the padding
+value (<code>o=+1+k</code> over a kernel of 3 reads <code>o</code>,
+<code>o + 1</code>, <code>o + 2</code>, zero past the end). Padded
+operand windows with offsets, forward and gradient, are executed against
+an oracle in
+<code>test/einsum/padded_operand_offset_windows.ml</code>.</p></li>
 <li><p><strong>Result-side forms</strong> (writing through the index):
 stride-only and stride-and-offset axes scatter with gaps; unpadded
 windows, strided, dilated or both, several in one result, or with both
