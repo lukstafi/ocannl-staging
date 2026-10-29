@@ -770,6 +770,23 @@ onto p. The resulting representation is <code>Accum_unop</code> where
 <code>Identity</code>. Both variants end up with the same result, and
 even with the same computation, because the second variant’s computation
 will get optimized (unless configured not to).</p>
+<p><strong>Reading the lhs, and state that persists across
+runs.</strong> Only the <code>=:</code>-prefixed accumulating operators
+(<code>=:+</code>, <code>=:*</code>, <code>=:@^</code>, …) clear the lhs
+first; plain <code>=:</code> is an assignment that does not, and
+<code>=+</code>, <code>=-</code>, <code>=*</code>, … accumulate onto
+whatever the lhs holds. So an assignment whose right-hand side names its
+own lhs under <code>=:</code>, and every non-clearing accumulation,
+reads the lhs’s previous value: what an earlier statement of the same
+routine wrote, or else what the previous run of the routine left. A node
+read that way is read-before-write, and the compiler keeps it in a
+device buffer that persists between runs — never virtual, never inlined.
+This is how optimizer state is declared, with no extra annotation:
+<code>Train.sgd_update ~momentum</code> writes
+<code>{ sgd_momentum } =: (!.momentum *. sgd_momentum) + sgd_delta</code>,
+and the buffer carries the velocity from one step to the next. Forcing
+such a node virtual (e.g. <code>Train.set_virtual</code>) is refused at
+compilation.</p>
 <p>Advanced note: when a <code>~projections</code> parameter is in scope
 but no assignment-specific <code>~projections</code> argument is given –
 the typical case in <code>tensor/operation.ml</code> – the actual
