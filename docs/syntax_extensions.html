@@ -1397,6 +1397,20 @@ padding - output_padding +
 1<code>holding its 1 at position</code>padding<code>) computes the same crop by multiplication, so a non-finite border value would reach its result as NaN; the slice copies. With stride 1, dilation 1 and an odd kernel size there is a one-step form: the padded window on an operand with the kernel reversed,</code>”s,
 o=+k; k =&gt; s,
 o”<code>. The recipe and the reversed-kernel form are executed against oracles in</code>test/einsum/result_side_affine_forms.ml<code>and</code>test/einsum/result_side_padded_window.ml`.</p></li>
+<li><p><strong>A window needs no kernel tensor</strong>: in a
+one-operand spec the kernel label is captured and set,
+<code>x ++ &quot;s, 2*o=+1+k =&gt; s, o&quot; [&quot;k&quot;]</code> then
+<code>Shape.set_dim k 3</code> is a padded sum pool and
+<code>x @^^ &quot;s, 2*o=+1+k =&gt; s, o&quot; [&quot;k&quot;]</code> a padded max pool,
+gradients included; unpadded (<code>&lt;+</code>) windows work the same
+way (gh-ocannl-1691). A padded window’s extents do not determine its
+kernel, so a padded kernel nothing sizes (not captured, or never set) is
+refused with a shape error naming it; an unpadded window’s kernel is
+solved from its extents like any other dimension. The pooling layers’
+constant kernel operand (<code>stretch 0.0</code> in
+<code>Nn_blocks.max_pool2d</code>) is the two-operand form of the same
+window. Executed in
+<code>test/einsum/padded_operand_offset_windows.ml</code>.</p></li>
 <li><p><strong>Offsets stay inside the axis</strong>: shape inference
 sizes an affine axis without its constant offset, so an offset must be
 smaller than the stride on an axis without a window (<code>2*i+1</code>,
