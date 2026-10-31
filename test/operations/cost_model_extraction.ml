@@ -401,6 +401,59 @@ let () =
   in
   show_summary "gated operand cost hoisted into a scope body (exact)" (CM.analyze gate_hoisted);
 
+  (* gh-ocannl-1695: the upper walk charges BOTH arms of a value select -- the shape cc, CUDA and
+     HIP render as a blend that evaluates both ([Low_level.speculable_select] admits each of these)
+     -- and stays a flagged bound, since a backend that short-circuits it (Metal) runs one: the walk
+     reads no backend. C2[i] = where(K4[i] + 1, A16[i] * 2 + 1, (A16[i+8] * 3 + 1) * 2): condition 1
+     op, arms 2 and 3, the select 1 -- 7 per cell, 28 over the loop; both arms' reads charged (A16's
+     8 cells). Nested: where(K4[i], where(K4[i], A16[i] * 2, 0), A16[i+8] * 3) -- 1 + 1 inside, 1 in
+     the other arm, 1 outside: 16. Hoisted: where(K4[i], {lv := A16[i] * 2}, A16[i+8] * 3) -- the
+     scope's 1, the inline arm's 1, the select's 1: 12. *)
+  let at_i tn = (get tn [| it i |], sp) and at_8 tn = (get tn [| shift8 i |], sp) in
+  let cst v = (LL.Constant v, sp) in
+  let op o a b = (LL.Binop (o, a, b), sp) in
+  let select_leg cond a b = LL.Ternop (Ops.Where, cond, a, b) in
+  let unequal =
+    select_leg
+      (op Ops.Add (at_i k4) (cst 1.))
+      (op Ops.Add (op Ops.Mul (at_i a16) (cst 2.)) (cst 1.))
+      (op Ops.Mul (op Ops.Add (op Ops.Mul (at_8 a16) (cst 3.)) (cst 1.)) (cst 2.))
+  in
+  let nested =
+    select_leg (at_i k4)
+      (select_leg (at_i k4) (op Ops.Mul (at_i a16) (cst 2.)) (cst 0.), sp)
+      (op Ops.Mul (at_8 a16) (cst 3.))
+  in
+  let hoisted_arm =
+    select_leg (at_i k4) (scoped_mul (it i) 2., sp) (op Ops.Mul (at_8 a16) (cst 3.))
+  in
+  List.iter
+    [
+      ("unequal arms", unequal, 28);
+      ("nested selects", nested, 16);
+      ("a hoisted arm", hoisted_arm, 12);
+    ]
+    ~f:(fun (name, sel, flops) ->
+      let code = Ll_test.loop_n i 4 (Ll_test.set c2 [| it i |] sel) in
+      let s = CM.analyze code in
+      show_summary ("value select, " ^ name ^ " (both arms charged)") s;
+      let cond, arms =
+        match sel with
+        | LL.Ternop (Ops.Where, (cond, _), a, b) -> (cond, [ a; b ])
+        | _ -> assert false
+      in
+      claimf "value select, %s: a select the blending backends evaluate both arms of" name
+        (LL.speculable_select ~cond ~arms);
+      claimf "value select, %s: the upper walk charges the condition, both arms and the select (%d)"
+        name flops (s.CM.flops = flops);
+      claimf "value select, %s: launch contexts charge what the walk does" name
+        (List.sum (module Int) (CM.launch_contexts code) ~f:(fun lc -> lc.CM.lc_ops) = s.CM.flops);
+      claimf "value select, %s: the charge stays a flagged bound (the walk reads no backend)" name
+        s.CM.flops_approx;
+      let a16_fp = List.Assoc.find_exn s.CM.per_node a16 ~equal:Tn.equal in
+      claimf "value select, %s: both arms' reads are charged (8 cells of A16)" name
+        (a16_fp.CM.fp_read_bytes = 8 * 4));
+
   (* Vectorized runs (gh-ocannl-578), strip-mined: setv4 V16[4*i] — bases 4 apart tile the node, 16
      cells written exactly. The random-bits source is read once per run. *)
   let v16 = fresh_tn "V16" [| 16 |] in

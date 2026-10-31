@@ -470,13 +470,13 @@ let arithmetic_intensity s = Float.of_int s.flops /. Float.of_int (max 1 (total_
    placement vector. The duality is exact: every approximation that biases the upper extraction UP
    flips direction here — guarded ([If]) work floors to zero (guards-never-taken), a
    conditionally-evaluated operand ({!Ops.binop_conditionality} / {!Ops.ternop_conditionality})
-   counts at its cheapest instead of its dearest, so [Where] charges its condition plus the cheaper
-   arm where the upper walk charges the dearer one and a gated right operand floors away, a node's
-   multiple same-direction accesses sum only when the exact images are pairwise provably disjoint
-   (both extractions then agree the union is the sum) and otherwise take their MAX (a union is at
-   least its largest member) instead of the capped sum, a non-exact image counts its affine lower
-   bound ({!Affine.image_cardinality_lb}, gh-ocannl-1601) instead of the upper count, and opaque
-   code ([Staged_compilation], merge-buffer reads) — the upper contract's one escape hatch — merely
+   counts at its cheapest instead of in full, so [Where] charges its condition plus the cheaper arm
+   where the upper walk charges both arms and a gated right operand floors away, a node's multiple
+   same-direction accesses sum only when the exact images are pairwise provably disjoint (both
+   extractions then agree the union is the sum) and otherwise take their MAX (a union is at least
+   its largest member) instead of the capped sum, a non-exact image counts its affine lower bound
+   ({!Affine.image_cardinality_lb}, gh-ocannl-1601) instead of the upper count, and opaque code
+   ([Staged_compilation], merge-buffer reads) — the upper contract's one escape hatch — merely
    loosens a floor without breaking it. [fr_exact] is [false] when any flooring occurred: the floor
    is then sound but not tight. *)
 

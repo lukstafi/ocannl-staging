@@ -46,8 +46,11 @@ files.
   exactly those two shapes, and walks a nested select or gate WHOLE: evaluated eagerly, an inner
   condition can hold where the outer one did not, so an integer division under it is reachable. The operand-evaluation checker gains the converse leg: a blend must
   render all three operands with no `?`/`&&`/`||`. Consequences for the classifier's consumers: the
-  floors stay floors, `a_gated` over-approximates (conservative), and the upper cost walk's per-arm
-  maximum under-counts only where both arms are non-trivial. Two traps for a test of it
+  floors stay floors, `a_gated` over-approximates (conservative), and `Cost_model`'s upper walk
+  already charges BOTH arms (`sc_split`'s sum, since gh-ocannl-637), flagged approximate because it
+  reads no backend (CUDA and Metal short-circuit) (gh-ocannl-1695 pins it in `cost_model_extraction`). The one walk that charges a
+  single arm is the inline fan-in guard's per-arm maximum (`Low_level.eval_reads_traversal`'s
+  `branches` hook), which under-counts a blended select whose arms read distinct nodes. Two traps for a test of it
   (`test/operations/branchless_select`): clang if-converts `c ? a[i] : b[i]` on base by selecting
   the ADDRESS, so a branch claim needs a constant arm (`where cond g 0`, the backward shape); and a
   routine-local array is dereferenceable, so the realistic leg materializes the gated gradient.
