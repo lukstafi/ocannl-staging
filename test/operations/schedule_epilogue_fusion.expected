@@ -12,3 +12,10 @@ epf_bad_transpose rejected with a targeted error: true
 epf_partial_storeback rejected with a targeted error: true
 epf_partition_spanned (one store-back after both segments) fused values match two-kernel: true
 epf_partition_outermost (a store-back per single-trip segment) rejected with a targeted error: true
+fragment identity: the padded pipeline registers exactly one masked fragment: true
+fragment identity: the masked fragment is not a simdgroup fragment: true
+fragment identity: the forged program's store-back reads the user [fragment] node: true
+fragment identity: a user tensor labelled [fragment] is not recognized as the fragment: true
+fragment identity control: the same program with the node enrolled fuses: true
+fragment identity: the transform ran: true
+fragment identity: fused through the real masked fragment, values match two-kernel: true

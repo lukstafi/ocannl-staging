@@ -31,6 +31,7 @@ let make_optimized llc tns : LL.optimized =
     merge_node = None;
     workgroup_shared = Base.Set.empty (module Tn);
     simdgroup_fragments = Base.Set.empty (module Tn);
+    masked_fragments = Base.Set.empty (module Tn);
     swizzled = Base.Map.empty (module Tn);
     pipelined = Base.Map.empty (module Tn);
     zero_fringe = Base.Set.empty (module Tn);

@@ -8554,6 +8554,7 @@ module C_syntax (B : C_syntax_config) = struct
            optimize_ctx;
            workgroup_shared;
            simdgroup_fragments = _;
+           masked_fragments = _;
            swizzled = _;
            pipelined;
            zero_fringe = _;

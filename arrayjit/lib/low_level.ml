@@ -1125,6 +1125,13 @@ type optimized = {
       (** Per-simdgroup accumulator tiles synthesized by [Schedule.Tensorize] when it contracts an
           enclosing serial reduction. Metal renders their marked lifetime as persistent
           [simdgroup_matrix] fragments; scalar fallback backends retain the local-array meaning. *)
+  masked_fragments : Set.M(Tnode).t;
+      (** The pad-masked accumulator fragments [Schedule.Tensorize]'s contraction minted
+          (gh-ocannl-485): a masked fragment is kept out of [simdgroup_fragments] (renderers read
+          that set as persistent simdgroup matrices, which the guarded transfers are not), so this
+          set is what identifies it -- [Schedule.Fuse_epilogue] recognizes a fragment store-back by
+          membership here or in [simdgroup_fragments], never by the node's label (gh-ocannl-1721).
+          Read by scheduling only: no renderer consults it. *)
   swizzled : swizzle_kind Map.M(Tnode).t;
       (** Nodes stored in an XOR-swizzled layout (docs/proposals/tensorize-mma.md, "Swizzled
           staging"), keyed by the remap's granularity ({!type-swizzle_kind}): codegen remaps every
@@ -10841,6 +10848,7 @@ let%diagn2_sexp specialize_proc (input_ctx : optimize_ctx) (an : analysis) : opt
     merge_node = (if uses_merge then an.an_merge_node else None);
     workgroup_shared = Set.empty (module Tnode);
     simdgroup_fragments = Set.empty (module Tnode);
+    masked_fragments = Set.empty (module Tnode);
     swizzled = Map.empty (module Tnode);
     pipelined = Map.empty (module Tnode);
     zero_fringe = Set.empty (module Tnode);

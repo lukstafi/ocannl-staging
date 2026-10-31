@@ -100,6 +100,7 @@ let sections ?known
        merge_node;
        workgroup_shared;
        simdgroup_fragments;
+       masked_fragments;
        swizzled;
        pipelined;
        zero_fringe;
@@ -142,6 +143,7 @@ let sections ?known
     ("merge_node", Option.value_map merge_node ~default:"-" ~f:name);
     ("workgroup_shared", uids (Set.to_list workgroup_shared));
     ("simdgroup_fragments", uids (Set.to_list simdgroup_fragments));
+    ("masked_fragments", uids (Set.to_list masked_fragments));
     ("swizzled", uids (Map.keys swizzled));
     ("pipelined", uids (Map.keys pipelined));
     ("zero_fringe", uids (Set.to_list zero_fringe));

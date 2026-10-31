@@ -445,8 +445,7 @@ let () =
     let%op mc = prod + bias in
     (ma, mb, prod, mc)
   in
-  let partitioned_k ~k_outermost (ma : Tensor.t) (mb : Tensor.t) (prod : Tensor.t)
-      (opt : LL.optimized) =
+  let padded_pipeline ~k_outermost (ma : Tensor.t) (mb : Tensor.t) (opt : LL.optimized) =
     let paths = Ll_test.nest_paths opt.LL.llc in
     let i, j, k =
       match List.find_exn paths ~f:(fun p -> List.length p = 4) with
@@ -482,9 +481,15 @@ let () =
        ]
       @ (if k_outermost then [ Sched.Swap { outer = i_o; inner = k_o } ] else [])
       @ [ stage ma.Tensor.value [ i_i; k_i ]; stage mb.Tensor.value [ k_i; j ]; tz ]
-      @ Sched.pad_edge_partition ~block_loop:k_o ~extent:k_pad ~block:bm
-      @ [ Sched.Fuse_epilogue { target = prod.Tensor.value; shared = false } ])
+      @ Sched.pad_edge_partition ~block_loop:k_o ~extent:k_pad ~block:bm)
       opt
+  in
+  let fuse (prod : Tensor.t) opt =
+    Sched.apply [ Sched.Fuse_epilogue { target = prod.Tensor.value; shared = false } ] opt
+  in
+  let partitioned_k ~k_outermost (ma : Tensor.t) (mb : Tensor.t) (prod : Tensor.t)
+      (opt : LL.optimized) =
+    fuse prod (padded_pipeline ~k_outermost ma mb opt)
   in
   let want_padded =
     let _, _, _, mc = make_padded_graph "7r" in
@@ -516,4 +521,70 @@ let () =
          (String.is_substring msg ~substring:"Schedule.Fuse_epilogue"
          && String.is_substring msg ~substring:"written again")
    | None -> p label false);
+  (* gh-ocannl-1721: the store-back recognizer knows the masked fragment by IDENTITY -- membership
+     in [masked_fragments], which the contraction fills -- not by the ["fragment"] label head it
+     mints. The real masked fragment of the padded pipeline is a member (and the fusion through it
+     matches the two-kernel run, [epf_partition_spanned] above); a user tensor labelled [fragment]
+     (default namespace, the label head a [{ fragment }] declaration gets), swapped in as what the
+     store-back reads, is not, and the fusion is refused. The control: the same forged program with
+     the user node ENROLLED in the set fuses -- so the refusal is the identity check and nothing
+     else the swap disturbed. The superseded label rule accepted the forged node. *)
+  (let ma, mb, prod, mc = make_padded_graph "7f" in
+   let user_fragment =
+     (NTDSL.term ~label:[ "fragment" ] ~batch_dims:[ b_pad ] ~output_dims:[ m_pad; n ] ())
+       .Tensor.value
+   in
+   let target = prod.Tensor.value in
+   let rec swap ~from ~to_ swapped (llc : LL.t) : LL.t =
+     match llc with
+     | LL.Set ({ tn; llsc = LL.Get (frag, idcs); _ } as st)
+       when Tn.equal tn target && Tn.equal frag from ->
+         Int.incr swapped;
+         LL.Set { st with llsc = LL.Get (to_, idcs) }
+     | LL.Seq (a, b) ->
+         let a = swap ~from ~to_ swapped a in
+         LL.Seq (a, swap ~from ~to_ swapped b)
+     | LL.For_loop f -> LL.For_loop { f with body = swap ~from ~to_ swapped f.body }
+     | LL.If x -> LL.If { x with body = swap ~from ~to_ swapped x.body }
+     | other -> other
+   in
+   let refusal opt =
+     match fuse prod opt with
+     | (_ : LL.optimized) -> None
+     | exception Invalid_argument msg -> Some msg
+   in
+   let checked = ref false in
+   let transform (opt : LL.optimized) =
+     let opt = padded_pipeline ~k_outermost:false ma mb opt in
+     let masked = Set.to_list opt.LL.masked_fragments in
+     p "fragment identity: the padded pipeline registers exactly one masked fragment"
+       (List.length masked = 1);
+     p_none "fragment identity: the masked fragment is not a simdgroup fragment" masked
+       ~f:(Set.mem opt.LL.simdgroup_fragments);
+     let real = List.hd_exn masked in
+     let swapped = ref 0 in
+     let forged = { opt with LL.llc = swap ~from:real ~to_:user_fragment swapped opt.LL.llc } in
+     p "fragment identity: the forged program's store-back reads the user [fragment] node"
+       (!swapped = 1 && List.equal String.equal user_fragment.Tn.label [ "fragment" ]);
+     (match refusal forged with
+     | Some msg ->
+         Stdio.eprintf "fragment identity, forged: %s (not part of the golden)\n%!" msg;
+         p "fragment identity: a user tensor labelled [fragment] is not recognized as the fragment"
+           (String.is_substring msg ~substring:"Schedule.Fuse_epilogue")
+     | None ->
+         p "fragment identity: a user tensor labelled [fragment] is not recognized as the fragment"
+           false);
+     let enrolled =
+       { forged with LL.masked_fragments = Set.add forged.LL.masked_fragments user_fragment }
+     in
+     p "fragment identity control: the same program with the node enrolled fuses"
+       (Option.is_none (refusal enrolled));
+     checked := true;
+     (* The unforged pipeline, fused through the real fragment, is what runs. *)
+     fuse prod opt
+   in
+   let got = run_with "epf_fragment_identity" transform mc in
+   p "fragment identity: the transform ran" !checked;
+   p_all2 "fragment identity: fused through the real masked fragment, values match two-kernel" got
+     want_padded ~f:Float.equal);
   ignore prod4

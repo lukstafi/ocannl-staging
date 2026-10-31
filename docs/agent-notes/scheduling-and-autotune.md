@@ -2130,6 +2130,14 @@ files.
   `Grid` flavors are untouched (a `Grid` loop is not split; `Grid_outermost` contracts at `k_o`).
   The census then reports two register-tiled `Tile_mma`s for one padded serial GEBP;
   `gebp_padded_parity` pins where each row block accumulates.
+- **A fragment is known by membership, never by its label** (gh-ocannl-1721). `Fuse_epilogue`'s
+  store-back recognizer accepts the node the store-back reads only when it is in
+  `simdgroup_fragments` (unmasked) or `masked_fragments` (every pad-masked fragment, shared or not,
+  which `contract_tensorized_accumulator` fills); a user `{ fragment }` carries the same label head,
+  and `workgroup_shared` also holds staged operand tiles. A new fragment-minting site enrolls its
+  node in one of the two sets, or the fusion declines there. `schedule_epilogue_fusion`'s forged
+  leg swaps a user `fragment` node into the store-back and pins the refusal, with the enrolled
+  control fusing.
 - **The padded GEBP's k guard was the rest of the excess** (gh-ocannl-1631). With k padded, the
   packing nests store `Where (bk*k_o + k_i < nk)` per A~/B~ element in EVERY k block. `Bench_gebp`
   now `Partition`s `k_o` at its last full block (what `Pad`'s contract prescribes); the full
