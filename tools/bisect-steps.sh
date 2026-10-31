@@ -143,10 +143,11 @@ bisect_main() {
   local dir tree lang anc outcome result rc first line
   while [ $# -gt 0 ]; do
     case $1 in
-      --cap) [ $# -ge 2 ] || die "--cap requires a value"; cap=$2; shift 2 ;;
-      --test-cap) [ $# -ge 2 ] || die "--test-cap requires a value"; test_cap=$2; shift 2 ;;
-      --build) [ $# -ge 2 ] || die "--build requires a target"; builds+=("$2"); shift 2 ;;
+      --cap | --cap=*) opt_value "a value" "$@"; cap=$opt_value; shift "$opt_shift" ;;
+      --test-cap | --test-cap=*) opt_value "a value" "$@"; test_cap=$opt_value; shift "$opt_shift" ;;
+      --build | --build=*) opt_value "a target" "$@"; builds+=("$opt_value"); shift "$opt_shift" ;;
       --no-first-parent) first_parent=; shift ;;
+      --cpu | --cpu=* | --gpu | --gpu=*) refuse_slot_option "$1" ;;
       --) shift; break ;;
       -*) die "bisect: unknown option $1
   usage: tools/test-run.sh $bisect_usage" ;;

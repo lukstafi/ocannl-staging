@@ -69,8 +69,16 @@
 # it: `affected ... >F` (its stdout is one alias per line) or `aliases ... >F`,
 # then `run --targets-file F build -j 4`. The alias check below reads the
 # listed aliases as it reads written ones. `--cpu` and `--gpu` are the fleet
-# slot's options, never this script's: written here they are refused (exit 2)
-# with the slot's spelling, rather than reaching dune as its subcommand.
+# slot's options, never this script's: written here -- among any launching
+# subcommand's options (`run`, `start`, `plan`, `fresh`, `repeat`, `bisect`)
+# or among the dune arguments after them -- they are refused (exit 2) with the
+# slot's spelling (refuse_slot_option), rather than reaching dune as its
+# subcommand or as a repeat count.
+#
+# Every value option takes its value spaced or after `=` alike (`--cap 900`,
+# `--cap=900`; `--test-cap`, `--expect-backend`, `--targets-file`, bisect's
+# `--build`, wait's `--timeout`), and an empty value is refused as a missing
+# one (opt_value).
 #
 # `aliases PATH...` lists the per-test aliases dune defines for each PATH,
 # grouped by family -- `runtest` (in `dune runtest`), `slow` (`dune build
@@ -335,6 +343,37 @@ normalize_cap() { # [VARIABLE OPTION]: `cap` and `--cap` by default
   printf -v "$var" '%s' "$(( 10#$v ))"
 }
 
+# A value option's operand, written `--opt V` or `--opt=V` (gh-ocannl-1740:
+# `run --cap=900 @x` was let through to dune and refused there as misplaced).
+# Sets opt_value, and opt_shift to the words the caller shifts. An empty value
+# is refused as a missing one: `--test-cap=` taken for "no test cap given"
+# would leave the default in force without a word.
+opt_value= opt_shift=
+opt_value() { # WHAT ARGV...: WHAT names the value in the refusal ("a value", "a file")
+  local what=$1
+  shift
+  case $1 in
+    --*=*) opt_value=${1#*=} opt_shift=1 ;;
+    *) [ $# -ge 2 ] || die "$1 requires $what"; opt_value=$2 opt_shift=2 ;;
+  esac
+  [ -n "$opt_value" ] || die "${1%%=*} requires $what"
+}
+
+# The fleet's slot kinds are fleet-worker.sh's options, never this script's.
+# Let through, `run --cpu` made the word dune's subcommand (dune answered
+# "COMMAND name is missing"), `repeat --cpu 2` read it as the repeat count,
+# and `run build @x --cpu` handed dune an unknown option (gh-ocannl-1734).
+refuse_slot_option() { # OPTION, as written
+  local takes
+  case $sub in
+    repeat) takes="repeat takes no slot of its own (its iterations run as given)" ;;
+    bisect) takes="on a fleet box each of the bisect's runs takes the slot itself, as --cpu where none of the batch's backends holds a GPU" ;;
+    plan) takes="plan names the slot run would take, as --cpu where none of the batch's backends holds a GPU" ;;
+    *) takes="on a fleet box $sub takes the slot itself, as --cpu where none of the batch's backends holds a GPU" ;;
+  esac
+  die "$1 is not an option of tools/test-run.sh but of the fleet's run-time slot: $takes; to choose the kind, wrap the launch: fleet-worker.sh execution slot ${1%%=*} -- tools/test-run.sh $sub ..."
+}
+
 reject_misplaced_options() {
   # dune has no `--cap`, `--test-cap`, `--alone` or `--direct`, so any of them among the arguments
   # FORWARDED to dune is this script's options written on the wrong side of the
@@ -352,6 +391,7 @@ reject_misplaced_options() {
     esac
     case $arg in
       --) return 0 ;;
+      --cpu | --cpu=* | --gpu | --gpu=*) refuse_slot_option "$arg" ;;
       --cap | --cap=* | --alone | --alone=* | --test-cap | --test-cap=* | --direct | --direct=* | \
         --expect-backend | --expect-backend=* | --targets-file | --targets-file=*)
         case $sub in
@@ -3218,10 +3258,11 @@ case $sub in
     direct=0
     while [ $# -gt 0 ]; do
       case $1 in
-        --cap) [ $# -ge 2 ] || die "--cap requires a value"; cap=$2; shift 2 ;;
-        --test-cap) [ $# -ge 2 ] || die "--test-cap requires a value"; test_cap=$2; shift 2 ;;
+        --cap | --cap=*) opt_value "a value" "$@"; cap=$opt_value; shift "$opt_shift" ;;
+        --test-cap | --test-cap=*) opt_value "a value" "$@"; test_cap=$opt_value; shift "$opt_shift" ;;
         --alone) alone=1; shift ;;
         --direct) direct=1; shift ;;
+        --cpu | --cpu=* | --gpu | --gpu=*) refuse_slot_option "$1" ;;
         --) shift; break ;;
         *) break ;;
       esac
@@ -4165,26 +4206,22 @@ case $sub in
     targets_files=()
     while [ $# -gt 0 ]; do
       case $1 in
-        --cap) [ $# -ge 2 ] || die "--cap requires a value"; cap=$2; shift 2 ;;
-        --test-cap) [ $# -ge 2 ] || die "--test-cap requires a value"; test_cap=$2; shift 2 ;;
-        --expect-backend)
-          [ $# -ge 2 ] || die "--expect-backend requires a backend"
-          batch_known_backend "$2" ||
-            die "--expect-backend $2: not a backend (cc, multidev_cc, cuda, hip, metal)"
+        --cap | --cap=*) opt_value "a value" "$@"; cap=$opt_value; shift "$opt_shift" ;;
+        --test-cap | --test-cap=*) opt_value "a value" "$@"; test_cap=$opt_value; shift "$opt_shift" ;;
+        --expect-backend | --expect-backend=*)
+          opt_value "a backend" "$@"
+          batch_known_backend "$opt_value" ||
+            die "--expect-backend $opt_value: not a backend (cc, multidev_cc, cuda, hip, metal)"
           case " $expect " in
-            *" $(batch_canonical "$2") "*) ;;
-            *) expect="$expect${expect:+ }$(batch_canonical "$2")" ;;
+            *" $(batch_canonical "$opt_value") "*) ;;
+            *) expect="$expect${expect:+ }$(batch_canonical "$opt_value")" ;;
           esac
-          shift 2 ;;
-        --targets-file)
-          [ $# -ge 2 ] || die "--targets-file requires a file"
-          targets_files+=("$2")
-          shift 2 ;;
-        # The fleet's slot kinds are fleet-worker.sh's options, not this
-        # script's: let through, the word became dune's subcommand and dune
-        # answered "COMMAND name is missing".
-        --cpu | --cpu=* | --gpu | --gpu=*)
-          die "$1 is not an option of tools/test-run.sh but of the fleet's run-time slot: on a fleet box $sub takes the slot itself, as --cpu where none of the batch's backends holds a GPU; to choose the kind, wrap the launch: fleet-worker.sh execution slot ${1%%=*} -- tools/test-run.sh $sub ..." ;;
+          shift "$opt_shift" ;;
+        --targets-file | --targets-file=*)
+          opt_value "a file" "$@"
+          targets_files+=("$opt_value")
+          shift "$opt_shift" ;;
+        --cpu | --cpu=* | --gpu | --gpu=*) refuse_slot_option "$1" ;;
         --) shift; break ;;
         *) break ;;
       esac
@@ -4448,10 +4485,10 @@ case $sub in
     ref=last budget=
     while [ $# -gt 0 ]; do
       case $1 in
-        --timeout)
-          [ $# -ge 2 ] || die "--timeout requires a value"
-          budget=$2 budget_given=1
-          shift 2
+        --timeout | --timeout=*)
+          opt_value "a value" "$@"
+          budget=$opt_value budget_given=1
+          shift "$opt_shift"
           ;;
         *) ref=$1; shift ;;
       esac

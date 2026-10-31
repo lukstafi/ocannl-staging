@@ -13,7 +13,7 @@
 # #group' leg_N` (scripts/harness-support.sh), its name led by the leg numbers
 # below and closed by the one group it belongs to (gh-ocannl-1202):
 # #group-alive (1-5), #stop (6-8, 67), #queries (39), #repeat (9-25, 38, 83-85),
-# #options (26-28, 37, 89, 94), #width (29-34, 48-52, 64, 70), #digest (35-36,
+# #options (26-28, 37, 89, 94, 95), #width (29-34, 48-52, 64, 70), #digest (35-36,
 # 68-69, 71-73, 80, 87, 92), #fresh (81), #lifecycle (40-47, 65, 74: the run/start
 # lifecycle with its signal legs, and both fork-window negative controls),
 # #source (59-63, 66), #slot (53-58, 78, 88, 93), #device (75-77, 91), #credentials (79, 90),
@@ -274,6 +274,14 @@
 #      qualified golden by its longest test prefix, a directory, a dune file; a helper and an unknown directory exit 1 with
 #      the rest listed; outside the worktree exit 2), and its output read
 #      back as a targets file is the batch it lists.
+#  95. value options take `--opt V` and `--opt=V` alike in every parser (run's
+#      cap, targets file and backend check, plan's test cap, repeat's two caps,
+#      wait's timeout, bisect's caps and builds), an empty value is refused,
+#      and `--cpu`/`--gpu` are refused with the slot's spelling by run, plan,
+#      fresh, repeat and bisect, before the dune arguments or after them, but
+#      not past dune's `--` (gh-ocannl-1740, gh-ocannl-1734); a mutant cutting
+#      the `=` arms, and one cutting the slot-kind arms, turns every probe of
+#      its set red.
 #  90. the runner's own OCANNL_TOOL_TESTRUN_BG, _RD and _OWN reach no dune: a
 #      run, a probed GPU run under a slot, a probed repeat's iterations.
 #  59-63 sit after leg 47: the source a run tested, recorded at launch
@@ -7956,6 +7964,158 @@ if [ -z "$tf_detail" ]; then report 0 "$tf_aliases_label"; else report 1 "$tf_al
 rm -rf "$repeat_root/fam" "$repeat_root/famless"
 }
 harness_leg_run '94: targeted batches from a file, and aliases by family #options' leg_94
+
+# ---------------------------------------------------------------------------
+# Leg 95: value options in both spellings; the slot's kinds refused by every
+# launching subcommand (gh-ocannl-1740, gh-ocannl-1734)
+# ---------------------------------------------------------------------------
+# `run --cap=900 @x` reached dune and was refused as a misplaced option, where
+# it was already in its place; `repeat --cpu 2 ...` read the slot's kind as the
+# repeat count, and `run build @x --cpu` handed it to dune. Each `=` probe is
+# checked by what the value DID (the recorded cap, the test cap the plan names,
+# the backend check, the aliases dune got, the bisect's next check), not by the
+# absence of a refusal. Two mutants control them: with every `=` arm cut each
+# `=` probe must go red, and with every slot-kind arm cut each slot probe must.
+leg_95() {
+eq_label="value options: the = form is the spaced one in every parser; an empty value is refused"
+eq_nc_label="negative control: with the = arms cut, every = probe goes red"
+sk_label="--cpu/--gpu: refused with the slot's spelling by run, plan, fresh, repeat and bisect, before or after the dune arguments"
+sk_nc_label="negative control: with the slot-kind arms cut, every slot-kind probe goes red"
+eq_dir=$TMP/eq-options
+mkdir -p "$eq_dir"
+printf '@cheap\n' >"$eq_dir/targets.txt"
+unset OCANNL_BACKEND
+eq_probes=(run-cap run-targets run-expect plan-test-cap repeat-caps wait-timeout bisect-opts empty-eq)
+eq_check() { # PROBE: runs it; eq_detail is empty iff it holds
+  eq_detail=
+  case $1 in
+    run-cap)
+      argv_runs=$TMP/eq-runs-cap argv_probe eq-run-cap run --cap=900 build @cheap
+      { [ "$argv_rc" = 0 ] && [ "$argv_calls" = "build @cheap" ] &&
+        [ "$(cat "$argv_dir/cap" 2>/dev/null)" = 900 ]; } ||
+        eq_detail="run --cap=900: exit $argv_rc; calls: ${argv_calls:-<none>}; recorded cap: $(cat "$argv_dir/cap" 2>/dev/null); stderr: $argv_err" ;;
+    run-targets)
+      argv_probe eq-run-targets run --targets-file="$eq_dir/targets.txt" build
+      { [ "$argv_rc" = 0 ] && [ "$argv_calls" = "build @cheap" ]; } ||
+        eq_detail="run --targets-file=F: exit $argv_rc; calls: ${argv_calls:-<none>}; stderr: $argv_err" ;;
+    run-expect)
+      argv_probe eq-run-expect run --expect-backend=vulkan build @cheap
+      { [ "$argv_rc" = 2 ] && [ -z "$argv_calls" ] &&
+        grep -qF -- "--expect-backend vulkan: not a backend" <<<"$argv_err"; } ||
+        eq_detail="run --expect-backend=vulkan: exit $argv_rc; calls: ${argv_calls:-<none>}; stderr: $argv_err" ;;
+    plan-test-cap)
+      argv_probe eq-plan-test-cap plan --test-cap=9 --cap=900 build @cheap
+      { [ "$argv_rc" = 0 ] && grep -qF "test cap: 9s for each process dune starts, asked for" <<<"$argv_out"; } ||
+        eq_detail="plan --test-cap=9: exit $argv_rc; stdout: $argv_out; stderr: $argv_err" ;;
+    repeat-caps)
+      fixture_probe eq-repeat-caps stable "$TMP/eq-runs-repeat" repeat --cap=900 --test-cap=9 2 build @cheap
+      # The bounds' first line is the per-test cap every iteration is given.
+      { [ "$fixture_rc" = 0 ] && [ "$(grep -c '^build @cheap ' <<<"$fixture_calls")" = 2 ] &&
+        [ "$(cat "$fixture_dir/cap" 2>/dev/null)" = 900 ] &&
+        [ "$(head -n 1 "$fixture_dir/bounds" 2>/dev/null)" = 9 ]; } ||
+        eq_detail="repeat --cap=900 --test-cap=9: exit $fixture_rc; calls: ${fixture_calls:-<none>}; recorded cap: $(cat "$fixture_dir/cap" 2>/dev/null); bounds: $(tr '\n' ' ' <"$fixture_dir/bounds" 2>/dev/null)" ;;
+    wait-timeout)
+      # The run the run-cap probe left, finished and green. The reference
+      # goes first: a later word would overwrite a `--timeout=60` misread as one.
+      OCANNL_TOOL_TEST_RUNS=$TMP/eq-runs-cap "$repeat_root/tools/test-run.sh" wait last --timeout=60 \
+        >"$TMP/eq-wait.out" 2>&1
+      eq_rc=$?
+      [ "$eq_rc" = 0 ] || eq_detail="wait last --timeout=60: exit $eq_rc: $(cat "$TMP/eq-wait.out")" ;;
+    bisect-opts)
+      # Every option parsed, the bisect stops at its first check after them.
+      argv_probe eq-bisect bisect --cap=900 --test-cap=9 --build=@cheap good bad @cheap
+      { [ "$argv_rc" = 2 ] && [ -z "$argv_calls" ] &&
+        grep -qF "bisect passes OCANNL_BACKEND to every step explicitly" <<<"$argv_err"; } ||
+        eq_detail="bisect --cap=900 --test-cap=9 --build=T: exit $argv_rc; stderr: $argv_err" ;;
+    empty-eq)
+      # Read as "no test cap given", it would leave the default in force.
+      argv_probe eq-empty run --test-cap= build @cheap
+      { [ "$argv_rc" = 2 ] && [ -z "$argv_calls" ] &&
+        grep -qF -- "--test-cap requires a value" <<<"$argv_err"; } ||
+        eq_detail="run --test-cap=: exit $argv_rc; calls: ${argv_calls:-<none>}; stderr: $argv_err" ;;
+  esac
+}
+eq_all=
+for probe in "${eq_probes[@]}"; do
+  eq_check "$probe"
+  [ -z "$eq_detail" ] || { eq_all="$probe: $eq_detail"; break; }
+done
+# The spaced empty value, refused the same way (it is not in the mutant's set:
+# no `=` arm reads it).
+if [ -z "$eq_all" ]; then
+  argv_probe eq-empty-spaced run --test-cap "" build @cheap
+  { [ "$argv_rc" = 2 ] && [ -z "$argv_calls" ] &&
+    grep -qF -- "--test-cap requires a value" <<<"$argv_err"; } ||
+    eq_all="run --test-cap '': exit $argv_rc; calls: ${argv_calls:-<none>}; stderr: $argv_err"
+fi
+if [ -z "$eq_all" ]; then report 0 "$eq_label"; else report 1 "$eq_label" "$eq_all"; fi
+
+sk_probes=("run|run --cpu build @w" "fresh|fresh --gpu @w/runtest-a" "repeat|repeat --cpu 2 build @w"
+           "repeat|repeat --gpu=1 --direct 2 @w/runtest-a" "bisect|bisect --cpu good bad @w"
+           "run|run build @w --gpu" "plan|plan build @w --cpu=1" "repeat|repeat 2 build @w --cpu"
+           "fresh|fresh @w/runtest-a --gpu" "bisect|bisect good bad @w --cpu")
+sk_check() { # SUB|ARGV: runs it; sk_detail is empty iff it holds
+  local sub=${1%%|*} args=${1#*|} word
+  sk_detail=
+  # shellcheck disable=SC2086 # the probe's operands, split on purpose
+  argv_probe sk-probe $args
+  for word in $args; do case $word in --cpu* | --gpu*) break ;; esac; done
+  { [ "$argv_rc" = 2 ] && [ -z "$argv_calls" ] &&
+    grep -qF -- "${word} is not an option of tools/test-run.sh" <<<"$argv_err" &&
+    grep -qF -- "fleet-worker.sh execution slot ${word%%=*} -- tools/test-run.sh $sub" <<<"$argv_err"; } ||
+    sk_detail="$args: exit $argv_rc (want 2); dune calls: ${argv_calls:-<none>}; stderr: $argv_err"
+}
+sk_all=
+for probe in "${sk_probes[@]}"; do
+  sk_check "$probe"
+  [ -z "$sk_detail" ] || { sk_all=$sk_detail; break; }
+done
+# The control on the word's side: past dune's own `--` it is the program's.
+if [ -z "$sk_all" ]; then
+  argv_probe sk-after-sep run exec ./prog.exe -- --cpu
+  { [ "$argv_rc" = 0 ] && [ "$argv_calls" = "exec ./prog.exe -- --cpu" ]; } ||
+    sk_all="run exec ./prog.exe -- --cpu: exit $argv_rc; calls: ${argv_calls:-<none>}; stderr: $argv_err"
+fi
+if [ -z "$sk_all" ]; then report 0 "$sk_label"; else report 1 "$sk_label" "$sk_all"; fi
+
+# The mutants replace the fixture's copies (bisect's parser is bisect-steps.sh)
+# and are put back after each set.
+eq_mutate() { # PERL-0-PROGRAM: sets eq_made to 1 iff both copies were rewritten
+  local f n=0
+  for f in test-run.sh bisect-steps.sh; do
+    perl -0pe "$1" "$HERE/$f" >"$repeat_root/tools/$f"
+    cmp -s "$HERE/$f" "$repeat_root/tools/$f" || n=$((n + 1))
+  done
+  eq_made=0
+  [ "$n" = 2 ] && bash -n "$repeat_root/tools/test-run.sh" && bash -n "$repeat_root/tools/bisect-steps.sh" && eq_made=1
+}
+eq_restore() { cp "$HERE/test-run.sh" "$HERE/bisect-steps.sh" "$repeat_root/tools/"; }
+eq_mutate 's/(--[a-z-]+) \| \1=\*\)(\s*opt_value)/$1)$2/g'
+if [ "$eq_made" != 1 ]; then
+  report 1 "$eq_nc_label" "the mutant was not made"
+else
+  eq_survivors=
+  for probe in "${eq_probes[@]}"; do
+    eq_check "$probe"
+    [ -n "$eq_detail" ] || eq_survivors="$eq_survivors $probe"
+  done
+  if [ -z "$eq_survivors" ]; then report 0 "$eq_nc_label"; else report 1 "$eq_nc_label" "held under the mutant:$eq_survivors"; fi
+fi
+eq_restore
+eq_mutate 's/--cpu \| --cpu=\* \| --gpu \| --gpu=\*\) refuse_slot_option/--no-slot-kind) refuse_slot_option/g'
+if [ "$eq_made" != 1 ]; then
+  report 1 "$sk_nc_label" "the mutant was not made"
+else
+  sk_survivors=
+  for probe in "${sk_probes[@]}"; do
+    sk_check "$probe"
+    [ -n "$sk_detail" ] || sk_survivors="$sk_survivors [${probe#*|}]"
+  done
+  if [ -z "$sk_survivors" ]; then report 0 "$sk_nc_label"; else report 1 "$sk_nc_label" "held under the mutant:$sk_survivors"; fi
+fi
+eq_restore
+}
+harness_leg_run '95: value options spaced or with =; the slot kinds refused by every launcher #options' leg_95
 
 # ---------------------------------------------------------------------------
 # Leg 90: the runner's own variables never reach dune (gh-ocannl-1448)
