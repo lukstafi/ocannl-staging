@@ -458,7 +458,8 @@ module Scheme : sig
       body runs, prefixed ["applying the shape scheme <function> to <arguments>: "]. A trace a
       scheme cannot carry (random number generation, an external capture reference, forcing dims, or
       a body that cannot run on tracers) leaves the function unschemed, as it was before, once its
-      rewind succeeded. Tensor ids are unaffected: traces allocate from a reserved range. *)
+      rewind succeeded. Ids are unaffected: traces and checks allocate tensor ids, node uids and
+      shape-variable ids from reserved ranges. *)
 
   type handle
   (** A function's scheme slot: one per closure. *)

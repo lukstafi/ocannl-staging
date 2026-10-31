@@ -869,7 +869,7 @@ A function with a parameter that is not a tensor -- `dropout ~rate () ~train_ste
 
 **Refused traces degrade silently.** A function whose trace a scheme cannot carry -- random number generation inside it (including a closure built inside it whose parameters take the default random initialization), an external capture reference, forcing dims or projections, a body that cannot run on tracers -- stays unschemed, once the trace's rewind succeeded. It is a valid function, and its applications report what they always reported.
 
-**Side effects.** The trace runs the body once more per closure. Under the rewind it leaves no shape state, no tensor and no session id behind (traces allocate ids from a reserved range, so printed ids, generated code and random draws are the same with or without schemes), but OCaml side effects of the body (a counter, a print) happen.
+**Side effects.** The trace runs the body once more per closure. Under the rewind it leaves no shape state, no tensor and no session id behind (traces and checks allocate tensor ids, node uids and shape-variable ids from reserved ranges, so printed ids and shapes, compilation choices, generated code and random draws are the same with or without schemes), but OCaml side effects of the body (a counter, a print) happen.
 
 **Opting out.** `[@@ocannl.no_scheme]` on the binding, or `[@ocannl.no_scheme]` on a `fun` expression, leaves a function unschemed: for a body whose constraints depend on something other than its closure and its arguments' shapes (mutable state, say), or whose side effects must run exactly once per application. The configuration key `op_shape_schemes=off` switches the schemes off for the whole process.
 

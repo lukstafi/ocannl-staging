@@ -392,7 +392,12 @@ val product_dim_iterators : proj_env -> (proj_id * int * Ir.Indexing.symbol) lis
 (** {2 Shape-scheme support (gh-ocannl-404)}
 
     What [Shape.Scheme] needs to carry a trace's constraints past its rewind and rename them per
-    application. Dimension and row variables share one monotonic counter. *)
+    application. Dimension and row variables share one counter, monotonic within the session's range
+    and within the reserved range of {!with_reserved_vars}. *)
+
+val with_reserved_vars : (unit -> 'a) -> 'a
+(** Runs the function with row and dimension variables minted from a reserved range (an id-neutral
+    window, gh-ocannl-1751): every variable it mints must be discarded with it. *)
 
 val var_mark : unit -> int
 (** The id of the most recently minted variable: a variable with a larger id was minted since. *)

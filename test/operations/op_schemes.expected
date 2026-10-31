@@ -36,5 +36,9 @@ after the closure, a conflicting feature size is refused, naming the function: t
 inside the outer trace, the inner closure stays unschemed: true
 at the application, the inner closure is traced and checked, after the outer check: true
 the session hands out the same ids with schemes on and off: true
+and the same node uids, relative to the run's first node: true
+and the same shape variable ids, relative to the run's start: true
 the loss, the parameters (random initialization included) and their gradients are the same: true
 control (no id neutrality): the traces shift the session's ids: true
+control (no id neutrality): and its node uids: true
+control (no id neutrality): and its shape variable ids: true

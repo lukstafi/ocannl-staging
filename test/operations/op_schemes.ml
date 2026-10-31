@@ -318,6 +318,8 @@ let () =
       let run ~on =
         Tensor.For_testing.set_op_shape_schemes (Some on);
         Tensor.unsafe_reinitialize ();
+        let first = Tensor.term ~grad_spec:Prohibit_grad ~label:[ "first" ] () in
+        let first_var = Row.var_mark () in
         let lay1 = layer () in
         let lay2 = affine () in
         let x = Tensor.term_init [| 0.5; -1.0; 2.0 |] ~grad_spec:Prohibit_grad ~label:[ "x" ] () in
@@ -334,21 +336,33 @@ let () =
               Array.to_list (Context.get_values ctx d.Tensor.grad))
         in
         Tensor.For_testing.set_op_shape_schemes None;
-        ( Tensor.get_next_id (),
+        ( ( Tensor.get_next_id (),
+            loss.Tensor.value.Ir.Tnode.uid - first.Tensor.value.Ir.Tnode.uid,
+            Row.var_mark () - first_var ),
           List.map params ~f:(fun t -> t.Tensor.value.Ir.Tnode.id),
           values loss :: List.concat_map params ~f:(fun t -> [ values t; grads t ]) )
       in
+      let id1 (a, _, _) = a and uid_span (_, b, _) = b and var_span (_, _, c) = c in
       let next_on, ids_on, vals_on = run ~on:true in
       let next_off, ids_off, vals_off = run ~on:false in
-      Stdio.eprintf "(not part of the golden) next ids: on %d, off %d; values: %s\n%!" next_on
-        next_off
+      Stdio.eprintf "(not part of the golden) next ids: on %d, off %d; values: %s\n%!" (id1 next_on)
+        (id1 next_off)
         (String.concat ~sep:" | "
            (List.map vals_on ~f:(fun l -> String.concat ~sep:" " (List.map l ~f:Float.to_string))));
       p "the session hands out the same ids with schemes on and off"
-        (next_on = next_off && List.equal Int.equal ids_on ids_off);
+        (id1 next_on = id1 next_off && List.equal Int.equal ids_on ids_off);
+      p "and the same node uids, relative to the run's first node"
+        (uid_span next_on = uid_span next_off);
+      p "and the same shape variable ids, relative to the run's start"
+        (var_span next_on = var_span next_off);
       p "the loss, the parameters (random initialization included) and their gradients are the same"
         (List.equal (List.equal Float.equal) vals_on vals_off);
       let next_sabotaged, _, _ =
         Tensor.For_testing.without_id_neutrality (fun () -> run ~on:true)
       in
-      p "control (no id neutrality): the traces shift the session's ids" (next_sabotaged <> next_off))
+      p "control (no id neutrality): the traces shift the session's ids"
+        (id1 next_sabotaged <> id1 next_off);
+      p "control (no id neutrality): and its node uids"
+        (uid_span next_sabotaged <> uid_span next_off);
+      p "control (no id neutrality): and its shape variable ids"
+        (var_span next_sabotaged <> var_span next_off))

@@ -1712,7 +1712,9 @@ module Scheme = struct
       let first = !reserved_next_id in
       session_state.next_id <- first;
       Int.incr id_neutral_depth;
-      Exn.protect ~f ~finally:(fun () ->
+      Exn.protect
+        ~f:(fun () -> Tn.with_reserved_uids (fun () -> Row.with_reserved_vars f))
+        ~finally:(fun () ->
           Int.decr id_neutral_depth;
           let last = session_state.next_id in
           reserved_next_id := max !reserved_next_id last;
@@ -1884,8 +1886,10 @@ module Scheme = struct
        then put back -- the session afterwards is what the body alone makes. *)
     let check h scheme args =
       if Shape.can_checkpoint () then (
-        Shape.Scheme.check scheme ~application:(application_name args)
-          ~args:(List.map args ~f:(fun t -> t.shape));
+        (* Its renamed variables die with it: minted from the reserved range. *)
+        Row.with_reserved_vars (fun () ->
+            Shape.Scheme.check scheme ~application:(application_name args)
+              ~args:(List.map args ~f:(fun t -> t.shape)));
         emit (Checked h.name))
 
     let apply h args body =

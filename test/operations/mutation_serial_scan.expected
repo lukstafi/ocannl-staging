@@ -1,4 +1,5 @@
 tensor/row.ml: uid (ref) -- exempt: a fresh-id counter: ids are never reused, so a rewind need not restore it
+tensor/row.ml: reserved_uid (ref) -- exempt: a fresh-id counter of the id-neutral windows: never reused, so never restored
 tensor/row.ml: serial (ref) -- exempt: the serial itself: note_mutation is its writer
 tensor/row.ml: pending_roles (ref) -- accounted: every write noted or at a boundary; captured by capture_globals
 tensor/row.ml: reapply_rows_constr (ref) -- exempt: a transient flag of one constraint substitution, cleared before it returns or raises
