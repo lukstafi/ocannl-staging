@@ -1772,9 +1772,6 @@ module type With_buffer_retrieval_and_syncing = sig
       requiring [src] to contain the node and [dst] not to contain it. The destination shares
       [dst]'s upload arenas with host uploads, and the copy completes before the updated context is
       returned, so a stream failure can reclaim the unowned slot. *)
-
-  val sync_device : device -> unit
-  (** Synchronizes all the streams on a device, and cleans up (removes) all associated events. *)
 end
 
 type link_delta = {

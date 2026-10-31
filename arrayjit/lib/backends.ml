@@ -767,11 +767,6 @@ module Add_buffer_retrieval_and_syncing (Backend : No_buffer_retrieval_or_syncin
       Set.iter r.outputs ~f:(fun tn -> update_writer_event ~prune:false ~e r.context @@ Node tn)
     in
     { r with schedule = Task.(append ~work:post r.schedule) }
-
-  let sync_device device =
-    Backend.await device;
-    device.updating_for_merge_buffer <- None;
-    Hashtbl.clear device.updating_for
 end
 
 let%track6_sexp lower_assignments ~limits optim_ctx ?name bindings asgns =
