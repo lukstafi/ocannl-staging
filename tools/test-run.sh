@@ -28,18 +28,18 @@
 #     machine-verify; everything else (opam, PATH, OCANNL_*) passes through.
 #
 # Usage:
-#   tools/test-run.sh run   [--cap N] [--test-cap N] [--expect-backend B]... [DUNE ARGS...]
-#                                                      # foreground; digest; dune's status (2: refused)
-#   tools/test-run.sh start [--cap N] [--test-cap N] [--expect-backend B]... [DUNE ARGS...]
-#                                                      # detached; survives the session
-#   tools/test-run.sh plan  [--cap N] [--test-cap N] [--expect-backend B]... [DUNE ARGS...]
-#                                                      # what `run` would inject and take; runs nothing
+#   tools/test-run.sh run   [--cap N] [--test-cap N] [--expect-backend B]... [--targets-file FILE]...
+#                           [DUNE ARGS...]             # foreground; digest; dune's status (2: refused)
+#   tools/test-run.sh start [--cap N] [--test-cap N] [--expect-backend B]... [--targets-file FILE]...
+#                           [DUNE ARGS...]             # detached; survives the session
+#   tools/test-run.sh plan  [--cap N] [--test-cap N] [--expect-backend B]... [--targets-file FILE]...
+#                           [DUNE ARGS...]             # what `run` would inject and take; runs nothing
 #   tools/test-run.sh repeat [--cap N] [--test-cap N] [--alone] N [DUNE ARGS...]
 #                                                      # compare N isolated runs
 #   tools/test-run.sh repeat [--cap N] [--test-cap N] [--alone] --direct N @DIR/KIND-NAME... [-j N]
 #                                                      # build once, replay the tests N times
-#   tools/test-run.sh fresh [--cap N] [--test-cap N] [--expect-backend B]... @DIR/KIND-NAME... [-j N]
-#                                                      # one fresh, timed run of named tests
+#   tools/test-run.sh fresh [--cap N] [--test-cap N] [--expect-backend B]... [--targets-file FILE]...
+#                           @DIR/KIND-NAME... [-j N]   # one fresh, timed run of named tests
 #   tools/test-run.sh bisect [--cap N] [--test-cap N] [--build TARGET]... [--no-first-parent]
 #                            GOOD BAD TARGET...      # the first commit that turns TARGETs red
 #                                                    # (tools/bisect-steps.sh says how)
@@ -55,6 +55,39 @@
 #                                                      # the per-test aliases a change reaches,
 #                                                      # link-only ones last; runs none
 #                                                      # (tools/affected-tests.sh)
+#   tools/test-run.sh aliases PATH...                 # a test's per-test aliases, by family;
+#                                                      # runs none
+#
+# `--targets-file FILE` (repeatable; gh-ocannl-1740) adds the aliases FILE lists
+# to dune's argv, after its own words (before dune's `--`, if any): one `@`
+# operand per line, `#` comment lines and blank lines skipped, a relative FILE
+# read from the caller's directory. With no DUNE ARGS the subcommand is
+# `build`, and any other subcommand is refused; a file listing no alias, or a
+# line that is not one `@` operand, is refused before anything runs (exit 2).
+# It is how a long list reaches a batch without the caller's shell expanding
+# it: `affected ... >F` (its stdout is one alias per line) or `aliases ... >F`,
+# then `run --targets-file F build -j 4`. The alias check below reads the
+# listed aliases as it reads written ones. `--cpu` and `--gpu` are the fleet
+# slot's options, never this script's: written here they are refused (exit 2)
+# with the slot's spelling, rather than reaching dune as its subcommand.
+#
+# `aliases PATH...` lists the per-test aliases dune defines for each PATH,
+# grouped by family -- `runtest` (in `dune runtest`), `slow` (`dune build
+# @slow` only), `train` (`dune build @train` only) -- so a batch built from the
+# files a change touches asks for `slow-NAME` where that is the test's alias
+# (gh-ocannl-1740). A file `DIR/NAME.EXT...` (a test's source, its golden) is
+# the test NAME: DIR's aliases FAMILY-NAME and FAMILY-NAME-VARIANT, or, where
+# there are none, FAMILY-P for the longest P that NAME extends as P-SUFFIX (a
+# qualified golden, `NAME-BACKEND-0-0.log.expected`, is its test's); a
+# directory, or its `dune` file, is every per-test alias of that directory.
+# It asks `dune show aliases` (building nothing) under the worktree lock, as
+# `affected` does. The output is a valid --targets-file: a `# FAMILY` comment
+# line, then one `@DIR/ALIAS` per line. It reads names, not the build graph:
+# a helper module or an inline-test library's source names no test, and is
+# reported on stderr with a pointer to `affected --files`, which follows the
+# graph. Exit 0, every PATH found; 1, some PATH found nothing (the others are
+# listed); 2, refused (a path outside the worktree or in no directory, a
+# listing that did not read as dune's, a run holding the worktree).
 #
 # Read-only queries: `paths run [RUN|last]` resolves a recorded run (default last).
 # `paths worktree|runs|lock|owner|last [RUN|last]` without a run names THIS
@@ -217,7 +250,9 @@
 # without the option). A `dune build` naming an alias dune does not know
 # (`@test/operations/runtest-misspelt`) exits 2 under the verdict `ALIAS
 # REFUSED`, asked of dune before the batch's backends, the slot or the device
-# probe, and dune's build never started (see plan_aliases). And where the
+# probe, and dune's build never started (see plan_aliases); a refused
+# `runtest-NAME` whose test the directory has as `slow-NAME` or `train-NAME`
+# (or any of the three for another) names that alias too. And where the
 # batch's backends are resolved (a fleet slot, a width hazard, `plan`,
 # `--expect-backend`), a tree carrying a backend marker env_var_deps refuses
 # -- `; ocannl-backend: …` malformed, misplaced, or twice on one stanza --
@@ -309,21 +344,77 @@ reject_misplaced_options() {
   # The scan stops at dune's own `--`, past which the words belong to an
   # executable (`run exec foo.exe -- --cap 900` passes its cap to foo.exe).
   for arg do
+    [ "$arg" != -- ] || return 0
+    case $sub:$arg in
+      repeat:--targets-file | repeat:--targets-file=* | bisect:--targets-file | bisect:--targets-file=*)
+        die "--targets-file is an option of run, start, plan and fresh, not of $sub" ;;
+    esac
     case $arg in
       --) return 0 ;;
       --cap | --cap=* | --alone | --alone=* | --test-cap | --test-cap=* | --direct | --direct=* | \
-        --expect-backend | --expect-backend=*)
+        --expect-backend | --expect-backend=* | --targets-file | --targets-file=*)
         case $sub in
           repeat) form='repeat [--cap N] [--test-cap N] [--alone] [--direct] N [DUNE ARGS...]' ;;
-          fresh) form='fresh [--cap N] [--test-cap N] [--expect-backend B]... @DIR/KIND-NAME... [-j N]' ;;
+          fresh) form='fresh [--cap N] [--test-cap N] [--expect-backend B]... [--targets-file FILE]... @DIR/KIND-NAME... [-j N]' ;;
           bisect) form=$bisect_usage ;;
-          *) form="$sub [--cap N] [--test-cap N] [--expect-backend B]... [DUNE ARGS...]" ;;
+          *) form="$sub [--cap N] [--test-cap N] [--expect-backend B]... [--targets-file FILE]... [DUNE ARGS...]" ;;
         esac
         die "$arg belongs before the dune arguments, not after them:
   tools/test-run.sh $form
   dune has no such option, so this would have exited 1 having run nothing." ;;
     esac
   done
+}
+
+# `--targets-file FILE` (gh-ocannl-1740): a batch's aliases from a file, one
+# per line, so a long list -- `affected`'s output, `aliases`'s -- reaches dune
+# without being pasted into the command line or expanded by the caller's shell.
+# A relative FILE is the caller's, read from the directory the caller was in.
+# Blank lines and `#` comment lines are skipped, a CR before the newline is
+# dropped and the words are trimmed; every other line is one `@` alias operand
+# and nothing else, so no line can carry an option or a second word into
+# dune's argv. A file with no alias at all is refused: `dune build` with no
+# target builds the default alias, a long build that tests nothing.
+read_targets_files() { # FILE... -> targets_list
+  local f path line n
+  targets_list=()
+  for f do
+    case $f in
+      '') die "--targets-file requires a file" ;;
+      /* | [A-Za-z]:[/\\]*) path=$f ;;
+      *) path=$caller_pwd/$f ;;
+    esac
+    [ -f "$path" ] && [ -r "$path" ] || die "--targets-file $f: no readable file at $path"
+    n=0
+    while IFS= read -r line || [ -n "$line" ]; do
+      n=$((n + 1))
+      line=${line%$'\r'}
+      line=${line#"${line%%[![:space:]]*}"}
+      line=${line%"${line##*[![:space:]]}"}
+      case $line in '' | '#'*) continue ;; esac
+      case $line in
+        *[[:space:]]*) die "--targets-file $f:$n: one alias per line, not: $line" ;;
+        @?*) targets_list+=("$line") ;;
+        *) die "--targets-file $f:$n: not an alias operand (@DIR/NAME): $line" ;;
+      esac
+    done <"$path" || die "--targets-file $f: cannot read $path"
+  done
+  [ ${#targets_list[@]} -gt 0 ] ||
+    die "--targets-file $*: no alias listed; dune build with no target would build the default alias and test nothing"
+}
+# The dune argv with the listed targets after its own words, before dune's own
+# `--` where it has one.
+targets_splice() { # dune argv -> targets_spliced
+  local placed=0 arg
+  targets_spliced=()
+  for arg do
+    if [ "$placed" = 0 ] && [ "$arg" = -- ]; then
+      targets_spliced+=("${targets_list[@]}")
+      placed=1
+    fi
+    targets_spliced+=("$arg")
+  done
+  [ "$placed" = 1 ] || targets_spliced+=("${targets_list[@]}")
 }
 
 # The GPU width cap (gh-ocannl-983, gh-ocannl-1033). A box that reaches its GPU
@@ -982,17 +1073,32 @@ plan_aliases() { # dune argv; in `_resolve`, before the slot: sets alias_refusal
     elif alias_listed = "$d" "$name" "$run_dir/aliases.1"; then
       :
     elif [ "${recs[$i]}" = 0 ]; then
-      alias_refusal="$alias_refusal${alias_refusal:+$'\n'}${specs[$i]}: $d defines no alias $name"
+      alias_refusal="$alias_refusal${alias_refusal:+$'\n'}${specs[$i]}: $d defines no alias $name$(alias_family_hint 0 "$d" "$name" "$run_dir/aliases.1")"
     elif grep -qxF -e '?' "$run_dir/aliases.2"; then
       :
     elif ! awk -F '\t' -v d="$d" -v name="$name" \
            '$1 == "=" && $3 == name && (d == "." || index($2, d "/") == 1) { f = 1 } END { exit !f }' \
            "$run_dir/aliases.1" "$run_dir/aliases.2"; then
-      alias_refusal="$alias_refusal${alias_refusal:+$'\n'}${specs[$i]}: neither $d nor any directory below it defines an alias $name"
+      alias_refusal="$alias_refusal${alias_refusal:+$'\n'}${specs[$i]}: neither $d nor any directory below it defines an alias $name$(alias_family_hint 1 "$d" "$name" "$run_dir/aliases.1" "$run_dir/aliases.2")"
     fi
     i=$((i + 1))
   done
   rm -f "$run_dir/aliases.1" "$run_dir/aliases.2"
+}
+# A refused per-test alias whose test the listing has under another family
+# (gh-ocannl-1740): a batch built from file names asks for `runtest-NAME` where
+# NAME is a `@slow` member, and the refusal then names the alias to ask for.
+# Printed as the operand to write: `@DIR/ALIAS`, `@@ALIAS` at the root.
+alias_family_hint() { # recursive(0|1) dir name listing-file...
+  local rec=$1 d=$2 name=$3 rest found
+  shift 3
+  case $name in runtest-?* | slow-?* | train-?*) rest=${name#*-} ;; *) return 0 ;; esac
+  found=$(awk -F '\t' -v rec="$rec" -v d="$d" -v rest="$rest" -v name="$name" '
+    $1 == "=" && ($2 == d || (rec == 1 && (d == "." || index($2, d "/") == 1))) && $3 != name &&
+    ($3 == "runtest-" rest || $3 == "slow-" rest || $3 == "train-" rest) {
+      print ($2 == "." ? "@@" $3 : "@" $2 "/" $3)
+    }' "$@" | sort -u | tr '\n' ' ')
+  [ -z "$found" ] || printf '; the same test under another family: %s' "${found% }"
 }
 alias_member() { # word word...; 0 iff the first is among the rest
   local w=$1 x
@@ -1034,7 +1140,11 @@ select_dune() {
 # through its real path derive the same key, lock file, and recorded wt.
 # Read-only queries interpret relative paths here, never through a caller's
 # CDPATH (which can also make cd print an extra path on stdout).
-case ${1:-} in paths | lock-status | affected) CDPATH= ;; esac
+case ${1:-} in paths | lock-status | affected | aliases) CDPATH= ;; esac
+# The caller's own directory, physical, before the move: the one place a path
+# the caller wrote is read relative to it (`--targets-file FILE`, `aliases
+# PATH`), as the caller's shell would read it.
+caller_pwd=$(pwd -P 2>/dev/null) || caller_pwd=$PWD
 cd -P "$(dirname "$0")/.." || die "cannot cd to repo root"
 # Where this script and everything it runs of its own live: the helpers below
 # are sourced from here, and the run's own phases (`_resolve`, `_probe`) are
@@ -2933,32 +3043,120 @@ finish_run() { # rc -> append sentinel, record verdict
   done
 }
 
+# For a read-only query that asks dune about this worktree (`affected`,
+# `aliases`): a dune started beside a run's dune contends for `_build`. So it
+# takes the worktree's run lock, as a run does, and holds it on fd 9 through
+# every dune it starts: a run refuses meanwhile, and the query refuses during
+# a run. (No owner pointer is published: this is not a run to point at.) Where
+# the previous version's in-tree lock exists it is held too, on fd 5, as
+# take_lock holds it, so a launcher of that version is refused meanwhile; it
+# is never created, nor removed, here.
+hold_query_lock() {
+  query_state_for ""
+  if [ -e "$PWD/.test-run.lock" ]; then
+    exec 5>>"$PWD/.test-run.lock" || die "cannot open the previous version's lock file"
+    perl -e 'use Fcntl ":flock"; exit(flock(STDIN, LOCK_EX | LOCK_NB) ? 0 : 3)' <&5 ||
+      die "a run of the previous version is active in this worktree; $sub asks dune too, so wait for it"
+  fi
+  mkdir -p "$RUNS" || die "cannot create $RUNS"
+  exec 9>>"$LOCK" || die "cannot open lock file $LOCK"
+  perl -e 'use Fcntl ":flock"; exit(flock(STDIN, LOCK_EX | LOCK_NB) ? 0 : 3)' <&9 ||
+    die "a run is active in this worktree; $sub asks dune too, so wait for it (status last)"
+}
+
 sub=${1:-}
-[ -n "$sub" ] || die "usage: tools/test-run.sh run|start|plan|repeat|fresh|bisect|status|wait|stop|list|idle|paths|lock-status|affected ... (see header)"
+[ -n "$sub" ] || die "usage: tools/test-run.sh run|start|plan|repeat|fresh|bisect|status|wait|stop|list|idle|paths|lock-status|affected|aliases ... (see header)"
 shift
 
 case $sub in
   affected)
-    # Read-only, but it asks dune about this worktree, and a dune started
-    # beside a run's dune contends for `_build`. So it takes the worktree's run
-    # lock, as a run does, and holds it on fd 9 through the helper and every
-    # dune it starts: a run refuses meanwhile, and this refuses during a run.
-    # (No owner pointer is published: this is not a run to point at.) Where the
-    # previous version's in-tree lock exists it is held too, on fd 5, as
-    # take_lock holds it, so a launcher of that version is refused meanwhile;
-    # it is never created, nor removed, here.
-    query_state_for ""
-    if [ -e "$PWD/.test-run.lock" ]; then
-      exec 5>>"$PWD/.test-run.lock" || die "cannot open the previous version's lock file"
-      perl -e 'use Fcntl ":flock"; exit(flock(STDIN, LOCK_EX | LOCK_NB) ? 0 : 3)' <&5 ||
-        die "a run of the previous version is active in this worktree; affected asks dune too, so wait for it"
-    fi
-    mkdir -p "$RUNS" || die "cannot create $RUNS"
-    exec 9>>"$LOCK" || die "cannot open lock file $LOCK"
-    perl -e 'use Fcntl ":flock"; exit(flock(STDIN, LOCK_EX | LOCK_NB) ? 0 : 3)' <&9 ||
-      die "a run is active in this worktree; affected asks dune too, so wait for it (status last)"
+    hold_query_lock
     select_dune
     exec bash tools/affected-tests.sh "$@"
+    ;;
+  aliases)
+    # A test's aliases by family (gh-ocannl-1740): see the header. Paths are
+    # placed before anything is asked, so a usage error costs no dune.
+    [ $# -gt 0 ] || die "usage: tools/test-run.sh aliases PATH... (a test's source or golden, a directory, a dune file)"
+    al_dirs=() al_names=() al_paths=()
+    for al_p do
+      case $al_p in '' | *$'\n'* | *$'\t'* | *$'\r'*) die "aliases: not a usable path: $al_p" ;; esac
+      case $al_p in /* | [A-Za-z]:[/\\]*) al_abs=$al_p ;; *) al_abs=$caller_pwd/$al_p ;; esac
+      if [ -d "$al_abs" ]; then
+        al_dir=$al_abs al_name='*'
+      else
+        al_dir=$(dirname -- "$al_abs") al_base=$(basename -- "$al_abs")
+        case $al_base in
+          dune | dune-file) al_name='*' ;;
+          *) al_name=${al_base%%.*} ;;
+        esac
+        [ -n "$al_name" ] || die "aliases: $al_p: names no test (its name starts with a dot)"
+      fi
+      al_dir=$(cd -P -- "$al_dir" 2>/dev/null && pwd -P) || die "aliases: $al_p: no directory $(dirname -- "$al_abs")"
+      case $al_dir/ in
+        "$PWD"/*) al_dir=${al_dir#"$PWD"} al_dir=${al_dir#/} ;;
+        *) die "aliases: $al_p is outside this worktree ($PWD)" ;;
+      esac
+      [ -n "$al_dir" ] || al_dir=.
+      al_paths+=("$al_p") al_dirs+=("$al_dir") al_names+=("$al_name")
+    done
+    hold_query_lock
+    select_dune
+    run_dir=$(mktemp -d "${TMPDIR:-/tmp}/test-run-aliases.XXXXXX") || die "cannot create a scratch directory"
+    trap 'rm -rf "$run_dir"' EXIT
+    # promotion_bounded's bound: each listing query gets at most 30 s.
+    cap=0
+    al_uniq=()
+    for al_dir in "${al_dirs[@]}"; do
+      alias_member "$al_dir" ${al_uniq[@]+"${al_uniq[@]}"} || al_uniq+=("$al_dir")
+    done
+    alias_listing "$run_dir/listing" "${al_uniq[@]}" ||
+      die "aliases: dune's listing of ${al_uniq[*]} did not read as dune's answer; nothing to report"
+    : >"$run_dir/found"
+    al_rc=0 i=0
+    while [ "$i" -lt "${#al_paths[@]}" ]; do
+      al_dir=${al_dirs[$i]} al_name=${al_names[$i]}
+      if alias_listed - "$al_dir" "" "$run_dir/listing"; then
+        echo "aliases: ${al_paths[$i]}: dune knows no directory $al_dir" >&2
+        al_rc=1
+      elif ! awk -F '\t' -v d="$al_dir" -v name="$al_name" '
+             # A test T is the name itself, with its variants T-VARIANT; failing
+             # that, the longest `-` prefix of the name that is a test, the
+             # owner of a qualified golden (NAME-BACKEND-0-0.log.expected).
+             function emit(i) { print fam[i] "\t" (d == "." ? "@@" al[i] : "@" d "/" al[i]); f = 1 }
+             $1 == "=" && $2 == d && match($3, /^(runtest|slow|train)-/) {
+               n++; al[n] = $3; fam[n] = substr($3, 1, RLENGTH - 1); test[n] = substr($3, RLENGTH + 1)
+             }
+             END {
+               for (i = 1; i <= n; i++)
+                 if (name == "*" || test[i] == name || index(test[i], name "-") == 1) emit(i)
+               p = name
+               while (!f && name != "*" && match(p, /-[^-]*$/)) {
+                 p = substr(p, 1, RSTART - 1)
+                 for (i = 1; i <= n; i++) if (test[i] == p) emit(i)
+               }
+               exit !f
+             }' "$run_dir/listing" >>"$run_dir/found"; then
+        if [ "$al_name" = '*' ]; then
+          echo "aliases: ${al_paths[$i]}: $al_dir defines no per-test alias" >&2
+        else
+          echo "aliases: ${al_paths[$i]}: $al_dir defines no per-test alias of a test $al_name (a helper module rather than a test? tools/test-run.sh affected --files ${al_paths[$i]} lists what it reaches)" >&2
+        fi
+        al_rc=1
+      fi
+      i=$((i + 1))
+    done
+    for al_fam in runtest slow train; do
+      al_list=$(awk -F '\t' -v f="$al_fam" '$1 == f { print $2 }' "$run_dir/found" | sort -u)
+      [ -n "$al_list" ] || continue
+      case $al_fam in
+        runtest) echo "# runtest: run by dune runtest" ;;
+        slow) echo "# slow: outside dune runtest; dune build @slow runs them" ;;
+        train) echo "# train: outside dune runtest; dune build @train runs them" ;;
+      esac
+      printf '%s\n' "$al_list"
+    done
+    exit "$al_rc"
     ;;
   paths)
     [ $# -ge 1 ] && [ $# -le 2 ] || die "usage: paths FIELD [RUN|last]"
@@ -3963,6 +4161,7 @@ case $sub in
     # (plan_test_cap); a value here is explicit and applies to any batch.
     test_cap=${OCANNL_TOOL_PER_TEST_CAP:-}
     expect=
+    targets_files=()
     while [ $# -gt 0 ]; do
       case $1 in
         --cap) [ $# -ge 2 ] || die "--cap requires a value"; cap=$2; shift 2 ;;
@@ -3976,6 +4175,15 @@ case $sub in
             *) expect="$expect${expect:+ }$(batch_canonical "$2")" ;;
           esac
           shift 2 ;;
+        --targets-file)
+          [ $# -ge 2 ] || die "--targets-file requires a file"
+          targets_files+=("$2")
+          shift 2 ;;
+        # The fleet's slot kinds are fleet-worker.sh's options, not this
+        # script's: let through, the word became dune's subcommand and dune
+        # answered "COMMAND name is missing".
+        --cpu | --cpu=* | --gpu | --gpu=*)
+          die "$1 is not an option of tools/test-run.sh but of the fleet's run-time slot: on a fleet box $sub takes the slot itself, as --cpu where none of the batch's backends holds a GPU; to choose the kind, wrap the launch: fleet-worker.sh execution slot ${1%%=*} -- tools/test-run.sh $sub ..." ;;
         --) shift; break ;;
         *) break ;;
       esac
@@ -3983,6 +4191,19 @@ case $sub in
     normalize_cap
     [ -z "$test_cap" ] || normalize_cap test_cap --test-cap
     reject_misplaced_options "$@"
+    # The listed targets join the dune argv here, so everything after the
+    # intake -- the recorded command, the alias check, the backends' resolution,
+    # `fresh`'s operands -- sees them as if written on the command line.
+    if [ ${#targets_files[@]} -gt 0 ]; then
+      read_targets_files "${targets_files[@]}"
+      if [ "$sub" != fresh ]; then
+        [ $# -gt 0 ] || set -- build
+        [ "$1" = build ] ||
+          die "--targets-file lists aliases, which only dune's build takes: tools/test-run.sh $sub --targets-file FILE [build [DUNE OPTIONS...]], not $1"
+      fi
+      targets_splice "$@"
+      set -- "${targets_spliced[@]}"
+    fi
     # `fresh` is `run` over an argv of its own making (see the header and
     # fresh_argv); from here on it differs only where `_resolve` and `digest`
     # read the run's `mode`.
@@ -4533,5 +4754,5 @@ case $sub in
     done
     [ "$found" = 1 ] || echo "no recorded runs in $RUNS"
     ;;
-  *) die "unknown subcommand: $sub (run|start|plan|repeat|fresh|bisect|status|wait|stop|list|idle|paths|lock-status)" ;;
+  *) die "unknown subcommand: $sub (run|start|plan|repeat|fresh|bisect|status|wait|stop|list|idle|paths|lock-status|affected|aliases)" ;;
 esac

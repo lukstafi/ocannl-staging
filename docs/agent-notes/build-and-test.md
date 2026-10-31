@@ -2857,6 +2857,20 @@ in the `tools/*.sh` scripts (gh-ocannl-1111) and in the string literals of the O
     the two blind inline-test aliases: 13 (184 without the probe). One new `(test)` stanza with its
     golden in `test/operations/dune` lists that test and the scans reading the dune file, the module
     and the golden: 24 (572 without the probe).
+  - A long list reaches a batch through a file, not the command line (gh-ocannl-1740):
+    `tools/test-run.sh run --targets-file F [build DUNE OPTIONS...]` appends the `@` operands F
+    lists, one per line, `#` comments and blank lines skipped, so `affected ... >F` then `run
+    --targets-file F build -j 4` needs no shell expansion of a 75-alias list (a zsh `${(f)...}` of
+    one was refused by an agent harness's safety check and cost a wrapper script). A line that is
+    not one `@` operand, or a file naming none (`dune build` with no target builds the default
+    alias), is refused before anything runs. `tools/test-run.sh aliases PATH...` answers the
+    narrower question of a test's OWN aliases, by name from `dune show aliases`, grouped
+    `runtest`/`slow`/`train` as `#` comment headers -- itself a valid targets file. It exists because
+    a batch built from the test files a change touched asked for `runtest-NAME` where only
+    `slow-NAME` exists (`autotune_fission_sketch`, `autotune_batched_companion`,
+    `autotune_mma_companion`); the ALIAS REFUSED digest now also names a refused per-test alias's
+    siblings under the other families. It reads names, not the build graph: a helper module names no
+    test (exit 1, pointing at `affected --files`).
 
 ## OCaml and dune traps
 
