@@ -10,7 +10,7 @@ open Base
 
 let build ~uses_rocwmma ~with_debug =
   Ir.Compiler_options.hiprtc ~target_archs:[] ~hip_include_options:[ "-Ihip" ]
-    ~rocwmma_include_options:[ "-Irocwmma" ] ~uses_rocwmma ~with_debug
+    ~rocwmma_include_options:[ "-Irocwmma" ] ~uses_rocwmma ~with_debug ()
 
 let () =
   let cases =
@@ -69,7 +69,7 @@ let () =
     ~f:(fun (uses_rocwmma, with_debug, _) ->
       let options =
         Ir.Compiler_options.hiprtc ~target_archs:[ "gfx1102" ] ~hip_include_options:[ "-Ihip" ]
-          ~rocwmma_include_options:[ "-Irocwmma" ] ~uses_rocwmma ~with_debug
+          ~rocwmma_include_options:[ "-Irocwmma" ] ~uses_rocwmma ~with_debug ()
       in
       List.mem options "-real-true16" ~equal:String.equal);
   (* gh-ocannl-1222: HIPRTC 9.0's [-amdgpu-waitcnt-forcezero] (and its load-only sibling) puts a
@@ -79,5 +79,5 @@ let () =
     (List.concat_map (affected @ unaffected) ~f:(fun target_archs ->
          List.map cases ~f:(fun (uses_rocwmma, with_debug, _) ->
              Ir.Compiler_options.hiprtc ~target_archs ~hip_include_options:[ "-Ihip" ]
-               ~rocwmma_include_options:[ "-Irocwmma" ] ~uses_rocwmma ~with_debug)))
+               ~rocwmma_include_options:[ "-Irocwmma" ] ~uses_rocwmma ~with_debug ())))
     ~f:(List.exists ~f:(String.is_prefix ~prefix:"-amdgpu-waitcnt-"))
