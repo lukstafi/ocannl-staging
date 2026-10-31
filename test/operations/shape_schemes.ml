@@ -358,8 +358,66 @@ let () =
         (Result.is_error (inline concat [ x ]));
       Tensor.unsafe_reinitialize ();
       let s = Tensor.Scheme.trace ~label:"concat" 1 concat in
-      p "control (no marks): the scheme's application guesses the component instead"
-        (Result.is_ok (instantiate_closed ~sabotage:No_marks s [ x ])))
+      p "control (no marks): the scheme's application no longer refuses to guess the component"
+        (match instantiate_closed ~sabotage:No_marks s [ x ] with
+        | Ok _ -> true
+        | Error msg -> not (String.is_substring msg ~substring:"concatenation component")))
+
+(* An intermediate's row is finalized by the closure as an update step's is: an unsized
+   concatenation component off the function's boundary is refused inline, and must be by the
+   scheme. *)
+let () =
+  Verdict.case "an intermediate's rows are finalized" (fun () ->
+      let x () = leaf ~batch:[ 2 ] "x" [ 3 ] in
+      let intermediate = function
+        | [ x ] ->
+            ignore (NTDSL.einsum1 "...|...->a => ...|...->p^a" x () : Tensor.t);
+            [ x ]
+        | _ -> assert false
+      in
+      let i = inline intermediate [ x ] in
+      p "inline, the intermediate's unsized component is refused at the closure" (Result.is_error i);
+      Tensor.unsafe_reinitialize ();
+      let s = Tensor.Scheme.trace ~label:"intermediate" 1 intermediate in
+      same_closure "an unsized component off the boundary" ~inline:i
+        ~scheme:(instantiate_closed s [ x ]);
+      Tensor.unsafe_reinitialize ();
+      let s = Tensor.Scheme.trace ~label:"intermediate" 1 intermediate in
+      p "control (no internal rows): the scheme's application accepts it instead"
+        (Result.is_ok (instantiate_closed ~sabotage:No_internal_rows s [ x ])))
+
+(* A scheme applied inside a traced function: the outer scheme keeps the inner one's anchors. *)
+let () =
+  Verdict.case "a scheme applied inside a trace keeps its shared parameter" (fun () ->
+      Tensor.unsafe_reinitialize ();
+      let lay = layer () in
+      let inner =
+        Tensor.Scheme.trace ~label:"inner" 1 (function [ x ] -> [ lay x ] | _ -> assert false)
+      in
+      let outer =
+        Tensor.Scheme.trace ~label:"outer" 1 (function
+          | [ x ] ->
+              let y = Tensor.term ~grad_spec:Prohibit_grad ~label:[ "y" ] () in
+              Tensor.Scheme.instantiate inner ~args:[ x.shape ] ~results:[ y.shape ];
+              [ NTDSL.O.relu y ]
+          | _ -> assert false)
+      in
+      let apply x =
+        let r = result_shape "r" in
+        Tensor.Scheme.instantiate outer ~args:[ x.Tensor.shape ] ~results:[ r ];
+        r
+      in
+      let r2 = apply (leaf ~batch:[ 2 ] "x2" [ 3 ]) in
+      let first = close_all [ r2 ] in
+      p "the composed scheme applies before a closure"
+        (Result.equal (List.equal (List.equal Int.equal)) String.equal first (Ok [ [ 2; 4 ] ]));
+      p "after the closure, the composed scheme applies again"
+        (succeeds (fun () ->
+             let r5 = apply (leaf ~batch:[ 5 ] "x5" [ 3 ]) in
+             ignore (close_all [ r5 ])));
+      p "after the closure, a conflicting feature size is refused"
+        (raises ~substrings:[ "applying the shape scheme outer" ] (fun () ->
+             ignore (apply (leaf "x_f5" [ 5 ]) : Shape.t))))
 
 (* {2 Capture references} *)
 

@@ -2171,9 +2171,10 @@ let active_update_steps = ref [] [@@mutation_serial.fingerprinted]
 let active_constraints = ref [] [@@mutation_serial.fingerprinted]
 
 (* gh-ocannl-404: an applied shape scheme registers no update step -- there is no computation to
-   project -- so the closure learns of it here: its boundary shapes get the solution applied and are
-   closed, and their rows join the update steps' rows at the [Shape_row] stage. Session state like
-   the steps: captured by checkpoints, cleared by closures and resets. *)
+   project -- so the closure learns of it here: its boundary (and anchored) shapes get the solution
+   applied and are closed, and their rows, with the scheme's renamed internal rows, join the update
+   steps' rows at the [Shape_row] stage. Session state like the steps: captured by checkpoints,
+   cleared by closures and resets. *)
 type scheme_instance = { inst_shapes : t list; inst_rows : (Row.t * Row.constraint_origin) list }
 
 let active_instances : scheme_instance list ref = ref [] [@@mutation_serial.fingerprinted]
@@ -4408,16 +4409,22 @@ let parse_n5_layout priorities =
     constraints the traced function registered, in registration order, and the solution equations of
     their variables under the trace's final environment. The equations matter: the solver mints
     variables while solving and writes them into shapes, and later constraints mention them, so a
-    renamed replay of the constraints alone would come apart. Everything else -- the boundary rows
-    and the rows of the pre-existing shapes the trace used -- is exported substituted under that
-    environment, so it holds only unsolved variables, which the equations relate. Variables minted
-    since the trace began are renamed per application (generalized); older ones stay (fixed), and
-    the anchors re-tie them to their shapes' current rows, which keeps them valid across a closure.
-*)
+    renamed replay of the constraints alone would come apart. Everything else -- the boundary rows,
+    the internal rows closure finalizes, the rows of the pre-existing shapes the trace used -- is
+    exported substituted under that environment, so it holds only unsolved variables, which the
+    equations relate. Variables minted since the trace began are renamed per application
+    (generalized); older ones stay (fixed), and the anchors re-tie them to their shapes' current
+    rows, which keeps them valid across a closure. *)
 module Scheme = struct
   type shape = t
   type rows = { r_batch : Row.t; r_input : Row.t; r_output : Row.t }
-  type sabotage = No_generalization | Sever_shared | No_marks | No_end_validation
+
+  type sabotage =
+    | No_generalization
+    | Sever_shared
+    | No_marks
+    | No_internal_rows
+    | No_end_validation
 
   type nonrec t = {
     label : string;
@@ -4426,6 +4433,9 @@ module Scheme = struct
         (** The trace's constraints, oldest first, then the solution equations. *)
     arg_rows : rows list;
     result_rows : rows list;
+    internal_rows : (Row.t * Row.constraint_origin) list;
+        (** The rows of every shape the trace's steps (and the schemes it applied) held: closure's
+            [Shape_row] stage finalizes non-terminal variables, an intermediate's too. *)
     anchors : (shape * rows) list;
         (** Pre-existing open shapes the trace used, with their rows at the end of the trace. *)
     marks : Row.marks;
@@ -4468,6 +4478,7 @@ module Scheme = struct
     let sabotaged x = Option.exists sabotage ~f:(fun y -> Poly.equal x y) in
     let constraints_mark = !active_constraints in
     let steps_mark = !active_update_steps in
+    let instances_mark = !active_instances in
     let row_globals = Row.capture_globals () in
     let env_start = !state in
     let unused_start = !unused_shapes in
@@ -4563,12 +4574,22 @@ module Scheme = struct
                   }))
       in
       let steps = List.rev (window ~mark:steps_mark !active_update_steps) in
+      (* A scheme the function applied registered no step: its instance holds its boundary and
+         anchored shapes, and its rows. *)
+      let instances = List.rev (window ~mark:instances_mark !active_instances) in
       let used_shapes =
         List.concat_map steps ~f:(fun step ->
             let acc = ref [] in
             iter_shapes step ~f:(fun sh -> acc := sh :: !acc);
             List.rev !acc)
+        @ List.concat_map instances ~f:(fun inst -> inst.inst_shapes)
         @ results
+      in
+      let internal_rows =
+        List.concat_map steps ~f:all_rows_w_origin
+        @ List.concat_map instances ~f:(fun inst -> inst.inst_rows)
+        |> List.map ~f:(fun (r, o) -> (Row.subst_row env_end r, o))
+        |> List.dedup_and_sort ~compare:(fun (r1, _) (r2, _) -> Row.compare r1 r2)
       in
       let anchors =
         List.filter (dedup_shapes used_shapes) ~f:pre_existing
@@ -4581,7 +4602,8 @@ module Scheme = struct
       let fixed_unsolved =
         List.concat_map
           (List.map (constraints @ solutions) ~f:Row.constraint_vars
-          @ List.concat_map (arg_rows @ result_rows) ~f:rows_vars)
+          @ List.concat_map (arg_rows @ result_rows) ~f:rows_vars
+          @ List.map internal_rows ~f:(fun (r, _) -> Row.row_vars r))
           ~f:(fun (ds, rs) ->
             List.filter_map ds ~f:(fun v ->
                 if Row.dim_var_id v <= var_mark && Option.is_none (Row.get_dim_from_env env_end v)
@@ -4617,6 +4639,7 @@ module Scheme = struct
         constraints = constraints @ solutions;
         arg_rows;
         result_rows;
+        internal_rows;
         anchors;
         marks;
         discardable =
@@ -4714,9 +4737,12 @@ module Scheme = struct
       else List.concat_map s.anchors ~f:(fun (sh, r) -> equate r sh)
     in
     let all = constraints @ boundary @ anchors in
-    let inst_shapes = dedup_shapes (args @ results) in
+    (* The anchored shapes too: a trace that applies this scheme must see them as used. *)
+    let inst_shapes = dedup_shapes (args @ results @ List.map s.anchors ~f:fst) in
     let inst_rows =
-      List.concat_map inst_shapes ~f:(fun (sh : shape) ->
+      (if sabotaged No_internal_rows then []
+       else List.map s.internal_rows ~f:(fun (r, o) -> (Row.rename_row rn r, o)))
+      @ List.concat_map inst_shapes ~f:(fun (sh : shape) ->
           List.map
             [ (`Batch, sh.batch); (`Input, sh.input); (`Output, sh.output) ]
             ~f:(fun (kind, r) -> (r, { origin with lhs_kind = kind; rhs_kind = kind })))

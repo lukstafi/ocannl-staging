@@ -456,7 +456,7 @@ What a scheme holds:
 
 - the constraints of the trace's window, in registration order;
 - their variables' *solution equations* under the trace's final environment. The solver mints variables while solving and writes them into shapes, and later constraints mention them, so renaming the constraints alone would come apart;
-- the boundary rows and the rows of the pre-existing shapes `f` used, substituted under that environment;
+- the boundary rows, the internal rows the closure finalizes (an intermediate's too, as for an update step), and the rows of the pre-existing shapes `f` used, all substituted under that environment;
 - the policy marks the trace added (resolve-at-use, concatenation components, and so on), which the rewind takes back.
 
 **Generalization follows ML's value restriction.**

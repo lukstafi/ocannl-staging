@@ -491,7 +491,8 @@ val parse_n5_layout : string -> int array
     ones), keeps the older ones (shared parameters' and every other pre-existing tensor's: fixed),
     and relates the scheme's boundary rows to given argument and result shapes. It runs no function
     body and registers no update step: the next closure applies the solution to the boundary shapes
-    and closes them. *)
+    and closes them, and finalizes the scheme's internal rows (renamed) as it finalizes an update
+    step's rows. *)
 module Scheme : sig
   type shape := t
   type t
@@ -503,6 +504,8 @@ module Scheme : sig
         (** Rename every variable and drop the anchors: no application stays tied to pre-existing
             shapes. *)
     | No_marks  (** Re-add none of the trace's policy marks ([instantiate] only). *)
+    | No_internal_rows
+        (** Register none of the scheme's internal rows with the closure ([instantiate] only). *)
     | No_end_validation  (** Skip the end-of-trace solve of the whole window ([trace] only). *)
 
   val label : t -> string
@@ -530,9 +533,9 @@ module Scheme : sig
     ?sabotage:sabotage -> t -> application:string -> args:shape list -> results:shape list -> unit
   (** Adds the scheme's renamed constraints and the equalities of its boundary rows with [args] and
       [results] (and of its anchored pre-existing shapes with their current rows), solves them at
-      Stage1, and registers the boundary shapes with the next closure. Every added constraint
-      carries an origin naming the scheme and [application], so a closure-time failure names them
-      too. Raises [Row.Shape_error] prefixed
+      Stage1, and registers the boundary shapes and the internal rows with the next closure. Every
+      added constraint carries an origin naming the scheme and [application], so a closure-time
+      failure names them too. Raises [Row.Shape_error] prefixed
       ["applying the shape scheme <label> to <application>: "]: before anything is written, on an
       arity mismatch, a boundary or anchored shape discarded by a rewind, or a closure since the
       trace when the scheme depends on open state no anchored shape holds; after registering

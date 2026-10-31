@@ -37,7 +37,14 @@ an intermediate reduction: the scheme's application closes as the inline one doe
 an unsized concatenation component: inline refused, scheme refused
 an unsized concatenation component: the scheme's application closes as the inline one does: true
 inline, the unsized concatenation component is refused at the closure: true
-control (no marks): the scheme's application guesses the component instead: true
+control (no marks): the scheme's application no longer refuses to guess the component: true
+inline, the intermediate's unsized component is refused at the closure: true
+an unsized component off the boundary: inline refused, scheme refused
+an unsized component off the boundary: the scheme's application closes as the inline one does: true
+control (no internal rows): the scheme's application accepts it instead: true
+the composed scheme applies before a closure: true
+after the closure, the composed scheme applies again: true
+after the closure, a conflicting feature size is refused: true
 a reference made inside the function: inline 2x5 2, scheme 2x5 2
 a reference made inside the function: the scheme's application closes as the inline one does: true
 a reference made outside the function and bound by it is refused at the trace: true
