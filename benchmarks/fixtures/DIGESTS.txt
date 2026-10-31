@@ -48,6 +48,8 @@ c322a00b72df143612eafafedf7c468e9c05f3e4bc1e7eb6d77ada651ef98de8  13871384  gpt2
 c322a00b72df143612eafafedf7c468e9c05f3e4bc1e7eb6d77ada651ef98de8  13871384  gpt2_mini.safetensors  rog-nv  content-v1
 c322a00b72df143612eafafedf7c468e9c05f3e4bc1e7eb6d77ada651ef98de8  13871384  gpt2_mini.safetensors  tuf  content-v1
 5431f8c2956caa72acef8028ec37b98e433ebc9466c3a5727abda140078af922  13809936  gpt2_mini_b1.safetensors  m4-max  content-v1
+5431f8c2956caa72acef8028ec37b98e433ebc9466c3a5727abda140078af922  13809936  gpt2_mini_b1.safetensors  minix  content-v1
+5431f8c2956caa72acef8028ec37b98e433ebc9466c3a5727abda140078af922  13809936  gpt2_mini_b1.safetensors  rog-nv  content-v1
 5431f8c2956caa72acef8028ec37b98e433ebc9466c3a5727abda140078af922  13809936  gpt2_mini_b1.safetensors  tuf  content-v1
 57073d6f98aa7d310ab9bfbba6636c394afd8800cf1816fcd5109b52f1c363db  14756128  gpt2_mini_s1024.safetensors  m4-max  content-v1
 57073d6f98aa7d310ab9bfbba6636c394afd8800cf1816fcd5109b52f1c363db  14756128  gpt2_mini_s1024.safetensors  minix  content-v1
