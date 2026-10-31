@@ -717,10 +717,24 @@ let%track7_sexp op ~(label : string list) ?(ternary_op = Shape.Pointwise_tern)
                Some t )
   in
   let projections = make_projections ~shape ~shape_logic ~get_step in
-  let fwds =
-    List.filter_map ordered_ts ~f:(fun ti -> if is_fwd_root ti then Some ti.forward else None)
+  let fwd_root_ts = List.filter ordered_ts ~f:is_fwd_root in
+  let fwds = List.map fwd_root_ts ~f:(fun ti -> ti.forward) in
+  (* gh-ocannl-1746: [fwds] already carries the root operands' forward code, so they are hidden from
+     the root map while [op_asn] runs: a [%cd] [op_asn] naming an operand tensor (as
+     [Operation.interleave] does) would otherwise embed its code a second time -- and mark it taken.
+     Restored on the way out, so a failing [op_asn] leaves the roots as they were; they are removed
+     for good below, once the operation is registered. *)
+  let this_op_asn =
+    session_state.forward_roots <-
+      List.fold fwd_root_ts ~init:session_state.forward_roots ~f:(fun roots ti ->
+          Map.remove roots ti.value.id);
+    Exn.protect
+      ~f:(fun () -> Shape.with_construction_window (fun () -> op_asn ~t ~projections))
+      ~finally:(fun () ->
+        session_state.forward_roots <-
+          List.fold fwd_root_ts ~init:session_state.forward_roots ~f:(fun roots ti ->
+              Map.set roots ~key:ti.value.id ~data:ti))
   in
-  let this_op_asn = Shape.with_construction_window (fun () -> op_asn ~t ~projections) in
   (* An [op_asn] that forced the handle and swallowed the rejection has built its assignments over a
      poisoned thunk (a forced lazy re-raises); the operation is unusable either way. *)
   if !forced_early then
