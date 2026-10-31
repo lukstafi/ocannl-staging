@@ -123,6 +123,8 @@
   (alias runtest-source_inventory_cases)
   (alias runtest-cache_dir_ignores)
   (alias runtest-cache_dir_ignores_control)
+  (alias runtest-generated_lock_scan)
+  (alias runtest-generated_lock_scan_control)
   (alias runtest-atomic_file_rename_scan)
   (alias runtest-atomic_file_rename_scan_control)
   (alias runtest-dead_export_scan)
@@ -313,6 +315,8 @@
   (alias runtest-env_var_deps_control)
   (alias runtest-cache_dir_ignores)
   (alias runtest-cache_dir_ignores_control)
+  (alias runtest-generated_lock_scan)
+  (alias runtest-generated_lock_scan_control)
   (alias runtest-atomic_file_rename_scan)
   (alias runtest-atomic_file_rename_scan_control)
   (alias runtest-dead_export_scan)
@@ -3922,6 +3926,9 @@
   cache_dir_scan_cases.expected
   cache_dir_ignores.expected
   cache_dir_ignores_control.expected
+  generated_lock_scan.ml
+  generated_lock_scan.expected
+  generated_lock_scan_control.expected
   census_total_ratchet.ml
   census_total_ratchet.expected
   codegen_text_inventory.ml
@@ -4006,6 +4013,8 @@
    changelog_unreleased_scan.expected
    cache_dir_ignores.ml
    cache_dir_scan_cases.expected,cache_dir_ignores.expected,cache_dir_ignores_control.expected
+   generated_lock_scan.ml
+   generated_lock_scan.expected,generated_lock_scan_control.expected
    census_total_ratchet.ml
    census_total_ratchet.expected
    codegen_text_inventory.ml
@@ -4272,6 +4281,67 @@
  (package neural_nets_lib)
  (action
   (diff cache_dir_ignores_control.expected cache_dir_ignores_control.actual)))
+
+; gh-ocannl-1749: a program that calls `Generated.init` and runs under several stanzas shares one
+; `(locks …)` across all of them, or its stanza carries the exempting marker (grammar in the scan's
+; header). The
+; initializer empties `build_files/<exe>/`, which two concurrent runs of one executable share
+; (gh-ocannl-1720). Every dune file and every OCaml source: the runners of a program can sit in any
+; directory, and its modules in its own. `--control` holds the rule to synthetic trees.
+
+(executable
+ (name generated_lock_scan)
+ (modules generated_lock_scan)
+ (libraries base stdio test_utils arrayjit.verdict))
+
+(rule
+ ; ocannl-backend: none -- links no backend: it reads dune files and OCaml sources as text.
+ ; Two targets: the file list goes over as a `@<path>` response file, see `test/support/scan_argv.ml`.
+ (targets generated_lock_scan.actual generated_lock_scan.filelist)
+ (package neural_nets_lib)
+ (deps
+  (alias runtest-env_spelling_gate)
+  ocannl_config
+  (glob_files_rec ../../dune)
+  (glob_files_rec ../../*.ml))
+ (action
+  (progn
+   (with-stdout-to
+    generated_lock_scan.filelist
+    (echo "%{deps}"))
+   (with-stdout-to
+    generated_lock_scan.actual
+    (run
+     %{dep:generated_lock_scan.exe}
+     %{workspace_root}
+     @generated_lock_scan.filelist)))))
+
+(rule
+ (alias runtest-generated_lock_scan)
+ (package neural_nets_lib)
+ (action
+  (diff generated_lock_scan.expected generated_lock_scan.actual)))
+
+(rule
+ ; ocannl-backend: none -- runs the scan over synthetic trees held in its own source.
+ (target generated_lock_scan_control.actual)
+ (package neural_nets_lib)
+ (deps
+  (alias runtest-env_spelling_gate)
+  ocannl_config
+  generated_lock_scan.ml)
+ (action
+  (with-stdout-to
+   %{target}
+   (run %{dep:generated_lock_scan.exe} --control))))
+
+(rule
+ (alias runtest-generated_lock_scan_control)
+ (package neural_nets_lib)
+ (action
+  (diff
+   generated_lock_scan_control.expected
+   generated_lock_scan_control.actual)))
 
 ; gh-ocannl-803/862: raw OCaml rename publication belongs in Utils.Atomic_file. The source glob is
 ; recursive over the whole repository, so a new top-level directory joins the scan without another
@@ -6461,6 +6531,9 @@
   (alias runtest-env_spelling_gate)
   ocannl_config
   (env_var OCANNL_BACKEND))
+ ; Both runs of the executable: the plain one empties build_files/fixed_name_temporaries/ through
+ ; Generated.init, which a concurrent sibling run would share (gh-ocannl-1749).
+ (locks fixed_name_temporaries)
  (action
   (with-stdout-to
    %{target}
@@ -6484,6 +6557,8 @@
   (alias runtest-env_spelling_gate)
   ocannl_config
   (env_var OCANNL_BACKEND))
+ ; The plain run's lock (gh-ocannl-1749).
+ (locks fixed_name_temporaries)
  (action
   (with-stdout-to
    %{target}
@@ -6525,9 +6600,6 @@
   (alias runtest-env_spelling_gate)
   ocannl_config
   (env_var OCANNL_BACKEND))
- ; Both runs of the executable: the plain one empties build_files/fixed_name_temporaries/ through
- ; Generated.init, which a concurrent sibling run would share (gh-ocannl-1749).
- (locks fixed_name_temporaries)
  (action
   (with-stdout-to
    %{target}
@@ -6567,8 +6639,6 @@
   (alias runtest-env_spelling_gate)
   ocannl_config
   (env_var OCANNL_BACKEND))
- ; The plain run's lock (gh-ocannl-1749).
- (locks fixed_name_temporaries)
  (action
   (with-stdout-to
    %{target}

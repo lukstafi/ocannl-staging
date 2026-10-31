@@ -1,0 +1,44 @@
+two rules running a Generated.init program with no lock are refused: true
+a test and its rerun with the lock on only one of them are refused: true
+one relative lock name in two directories is two locks, and refused: true
+a test and its rerun sharing one lock are accepted: true
+a global lock named from two directories is one lock: true
+a program that only mentions Generated.init needs no lock: true
+a Generated.init program with one runner needs no lock: true
+a marked program is exempt: true
+a marker on a program with one runner is refused as stale: true
+a marker beside a shared lock is refused as redundant: true
+two markers on one stanza are refused: true
+a marker on a stanza declaring two programs is refused: true
+two runners on one line are two runners: true
+a malformed marker is refused: true
+a marker on a rule is refused as misplaced: true
+a marker between stanzas is refused: true
+a marker outside a comment is refused: true
+a lock built from a pform is refused as unread: true
+a lock that is not an atom is refused as unread: true
+a program module with no source is refused: true
+a program source that does not parse is refused: true
+an empty dune-file corpus is refused: true
+an empty OCaml source corpus is refused: true
+a reader exception on a source that parses reaches the scanner-defect refusal, not the parse one: true
+
+Synthetic controls: scanner refusal diagnostics exercised by this control golden:
+  [scanner-refusal:feb2a77e5687a83594725de6a658eb72] names the lock
+  [scanner-refusal:5a695f9728903023648f3c3009d581c9] locks … field
+  [scanner-refusal:1926b093c11bb0b478fa3697c4d721bf] names Generated and
+  [scanner-refusal:43db180ec02405f5d8629c5c69f525d3] Generated.init
+  [scanner-refusal:9de3b3fd1cd96a8d87e76bfa31534244] comment that does
+  [scanner-refusal:d6feeef530479095718ac0f80b9bb9c6] carries a generated-lock
+  [scanner-refusal:7b93ef6acc4c55c6949954343adf990e] generated-lock marker that
+  [scanner-refusal:a38b34600b092396f721b0136279947a] times and only
+  [scanner-refusal:09ef62c73fdb16b5131522e01174b8f6] second generated-lock marker
+  [scanner-refusal:fd2664a19380f998eb12b41499b0ca82] generated-lock marker and
+  [scanner-refusal:a4942423e5944e763f1ac78611e93bd1] names the module
+  [scanner-refusal:25fdee0fd0c8695a009a7ccdde8a8076] generated-lock marker and
+  [scanner-refusal:176646e4df25881fadbc9bcd82136c75] Generated.init
+  [scanner-refusal:22c4d07ebbb0433c6b849bf356be019f] Generated.init
+  [scanner-refusal:e62fde2478073ff697b31a8548df54f1] dune-file glob matches
+  [scanner-refusal:90a5bf8d781c4ed0a5407b52bd9fa3cd] arguments the rule's
+  [scanner-refusal:a02da6b10b325cc5503fe4adf61da286] reaches the scanner-defect
+End of synthetic controls.

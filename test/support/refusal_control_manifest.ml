@@ -150,6 +150,27 @@ let raw_entries =
         "[scanner-refusal:9446215c7b3c2270741bbb1cd8300733] executable exactly once";
         "[scanner-refusal:75093564cde01f102b3c81d2ebde6ccd] synthetic public executable";
       ] );
+    ( "generated_lock_scan.ml",
+      [
+        "[scanner-refusal:feb2a77e5687a83594725de6a658eb72] names the lock";
+        "[scanner-refusal:5a695f9728903023648f3c3009d581c9] locks \226\128\166 field";
+        "[scanner-refusal:1926b093c11bb0b478fa3697c4d721bf] names Generated and";
+        "[scanner-refusal:43db180ec02405f5d8629c5c69f525d3] Generated.init";
+        "[scanner-refusal:9de3b3fd1cd96a8d87e76bfa31534244] comment that does";
+        "[scanner-refusal:d6feeef530479095718ac0f80b9bb9c6] carries a generated-lock";
+        "[scanner-refusal:7b93ef6acc4c55c6949954343adf990e] generated-lock marker that";
+        "[scanner-refusal:a38b34600b092396f721b0136279947a] times and only";
+        "[scanner-refusal:09ef62c73fdb16b5131522e01174b8f6] second generated-lock marker";
+        "[scanner-refusal:fd2664a19380f998eb12b41499b0ca82] generated-lock marker and";
+        "[scanner-refusal:a4942423e5944e763f1ac78611e93bd1] names the module";
+        "[scanner-refusal:25fdee0fd0c8695a009a7ccdde8a8076] generated-lock marker and";
+        "[scanner-refusal:176646e4df25881fadbc9bcd82136c75] Generated.init";
+        "[scanner-refusal:22c4d07ebbb0433c6b849bf356be019f] Generated.init";
+        "[scanner-refusal:e62fde2478073ff697b31a8548df54f1] dune-file glob matches";
+        "[scanner-refusal:90a5bf8d781c4ed0a5407b52bd9fa3cd] arguments the rule's";
+        "[scanner-refusal:a02da6b10b325cc5503fe4adf61da286] reaches the scanner-defect";
+        "[scanner-refusal:01eec44b44e6e6a758bc7e95ef545443] Generated.init";
+      ] );
     ( "cache_dir_ignores.ml",
       [
         "[scanner-refusal:e2e9d19ffe2ad7688396847bd1ee643a] the repository-root gitignore";

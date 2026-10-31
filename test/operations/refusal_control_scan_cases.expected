@@ -136,6 +136,25 @@ cache_dir_ignores.ml: [scanner-refusal:a8ea78ba60f371d22646868a36871617] argumen
 cache_dir_ignores.ml: [scanner-refusal:4168ef8491021497635783bb1f7e4232] no source reads (direct failure) is catalogued beside cache_dir_scan_cases.expected, cache_dir_ignores.expected, cache_dir_ignores_control.expected: true
 cache_dir_ignores.ml: [scanner-refusal:298f6bafdca761627eb0f4dfecddf6d3] the built-in default (direct failure) is catalogued beside cache_dir_scan_cases.expected, cache_dir_ignores.expected, cache_dir_ignores_control.expected: true
 cache_dir_ignores.ml: [scanner-refusal:50ad95ff66f64313a7ce58dadb8aeda9] the cache directory (direct failure) is catalogued beside cache_dir_scan_cases.expected, cache_dir_ignores.expected, cache_dir_ignores_control.expected: true
+generated_lock_scan.ml has exactly the explicitly assigned refusal controls: true
+generated_lock_scan.ml: [scanner-refusal:feb2a77e5687a83594725de6a658eb72] names the lock (direct failure) is catalogued beside generated_lock_scan.expected, generated_lock_scan_control.expected: true
+generated_lock_scan.ml: [scanner-refusal:5a695f9728903023648f3c3009d581c9] locks … field (direct failure) is catalogued beside generated_lock_scan.expected, generated_lock_scan_control.expected: true
+generated_lock_scan.ml: [scanner-refusal:1926b093c11bb0b478fa3697c4d721bf] names Generated and (direct failure) is catalogued beside generated_lock_scan.expected, generated_lock_scan_control.expected: true
+generated_lock_scan.ml: [scanner-refusal:43db180ec02405f5d8629c5c69f525d3] Generated.init (direct failure) is catalogued beside generated_lock_scan.expected, generated_lock_scan_control.expected: true
+generated_lock_scan.ml: [scanner-refusal:9de3b3fd1cd96a8d87e76bfa31534244] comment that does (direct failure) is catalogued beside generated_lock_scan.expected, generated_lock_scan_control.expected: true
+generated_lock_scan.ml: [scanner-refusal:d6feeef530479095718ac0f80b9bb9c6] carries a generated-lock (direct failure) is catalogued beside generated_lock_scan.expected, generated_lock_scan_control.expected: true
+generated_lock_scan.ml: [scanner-refusal:7b93ef6acc4c55c6949954343adf990e] generated-lock marker that (direct failure) is catalogued beside generated_lock_scan.expected, generated_lock_scan_control.expected: true
+generated_lock_scan.ml: [scanner-refusal:a38b34600b092396f721b0136279947a] times and only (direct failure) is catalogued beside generated_lock_scan.expected, generated_lock_scan_control.expected: true
+generated_lock_scan.ml: [scanner-refusal:09ef62c73fdb16b5131522e01174b8f6] second generated-lock marker (direct failure) is catalogued beside generated_lock_scan.expected, generated_lock_scan_control.expected: true
+generated_lock_scan.ml: [scanner-refusal:fd2664a19380f998eb12b41499b0ca82] generated-lock marker and (direct failure) is catalogued beside generated_lock_scan.expected, generated_lock_scan_control.expected: true
+generated_lock_scan.ml: [scanner-refusal:a4942423e5944e763f1ac78611e93bd1] names the module (direct failure) is catalogued beside generated_lock_scan.expected, generated_lock_scan_control.expected: true
+generated_lock_scan.ml: [scanner-refusal:25fdee0fd0c8695a009a7ccdde8a8076] generated-lock marker and (direct failure) is catalogued beside generated_lock_scan.expected, generated_lock_scan_control.expected: true
+generated_lock_scan.ml: [scanner-refusal:176646e4df25881fadbc9bcd82136c75] Generated.init (direct failure) is catalogued beside generated_lock_scan.expected, generated_lock_scan_control.expected: true
+generated_lock_scan.ml: [scanner-refusal:22c4d07ebbb0433c6b849bf356be019f] Generated.init (direct failure) is catalogued beside generated_lock_scan.expected, generated_lock_scan_control.expected: true
+generated_lock_scan.ml: [scanner-refusal:e62fde2478073ff697b31a8548df54f1] dune-file glob matches (direct failure) is catalogued beside generated_lock_scan.expected, generated_lock_scan_control.expected: true
+generated_lock_scan.ml: [scanner-refusal:90a5bf8d781c4ed0a5407b52bd9fa3cd] arguments the rule's (direct failure) is catalogued beside generated_lock_scan.expected, generated_lock_scan_control.expected: true
+generated_lock_scan.ml: [scanner-refusal:a02da6b10b325cc5503fe4adf61da286] reaches the scanner-defect (claim) is catalogued beside generated_lock_scan.expected, generated_lock_scan_control.expected: true
+generated_lock_scan.ml: [scanner-refusal:01eec44b44e6e6a758bc7e95ef545443] Generated.init (claim) is catalogued beside generated_lock_scan.expected, generated_lock_scan_control.expected: true
 census_total_ratchet.ml has exactly the explicitly assigned refusal controls: true
 census_total_ratchet.ml: [scanner-refusal:6d5b4fe654d3592b327d32a16ca1fa2a] checked-in file this (claim) is catalogued beside census_total_ratchet.expected: true
 census_total_ratchet.ml: [scanner-refusal:571968c7f074e29e60dddf8d93d23f34] number the allow-list (claim) is catalogued beside census_total_ratchet.expected: true
