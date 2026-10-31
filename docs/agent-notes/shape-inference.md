@@ -250,3 +250,23 @@ files.
   table passed to a helper or exported by the `.mli` (export a function instead, as
   `Row.mutation_serial` and `Shape.set_on_closure` do). It does not check branch dominance: a
   definition that notes on one path is credited for all its writes.
+- Explicit checkpoints (gh-ocannl-903) snapshot the open frontier; their completeness is held two
+  ways. Module-level state: every tracked binding of `row.ml`, `shape.ml`, `tensor.ml` that is not
+  `exempt` must be captured, as a pointer, by its file's top-level `capture_globals` (a persistent
+  value in a ref, or a field of a tracked record), or carry `[@@mutation_serial.kept "<reason>"]`
+  (a registry rewinds extend: `discarded_refs`, `discarded_nodes`, the handout record, the
+  closure's checkpoint) -- the same `mutation_serial_scan`, so a new `Hashtbl`/`Hash_set` of session
+  state is refused (hold a `Set`/`Map` in a ref). `restore_globals` destructures the capture
+  exhaustively, so a field it forgets is an unused-variable error. Objects: each sealed owner's
+  `snapshot` (`Shape_record`, `Update_step_record`, `Delayed_ref`, `Ir.Indexing.variable_ref`,
+  `Tnode.snapshot_open`, `Prec_cell`) destructures its record with no wildcard: a new mutable field
+  is a compile error there. The frontier is the active steps' shapes and steps (every in-place
+  shape write goes through a step's `iter_shapes`; the rewind refuses a stray older shape), every
+  LIVE capture reference (`Delayed_ref`'s weak registry: a caller may hold one no step reaches),
+  and `Tensor.open_nodes`. What a rewind cannot reset makes it refuse: a raising committed-state
+  read of a frontier shape (`failed_reads`; OCaml lazies memoize the exception) and a precision
+  whose settling began (`Prec_cell`'s flag, set as the force starts, so a raising force counts).
+  Oracles independent of the snapshots, and a negative control per restore category
+  (`Tensor.For_testing.rewind_omitting`): `test/operations/checkpoint_rewind.ml`. A window op that
+  rewrites an older shape's rows in place needs an equation: pointwise ops only add broadcasting
+  inequalities, an einsum (`+*`) equates.

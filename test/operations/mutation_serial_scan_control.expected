@@ -1,4 +1,12 @@
+FAIL: tensor/row.ml:1: defines no top-level capture_globals: a checkpoint could not capture this module's session state
+FAIL: tensor/row.ml:4: seen is session state a checkpoint must restore, but a Hash_set cannot be captured as a pointer: hold a persistent value in a ref and capture it in capture_globals, or classify it [@@mutation_serial.kept "<reason>"]
 FAIL: tensor/row.ml:7: add writes seen without note_mutation () (nor a classification)
 FAIL: tensor/row.ml:15: seen (Hash_set) is used in a form the scan does not classify: only the listed reads and writes of its own kind, with the binding as the first positional argument
+FAIL: tensor/shape.ml:1: defines no top-level capture_globals: a checkpoint could not capture this module's session state
+FAIL: tensor/shape.ml:2: unused is session state a checkpoint must restore, but a Hash_set cannot be captured as a pointer: hold a persistent value in a ref and capture it in capture_globals, or classify it [@@mutation_serial.kept "<reason>"]
+FAIL: tensor/tensor.ml:1: defines no top-level capture_globals: a checkpoint could not capture this module's session state
+FAIL: tensor/tensor.ml:5: session_state.roots is session state a checkpoint must restore: capture it in the file's top-level capture_globals ({ g = session_state.roots } in the record it returns), or classify it [@@mutation_serial.kept "<reason>"]
+FAIL: tensor/tensor.ml:10: checkpoint.mark is session state a checkpoint must restore: capture it in the file's top-level capture_globals ({ g = checkpoint.mark } in the record it returns), or classify it [@@mutation_serial.kept "<reason>"]
+FAIL: tensor/tensor.ml:10: checkpoint.saved is session state a checkpoint must restore: capture it in the file's top-level capture_globals ({ g = checkpoint.saved } in the record it returns), or classify it [@@mutation_serial.kept "<reason>"]
 FAIL: tensor/tensor.ml:20: drop_roots writes session_state.roots without note_mutation () (nor a classification)
 FAIL: tensor/tensor.ml:28: forget writes checkpoint.saved without note_mutation () (nor a classification)

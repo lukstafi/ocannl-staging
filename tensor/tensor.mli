@@ -327,7 +327,79 @@ val rewind_to_last_closure : ?reason:string -> unit -> unit
     Counters are never reset, so later tensors never collide with discarded ones. Contexts, routines
     and buffers are untouched, and nothing executed is undone. Without a taint it simply discards
     the open work ([reason] names it in the stale-handle errors). Raises when called from within an
-    [op_asn]. *)
+    [op_asn]. The explicit checkpoints taken since the closure can no longer be rewound to. *)
+
+(** {2 Explicit checkpoints (gh-ocannl-903)}
+
+    A finer rewind than {!rewind_to_last_closure}: back to a point inside the open work -- a REPL
+    phrase, a notebook cell, a tentative trace such as a shape scheme's. Not to be confused with
+    [Ocannl.Checkpoint], which saves trained state to files. *)
+
+type checkpoint
+(** A snapshot of the open inference session. *)
+
+val checkpoint : ?label:string -> unit -> checkpoint
+(** Snapshots the open frontier: the solver's and the graph's session state (persistent values,
+    recorded as pointers), and every mutable field of the open work's shapes, update steps and
+    tensor nodes and of every live capture reference ({!Shape.get_variable_ref}). The cost is linear
+    in that frontier, so take one per phrase or trace, not per operation. [label] names it in
+    messages (default ["checkpoint #n"]). Raises when the session is tainted (rewind the failure
+    first) and when called from within an [op_asn]. *)
+
+val rewind : ?reason:string -> checkpoint -> unit
+(** Puts the session back as it was at the checkpoint, and clears the taint:
+
+    - every object open at the checkpoint gets its fields back -- the shapes' rows, paddings and
+      neutral elements (rewritten in place by later operations), the capture references' bindings
+      and solutions (a reference made before the checkpoint and solved after it is unsolved again),
+      the open nodes' precision links, memory-mode intents, ownership and observability (a
+      [Tensor.param] over an open initializer included);
+    - the solver's environment, constraints, active steps, inference sets and rank graph, the
+      graph-root maps (with the handout markers of the restored roots reset) and the random seed are
+      the checkpoint's; code handed out to callers since stays handed out;
+    - what the window created is discarded, as by {!rewind_to_last_closure}: its tensors (exactly
+      the nodes the frontend allocated), update steps and the capture references it made and bound
+      raise [Session_error] / [Shape_error] naming the rewind's provenance when used.
+
+    Counters are never reset. Closed and compiled work is untouched, and nothing executed is undone.
+    The checkpoint stays valid, so it can be rewound to again; the checkpoints taken after it can
+    not. Raises [Session_error], before anything is written, when the checkpoint cannot be rewound
+    to: inference closed since it was taken (a closure commits); a rewind past it,
+    {!rewind_to_last_closure} or {!unsafe_reinitialize} ran since; or the window memoized state of
+    the frontier that no rewind can reset -- a dims, padding or projections read of an open shape
+    that raised (its lazy keeps the exception), or an open node's precision that began settling.
+    {!rewind_to_last_closure} is always available. A [Tensor.take_forward_code] called directly on a
+    tensor that was not a root at the checkpoint leaves its marker taken. Raises when called from
+    within an [op_asn]. *)
+
+val with_checkpoint : ?label:string -> (unit -> 'a) -> 'a
+(** [with_checkpoint f] runs [f]; when [f] raises, rewinds to a checkpoint taken at entry and
+    re-raises [f]'s exception with its backtrace. When that checkpoint can no longer be rewound to
+    (say [f] closed inference), [f]'s exception still wins, and the session keeps any taint [f]
+    left. A normal return keeps [f]'s work. *)
+
+val with_rewind : ?label:string -> (unit -> 'a) -> 'a
+(** [with_rewind f] runs [f] and always rewinds to a checkpoint taken at entry -- a trace that
+    leaves nothing in the session -- returning [f]'s result. Read what you need of the open state
+    inside [f]; tensors [f] creates are discarded handles afterwards, so create the ones meant to
+    outlive the trace (shared parameters) before calling it. When [f] returns but its checkpoint can
+    no longer be rewound to, the rewind's [Session_error] is raised; when [f] raises, [f]'s
+    exception wins, as in {!with_checkpoint}. *)
+
+(** Diagnostics and negative controls for the checkpoint machinery's tests. *)
+module For_testing : sig
+  val restore_categories : string list
+
+  val rewind_omitting : omit:string -> checkpoint -> unit
+  (** {!rewind} skipping one restore category: to show a test's oracle notices it. *)
+
+  val checkpoint_differences : checkpoint -> string list
+  (** The components of the session that differ from the checkpoint (physically; padding arrays by
+      contents), by name. *)
+
+  val checkpoint_sizes : checkpoint -> (string * int) list
+  (** The open frontier's sizes at the checkpoint. *)
+end
 
 val update_operand_prec : t -> Ir.Ops.prec -> unit
 (** Sets an operand's precision ahead of an operation that requires it; refused (raises

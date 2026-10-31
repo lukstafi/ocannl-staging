@@ -10058,7 +10058,7 @@
  (deps ocannl_config))
 
 ; gh-ocannl-1579: every tensor node a module of tensor/ creates reaches Tensor.note_open_node, the
-; uid list a rewind discards by (gh-ocannl-1505). The creators are derived from arrayjit/lib/tnode.ml
+; open-node list a rewind discards by (gh-ocannl-1505). The creators are derived from arrayjit/lib/tnode.ml
 ; (its top-level values minting a uid), not listed; the reader states its closed lists of recognised
 ; forms in test/support/open_node_scan.ml. The corpus is tensor/ as a source tree holds it.
 
@@ -11948,6 +11948,21 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules rewind_to_last_closure)
+ (libraries base ocannl stdio unix fresh_process arrayjit.verdict)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+; gh-ocannl-903: explicit checkpoints over the open inference session -- a seeded soak of open
+; prefixes rewound after failing and succeeding constructions, restore-omission negative controls,
+; the lifecycle refusals, the wrappers, and one compiled scenario against a fresh process.
+
+(test
+ (name checkpoint_rewind)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules checkpoint_rewind)
  (libraries base ocannl stdio unix fresh_process arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))

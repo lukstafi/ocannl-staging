@@ -29,7 +29,9 @@ let scan_file ~root ~suffix file =
       let interface = read (file ^ "i") in
       match
         Test_utils.Scan_attempt.run (fun () ->
-            Scan.scan ~file ~serial_owner:(String.is_suffix file ~suffix:"row.ml") ?interface source)
+            Scan.scan ~file
+              ~serial_owner:(String.is_suffix file ~suffix:"row.ml")
+              ~require_capture:true ?interface source)
       with
       | Scanned report -> Some report
       | Unparsed why ->
@@ -57,8 +59,13 @@ let () =
          whose writes are noted, one exempt and one fingerprinted, so a reader that stopped tracking
          any of the three classes fails here. *)
       let has prefix = List.exists inventory ~f:(String.is_prefix ~prefix) in
-      Verdict.p "the scan tracks a noted table (row.ml's safe_to_guess)"
-        (has "tensor/row.ml: safe_to_guess (Hash_set) -- accounted");
+      Verdict.p "the scan tracks a noted ref, captured by capture_globals (row.ml's safe_to_guess)"
+        (has
+           "tensor/row.ml: safe_to_guess (ref) -- accounted: every write noted or at a boundary; \
+            captured by capture_globals");
+      (* gh-ocannl-903: a registry a rewind extends rather than restores. *)
+      Verdict.p "the scan tracks a kept table (tensor.ml's discarded_nodes)"
+        (has "tensor/tensor.ml: discarded_nodes (Hashtbl) -- accounted; kept by rewinds");
       Verdict.p "the scan tracks an exempt counter (row.ml's uid)"
         (has "tensor/row.ml: uid (ref) -- exempt");
       Verdict.p "the scan tracks a fingerprinted ref (shape.ml's state)"
@@ -69,6 +76,6 @@ let () =
         (has "tensor/tensor.ml: session_state.forward_roots (mutable field) -- accounted");
       Verdict.p "the scan tracks an exempt record field (tensor.ml's session_state.next_id)"
         (has "tensor/tensor.ml: session_state.next_id (mutable field) -- exempt");
-      Verdict.p "the scan tracks the checkpoint record's fields (tensor.ml's checkpoint.ck_fwd)"
-        (has "tensor/tensor.ml: checkpoint.ck_fwd (mutable field) -- accounted")
+      Verdict.p "the scan tracks a kept record field (tensor.ml's handouts.fwd_out)"
+        (has "tensor/tensor.ml: handouts.fwd_out (mutable field) -- accounted; kept by rewinds")
   | _ -> Stdlib.exit 2

@@ -418,13 +418,49 @@ val set_on_closure : (unit -> unit) -> unit
 (** Installs the hook called at the end of every successful closure ([Tensor] records its checkpoint
     there). *)
 
-val check_can_rewind : unit -> unit
-(** Raises when called within a construction window. *)
+val check_can_rewind : ?what:string -> unit -> unit
+(** Raises when called within a construction window; [what] names the caller in the message. *)
 
-val rewind_open_state : provenance:string -> unit
-(** Discards the open inference state: solver environment, active steps and constraints, pending
-    symbol roles and the solver's transient state; records the update steps registered since the
-    last closure as discarded ({!get_projections} refuses them) and clears the taint. *)
+(** {3 Checkpoints (gh-ocannl-903)}
+
+    The shape-inference half of [Tensor.checkpoint]: use that. A checkpoint snapshots the open
+    frontier -- this module's and [Row]'s module-level session state (persistent values, captured as
+    pointers), and the mutable fields of the shapes and steps of the active update steps and of
+    every live capture reference -- and a rewind puts them back and discards what the window
+    created. *)
+module Checkpoint : sig
+  type t
+
+  val label : t -> string
+  val is_closure : t -> bool
+
+  val refusal : t -> string option
+  (** Why the checkpoint can no longer be rewound to: a closure since it was taken, a rewind past it
+      (or to the last closure, or a reset), a raising committed-state read of a shape open at the
+      checkpoint, or a shape older than it outside its frontier. [None] when it can be. Checked
+      before a rewind writes anything. *)
+
+  val categories : string list
+  (** The restore categories {!rewind} can be told to [omit]: negative controls only. *)
+
+  val rewind : ?omit:string -> t -> provenance:string -> unit
+  (** Discards the window's shapes, update steps and the capture references it made and touched
+      (with [provenance]); restores the frontier's objects and the module-level state; clears the
+      taint. The caller checks {!refusal} first. *)
+
+  val differences : t -> string list
+  (** The components of the session that differ from the checkpoint, by name: a diagnostic. *)
+
+  val sizes : t -> (string * int) list
+  (** The open frontier's sizes at the checkpoint: a diagnostic. *)
+end
+
+val checkpoint : label:string -> id_mark:int -> Checkpoint.t
+(** An explicit checkpoint; [id_mark] is the next tensor id. Refuse it while tainted or within a
+    construction window first ([Tensor.checkpoint] does). *)
+
+val closure_checkpoint : id_mark:int -> Checkpoint.t
+(** The last closure's checkpoint (empty frontier), which stays valid until the next closure. *)
 
 val get_projections : update_step -> Ir.Indexing.projections
 (** Returns the projections for this update step, computing them if not already done. This triggers
