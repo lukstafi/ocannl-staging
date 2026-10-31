@@ -305,6 +305,28 @@ let lifecycle () =
   p "a failed read of a frontier shape refuses the explicit rewind"
     (refused_with (fun () -> Tensor.rewind ck) ~substrings:[ cannot; "raised after it" ]);
   Tensor.rewind_to_last_closure ();
+  (* The same for a projections read of a step pending over closed shapes: a [%cd] assignment to a
+     closed tensor, made before the checkpoint. *)
+  let cl = leaf "ck_cl" 2 and src = leaf "ck_src" 2 in
+  ignore (Shape.to_dims cl.shape : int array);
+  ignore (Shape.to_dims src.shape : int array);
+  let code = [%cd cl =: src] in
+  let ck = Tensor.checkpoint ~label:"ck_pending_step" () in
+  ignore
+    (outcome (fun () -> TDSL.O.( + ) (leaf "ck_p2" 2) (leaf "ck_p3" 3)) : (unit, string) Result.t);
+  let rec find_accum = function
+    | Ir.Assignments.Accum_op { projections; _ } -> Some projections
+    | Ir.Assignments.Seq (a, b) -> Option.first_some (find_accum a) (find_accum b)
+    | Ir.Assignments.Block_comment (_, body) -> find_accum body
+    | _ -> None
+  in
+  p "tainted: forcing the pending assignment's projections raises"
+    (match find_accum code.Ir.Assignments.asgns with
+    | Some projections -> refused_with (fun () -> Lazy.force projections) ~substrings:[ tainted ]
+    | None -> false);
+  p "a failed projections read of a frontier step refuses the explicit rewind"
+    (refused_with (fun () -> Tensor.rewind ck) ~substrings:[ cannot; "committed projections" ]);
+  Tensor.rewind_to_last_closure ();
   (* A failed closure forced through a shape the window made reads no frontier shape: the explicit
      rewind stays available, and puts back what the failed closure wrote. *)
   let%op wq = { wq = 0.5 } in

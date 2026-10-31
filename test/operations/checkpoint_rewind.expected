@@ -36,6 +36,8 @@ a tainted session takes no checkpoint: true
 the rewind clears the taint: the open tensor older than the checkpoint is usable: true
 tainted: forcing an open node's dims raises: true
 a failed read of a frontier shape refuses the explicit rewind: true
+tainted: forcing the pending assignment's projections raises: true
+a failed projections read of a frontier step refuses the explicit rewind: true
 a contradictory set_dim makes the closure fail, and taints the session: true
 after rewinding a failed closure, the reference it solved takes a new size: true
 and the prefix closes to it: true

@@ -613,6 +613,9 @@ module Update_step_record : sig
 
   val snapshot_changed : snapshot -> bool
   (** Whether the step differs from the snapshot: a diagnostic. *)
+
+  val snapshot_is : update_step -> snapshot -> bool
+  (** Whether the snapshot is of this step. *)
 end = struct
   type update_step = {
     shape : t;
@@ -643,6 +646,8 @@ end = struct
 
   let snapshot_changed { snap_step; snap_projections } =
     not (phys_equal snap_step.unsafe_projections snap_projections)
+
+  let snapshot_is step { snap_step; snap_projections = _ } = phys_equal step snap_step
 end
 
 type update_step = Update_step_record.update_step = private {
@@ -2353,15 +2358,17 @@ let checkpoint_seq = ref 0
 [@@mutation_serial.exempt
   "a fresh-id counter: ids are never reused, so a rewind need not restore it"]
 
-(* Open shapes whose committed-state read ([to_dims], [to_padding], [get_projections]) raised since
-   the last closure, newest first. A lazy over such a read (a node's dims or padding, a projections
-   handle) memoizes the exception, which no rewind can reset: a checkpoint whose frontier holds one
-   of them, read after it was taken, can no longer be rewound to. *)
-let failed_reads : t list ref = ref []
+(* Committed-state reads that raised since the last closure, newest first: of an open shape
+   ([to_dims], [to_padding]), or of a step's projections ([get_projections] -- a step can be pending
+   over a closed shape, as a [%cd] assignment to a closed tensor is). A lazy over such a read (a
+   node's dims or padding, a projections handle) memoizes the exception, which no rewind can reset:
+   a checkpoint whose frontier holds one of them, read after it was taken, can no longer be rewound
+   to. *)
+let failed_reads : [ `Shape of t | `Step of update_step ] list ref = ref []
 [@@mutation_serial.exempt
   "a record of reads that raised, consulted by a rewind's validity check: never restored"]
 
-let note_failed_read sh = if not sh.closed then failed_reads := sh :: !failed_reads
+let note_failed_read read = failed_reads := read :: !failed_reads
 
 module Checkpoint = struct
   type nonrec t = {
@@ -2377,7 +2384,7 @@ module Checkpoint = struct
     steps : Update_step_record.snapshot list;
     refs : Delayed_ref.snapshot list;
     ref_uids : Set.M(Int).t;
-    failed_reads_mark : t list;
+    failed_reads_mark : [ `Shape of t | `Step of update_step ] list;
   }
 
   let label ck = ck.label
@@ -2443,12 +2450,19 @@ module Checkpoint = struct
         | [] -> acc
         | sh :: rest -> since (sh :: acc) rest
       in
-      let poisoned = List.filter (since [] !failed_reads) ~f:(in_frontier ck) in
+      let poisoned =
+        List.filter_map (since [] !failed_reads) ~f:(function
+          | `Shape sh -> if in_frontier ck sh then Some ("shape", sh) else None
+          | `Step step ->
+              if List.exists ck.steps ~f:(Update_step_record.snapshot_is step) then
+                Some ("projections", step.shape)
+              else None)
+      in
       match poisoned with
-      | sh :: _ when not (is_closure ck) ->
+      | (what, sh) :: _ when not (is_closure ck) ->
           Some
             [%string
-              "a read of the committed shape of #%{sh.id#Int} %{sh.debug_name}, open at the \
+              "a read of the committed %{what} of #%{sh.id#Int} %{sh.debug_name}, open at the \
                checkpoint, raised after it (forcing its dims, padding or projections while \
                inference could not close); the lazy that read it keeps the exception, and no \
                rewind can reset it -- rewind to the last closure instead"]
@@ -4020,12 +4034,12 @@ let finish_inference (() : unit) : unit =
    (gh-ocannl-1301). *)
 (* A committed-state read of an open shape finalizes; a lazy over it memoizes a failure, so a
    failure is recorded against the shape for the checkpoints' validity (gh-ocannl-903). *)
-let finish_for_read ?(even_if_closed = false) (sh : t) =
-  if even_if_closed || not sh.closed then (
+let finish_for_read ?step (sh : t) =
+  if Option.is_some step || not sh.closed then (
     try finish_inference ()
     with exn ->
       let bt = Stdlib.Printexc.get_raw_backtrace () in
-      note_failed_read sh;
+      note_failed_read (match step with Some step -> `Step step | None -> `Shape sh);
       Stdlib.Printexc.raise_with_backtrace exn bt)
 
 let to_dims (sh : t) =
@@ -4099,7 +4113,7 @@ let get_projections (update_step : update_step) : Idx.projections =
       (* Committed by an earlier closure. *)
       projections
   | _ -> (
-      finish_for_read ~even_if_closed:true update_step.shape;
+      finish_for_read ~step:update_step update_step.shape;
       match update_step.unsafe_projections with
       | Some projections -> projections
       | None ->
