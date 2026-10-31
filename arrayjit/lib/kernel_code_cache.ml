@@ -14,16 +14,76 @@ type 'v t = {
 
 type stats = { n_groups : int; n_entries : int; n_bytes : int; n_evicted_groups : int }
 
+let locked c f =
+  Stdlib.Mutex.lock c.lock;
+  Exn.protect ~f ~finally:(fun () -> Stdlib.Mutex.unlock c.lock)
+
+(* Every live cache this process created, for {!with_cold_caches}, newest first, each by a weak
+   pointer -- a registration must not keep a cache its owner dropped, nor the code it holds, alive
+   -- with its creation serial. [suspend] empties the cache and answers how to put back what it
+   held, or [None] once it has been collected. *)
+type registered = { serial : int; alive : unit -> bool; suspend : unit -> (unit -> unit) option }
+
+let registry : registered list ref = ref []
+let next_serial = ref 0
+let registry_lock = Stdlib.Mutex.create ()
+
+let suspend c =
+  locked c (fun () ->
+      let entries = Hashtbl.copy c.entries
+      and groups = Queue.copy c.groups
+      and retained_bytes = c.retained_bytes in
+      Hashtbl.clear c.entries;
+      Queue.clear c.groups;
+      c.retained_bytes <- 0;
+      fun () ->
+        locked c (fun () ->
+            Hashtbl.clear c.entries;
+            Hashtbl.iteri entries ~f:(fun ~key ~data -> Hashtbl.set c.entries ~key ~data);
+            Queue.clear c.groups;
+            Queue.blit_transfer ~src:groups ~dst:c.groups ();
+            c.retained_bytes <- retained_bytes))
+
+let register c =
+  let w = Stdlib.Weak.create 1 in
+  Stdlib.Weak.set w 0 (Some c);
+  Stdlib.Mutex.protect registry_lock (fun () ->
+      let serial = !next_serial in
+      next_serial := serial + 1;
+      let r =
+        {
+          serial;
+          alive = (fun () -> Stdlib.Weak.check w 0);
+          suspend = (fun () -> Option.map (Stdlib.Weak.get w 0) ~f:suspend);
+        }
+      in
+      registry := r :: List.filter !registry ~f:(fun r -> r.alive ()))
+
 let create ~capacity_bytes =
-  {
-    capacity_bytes;
-    entries = Hashtbl.create (module String);
-    groups = Queue.create ();
-    retained_bytes = 0;
-    next_id = 0;
-    evicted_groups = 0;
-    lock = Stdlib.Mutex.create ();
-  }
+  let c =
+    {
+      capacity_bytes;
+      entries = Hashtbl.create (module String);
+      groups = Queue.create ();
+      retained_bytes = 0;
+      next_id = 0;
+      evicted_groups = 0;
+      lock = Stdlib.Mutex.create ();
+    }
+  in
+  register c;
+  c
+
+let with_cold_caches f =
+  let registered () = Stdlib.Mutex.protect registry_lock (fun () -> (!registry, !next_serial)) in
+  let before, first_inside = registered () in
+  let restores = List.filter_map before ~f:(fun r -> r.suspend ()) in
+  Exn.protect ~f ~finally:(fun () ->
+      (* A cache created inside the scope held nothing before it: emptying it restores it. *)
+      let now, _ = registered () in
+      List.iter now ~f:(fun r ->
+          if r.serial >= first_inside then ignore (r.suspend () : (unit -> unit) option));
+      List.iter restores ~f:(fun restore -> restore ()))
 
 let key ~parts =
   let b = Buffer.create 1024 in
@@ -32,10 +92,6 @@ let key ~parts =
       Buffer.add_char b ':';
       Buffer.add_string b p);
   Stdlib.Digest.to_hex (Stdlib.Digest.string (Buffer.contents b))
-
-let locked c f =
-  Stdlib.Mutex.lock c.lock;
-  Exn.protect ~f ~finally:(fun () -> Stdlib.Mutex.unlock c.lock)
 
 let enabled c = c.capacity_bytes () > 0
 

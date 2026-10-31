@@ -537,7 +537,9 @@ files.
   Tests: `kernel_code_cache` (fake compiler, a start barrier that a serialized run cannot pass),
   `gpu_compile_programs` (a training step compiled whole and split in one process, bitwise parity,
   claims gated on `Kernel_code_cache.split_capable_compiles`; `OCANNL_CUDA_KERNEL_CACHE_MIB=0` is
-  its negative control). Tests force the policy with `Kernel_code_cache.with_split`.
+  its negative control). Tests force the policy with `Kernel_code_cache.with_split`, and start
+  cold with `Kernel_code_cache.with_cold_caches` (every cache emptied, put back on exit;
+  gh-ocannl-1700).
 - **An unchanged kernel must key alike whatever names the rest of the batch made it take**
   (gh-ocannl-1525). Three things renamed unchanged kernels between candidates: node names are
   disambiguated over the WHOLE batch (`get_ident`: a repeated label becomes `n<id>_<label>`, and the
