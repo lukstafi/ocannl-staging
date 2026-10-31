@@ -38,6 +38,15 @@ reference: the program keeps its zero: true
 elided: the zero is gone: true
 elided: the accumulator is a localized scope opening at the cell, guarded by r's first iteration: true
 elided: out is bitwise equal to the reference's: true
+--- coverage: a zero the next access does not let go is kept ---
+guarded zero: the prefill differs from the result in every cell: true
+guarded zero: the reference computes the closed form: true
+guarded zero: the zero is kept: true
+guarded zero: out is bitwise equal to the reference's: true
+partial accumulation: the prefill differs from the result in every cell: true
+partial accumulation: the reference computes the closed form: true
+partial accumulation: the zero is kept: true
+partial accumulation: out is bitwise equal to the reference's: true
 --- a scan body's read is rewritten ---
 the statement reads the accumulated cell: true
 the scan's accumulation is rewritten: true

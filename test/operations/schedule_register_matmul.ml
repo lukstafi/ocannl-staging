@@ -132,10 +132,17 @@ let () =
   let reg_comp = named "mmr_tiled" (Train.forward mc1) in
   let transform opt = Sched.apply (register_schedule opt) opt in
   let ctx_a = Context.auto () in
+  (* [Privatize] drops [mc1]'s expanded zero and opens its tile at zero instead; fresh buffers are
+     zero and would hide a dropped or short zero (gh-ocannl-1625), so [mc1] starts off its
+     result. *)
+  let mc1_prefill = Array.init (n * n) ~f:(fun c -> Float.of_int (1000 + c)) in
+  p_all2 "the prefill of the accumulator differs from the serial twin's result in every cell"
+    mc1_prefill got_serial ~f:(fun a b -> Float.(a <> b));
   if has_shared then (
     let ctx_a, routine_a =
       Context.compile ~lowered_transform:(fun o -> [ transform o ]) ctx_a reg_comp Ir.Indexing.Empty
     in
+    let ctx_a = Context.set_values ctx_a mc1.Tensor.value mc1_prefill in
     let ctx_a = Context.run ctx_a routine_a in
     let got_reg = Context.get_values ctx_a mc1.Tensor.value in
     p_close "register-tiled matmul parity (GPU) or clean rejection (CPU)" got_reg got_serial

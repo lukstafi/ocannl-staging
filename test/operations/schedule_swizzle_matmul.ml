@@ -102,6 +102,12 @@ let () =
   in
   let ctx_s = Context.run ctx_s routine_s in
   let got_serial = nonzero "swz_serial" (Context.get_values ctx_s mc0.Tensor.value) in
+  (* Every leg below expands its target's zero (and most privatize it away); fresh buffers are zero
+     and would hide a dropped or short zero (gh-ocannl-1625), so each target starts off its
+     result. *)
+  let prefill = Array.init (n * n) ~f:(fun c -> Float.of_int (1000 + c)) in
+  p_all2 "the prefill of the targets differs from the serial twin's result in every cell" prefill
+    got_serial ~f:(fun a b -> Float.(a <> b));
 
   (* --- The swizzled SMEM schedule (element-granularity XOR) --- *)
   let%op mc1 = ma * mb in
@@ -158,6 +164,7 @@ let () =
         ~lowered_transform:(fun o -> [ transform o ])
         ctx_a smem_comp Ir.Indexing.Empty
     in
+    let ctx_a = Context.set_values ctx_a mc1.Tensor.value prefill in
     let ctx_a = Context.run ctx_a routine_a in
     let got_smem = Context.get_values ctx_a mc1.Tensor.value in
     p_close "swizzled SMEM matmul parity (GPU) or clean rejection (CPU)" got_smem got_serial
@@ -214,6 +221,7 @@ let () =
         ~lowered_transform:(fun o -> [ transform_b128 o ])
         ctx_b smem_b128_comp Ir.Indexing.Empty
     in
+    let ctx_b = Context.set_values ctx_b mc1b.Tensor.value prefill in
     let ctx_b = Context.run ctx_b routine_b in
     let got = Context.get_values ctx_b mc1b.Tensor.value in
     p_close "b128-swizzled SMEM matmul parity (GPU) or clean rejection (CPU)" got got_serial
@@ -265,6 +273,7 @@ let () =
         ~lowered_transform:(fun o -> [ transform_pad o ])
         ctx_p smem_pad_comp Ir.Indexing.Empty
     in
+    let ctx_p = Context.set_values ctx_p mc1p.Tensor.value prefill in
     let ctx_p = Context.run ctx_p routine_p in
     let got = Context.get_values ctx_p mc1p.Tensor.value in
     p_close "pad_stride SMEM matmul parity (GPU) or clean rejection (CPU)" got got_serial
@@ -363,6 +372,7 @@ let () =
         ~lowered_transform:(fun o -> [ staged_transform o ])
         ctx_c staged_comp Ir.Indexing.Empty
     in
+    let ctx_c = Context.set_values ctx_c mc2.Tensor.value prefill in
     let ctx_c = Context.run ctx_c routine_c in
     let got_staged = Context.get_values ctx_c mc2.Tensor.value in
     p_close "swizzled staged+tensorized parity (GPU) or clean rejection (CPU)" got_staged got_serial

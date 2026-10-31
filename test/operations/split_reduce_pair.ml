@@ -98,7 +98,11 @@ let run_split ?(prefix = []) comp tn ~sites =
         List.map tuples ~f:(fun (_, _, _, post) -> post))
       (Context.auto ()) comp Ir.Indexing.Empty
   in
-  let ctx = Context.run ctx routine in
+  (* Twice: the partials the split mints have no host handle to prefill, and fresh buffers are zero,
+     so only a second run sees a partials init that never ran (gh-ocannl-1625). Every [comp] here is
+     a forward pass or an update without an SGD step, which a correct routine repeats
+     idempotently. *)
+  let ctx = Context.run (Context.run ctx routine) routine in
   Context.sync ctx;
   (Context.get_values ctx tn, !applied)
 
@@ -453,7 +457,8 @@ let () =
       ~report:(fun r -> report := Some r)
       (Context.auto ()) comp Ir.Indexing.Empty
   in
-  let ctx = Context.run ctx routine in
+  (* Twice, as in [run_split] (gh-ocannl-1625): a dropped partials init doubles the gradient. *)
+  let ctx = Context.run (Context.run ctx routine) routine in
   Context.sync ctx;
   let values = Context.get_values ctx g in
   let r = Option.value_exn ~here:[%here] !report in

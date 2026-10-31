@@ -236,13 +236,20 @@ let () =
     | _ -> ());
   p_all "split-reduce: every write of the coalesced cell, the combine's included, stays flattened"
     !d_writes ~f:(fun idcs -> (Ir.Affine.axis_extents ~dims:[| hh; ee |] idcs).(1) = hh * ee);
+  (* Fresh buffers are zero, so a dropped zero is invisible from them (gh-ocannl-1625): [d] starts
+     off every value the routine leaves in it, and each routine runs twice, so the partials the
+     split mints (no host handle to prefill) hold the first run's sums when the second starts. *)
+  let d_prefill = Array.init (hh * ee) ~f:(fun c -> Float.of_int (1000 + c)) in
   let run name o transform =
     let ctx, routine =
       Context.compile ~name ~prelowered:o ~lowered_transform:transform (Context.auto ())
         Ir.Assignments.empty_comp Ir.Indexing.Empty
     in
-    let ctx = List.fold seed ~init:ctx ~f:(fun ctx (tn, vs) -> Context.set_values ctx tn vs) in
-    Context.get_values (Context.run ctx routine) d
+    let ctx =
+      List.fold ((d, d_prefill) :: seed) ~init:ctx ~f:(fun ctx (tn, vs) ->
+          Context.set_values ctx tn vs)
+    in
+    Context.get_values (Context.run (Context.run ctx routine) routine) d
   in
   p_all "split-reduce: every partial sum of every cell is exact in f32"
     (L.reduction_cells ~out:[| hh; ee |] ~over:[| kk |] (fun o r ->
@@ -258,7 +265,9 @@ let () =
   p
     "split-reduce: the coalesced, split, default-scheduled reduction computes the plain one's \
      values"
-    (Array.exists want ~f:(fun v -> Float.(v <> 0.)) && Array.equal Float.equal want got)
+    (Array.exists want ~f:(fun v -> Float.(v <> 0.)) && Array.equal Float.equal want got);
+  p_all2 "split-reduce: the prefill of the target differs from its result in every cell" d_prefill
+    want ~f:(fun a b -> Float.(a <> b))
 
 (* {1 Composition: a coalesced pair under [Stage] and [Privatize]}
 
@@ -330,10 +339,16 @@ let () =
     (L.reduction_cells ~out:[| hh; ee |] ~over:[| kk |] (fun o r ->
          seeded seed x ~dims:[| kk; hh; ee |] [| r.(0); o.(0); o.(1) |]))
     ~f:(Ll_test.exact_partials ~any_sign:true ~sig_bits:24);
+  (* [Privatize] drops [d]'s zero and opens its tile at zero instead; fresh buffers are zero and
+     would hide a tile opened from [d] (gh-ocannl-1625), so [d] starts off its every result. *)
+  let d_prefill = Array.init (hh * ee) ~f:(fun c -> Float.of_int (1000 + c)) in
+  let seed = (d, d_prefill) :: seed in
   let want = List.hd_exn (L.execute ~name:"cp_plain_run" o ~seed ~read:[ d ]) in
   let got = List.hd_exn (L.execute ~name:"cp_packed_run" os ~seed ~read:[ d ]) in
   p "stage+privatize: the coalesced, packed reduction computes the plain one's values bitwise"
-    (Array.exists want ~f:(fun v -> Float.(v <> 0.)) && Array.equal Float.equal want got)
+    (Array.exists want ~f:(fun v -> Float.(v <> 0.)) && Array.equal Float.equal want got);
+  p_all2 "stage+privatize: the prefill of the target differs from its result in every cell"
+    d_prefill want ~f:(fun a b -> Float.(a <> b))
 
 (* {1 The contraction pair: the out projection's [(h, e)] (gh-ocannl-1279)}
 
@@ -456,6 +471,10 @@ let () =
   p "contraction: the unrelated second reader keeps reading the activation axis by axis"
     (List.exists !plain_x_reads ~f:(fun idcs ->
          Array.equal Ir.Indexing.equal_axis_index idcs [| L.iter s'; L.iter h'; L.iter e' |]));
+  (* [Privatize] drops [d]'s zero and opens its tile at zero instead; fresh buffers are zero and
+     would hide a tile opened from [d] (gh-ocannl-1625), so [d] starts off its every result. *)
+  let d_prefill = Array.init (ss * jj) ~f:(fun c -> Float.of_int (1000 + c)) in
+  let seed = (d, d_prefill) :: seed in
   (* [bk = 4] divides neither [e = 5] nor [K = 15]: tiles cross heads and the last one runs past
      [K]. A fringe guarded against the head's [e] instead of [K] would zero most of every tile,
      which the bitwise claim below catches. *)
@@ -478,6 +497,8 @@ let () =
     ((not (Array.is_empty want_d))
     && Array.for_all want_d ~f:(fun v -> Float.(v <> 0.))
     && Array.equal Float.equal want_d got_d);
+  p_all2 "contraction: the prefill of the target differs from its result in every cell" d_prefill
+    want_d ~f:(fun a b -> Float.(a <> b));
   p "contraction: the second reader's values are untouched"
     (Array.exists want_r ~f:(fun v -> Float.(v <> 0.)) && Array.equal Float.equal want_r got_r);
   (* Declines: the pair not adjacent in the weight, a per-head-only operand, a padded inner axis. *)
@@ -555,13 +576,20 @@ let () =
   p "contraction split-reduce: the split of the merged k is Op_legal"
     (Sched.equal_op_verdict (Sched.op_legality oc sr) Sched.Op_legal);
   let os = Sched.apply [ co; sr ] o in
+  (* Fresh buffers are zero, so a dropped zero is invisible from them (gh-ocannl-1625): [d] starts
+     off every value the routine leaves in it, and each routine runs twice, so the partials the
+     split mints (no host handle to prefill) hold the first run's sums when the second starts. *)
+  let d_prefill = Array.init jj ~f:(fun c -> Float.of_int (1000 + c)) in
   let run name o transform =
     let ctx, routine =
       Context.compile ~name ~prelowered:o ~lowered_transform:transform (Context.auto ())
         Ir.Assignments.empty_comp Ir.Indexing.Empty
     in
-    let ctx = List.fold seed ~init:ctx ~f:(fun ctx (tn, vs) -> Context.set_values ctx tn vs) in
-    Context.get_values (Context.run ctx routine) d
+    let ctx =
+      List.fold ((d, d_prefill) :: seed) ~init:ctx ~f:(fun ctx (tn, vs) ->
+          Context.set_values ctx tn vs)
+    in
+    Context.get_values (Context.run (Context.run ctx routine) routine) d
   in
   p_all "contraction split-reduce: every partial sum of every cell is exact in f32"
     (L.reduction_cells ~out:[| jj |] ~over:[| hh; ee |] (fun o r ->
@@ -580,7 +608,9 @@ let () =
      plain one's values bitwise"
     ((not (Array.is_empty want))
     && Array.for_all want ~f:(fun v -> Float.(v <> 0.))
-    && Array.equal Float.equal want got)
+    && Array.equal Float.equal want got);
+  p_all2 "contraction split-reduce: the prefill of the target differs from its result in every cell"
+    d_prefill want ~f:(fun a b -> Float.(a <> b))
 
 (* {1 Composition: a coalesced pair under [Fuse_epilogue]}
 

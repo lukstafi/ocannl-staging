@@ -34,6 +34,14 @@ let named name (comp : Asgns.comp) : Asgns.comp =
    in-kernel constant init illegal under [validate_parallel]'s coverage rule, which is what the
    parts below exercise. The i/j/k accumulation nest is the unique 3-deep loop nest of the lowered
    matmul. *)
+(* Uploads per-cell values off every value a matmul here writes into [tn], the accumulator, between
+   its compile and its run: a fresh device buffer is already zero, so without it a dropped zeroing of
+   the accumulator (the [Expand_zero] nest the schedule splits) would match the reference anyway
+   (gh-ocannl-1625). *)
+let prefill ctx tn =
+  Context.set_values ctx tn
+    (Array.init (Ir.Tnode.num_elems tn) ~f:(fun k -> -.(100. +. Float.of_int k)))
+
 let grid_workgroup_schedule ~mc opt =
   let paths = Ll_test.nest_paths opt.LL.llc in
   let i, j =
@@ -70,7 +78,7 @@ let () =
   let ctx, routine =
     Context.compile ~lowered_transform:(fun o -> [ transform o ]) ctx comp Ir.Indexing.Empty
   in
-  let ctx = Context.run ctx routine in
+  let ctx = Context.run (prefill ctx mc.Tensor.value) routine in
   let values = Context.get_values ctx mc.Tensor.value in
   Verdict.pass_fail_all2
     "scheduled matmul over small constant operands compiles and matches reference" values reference
@@ -104,9 +112,14 @@ let () =
      allocator/init sentinel by design (review round 2) — so the mechanism is asserted structurally:
      the optimized code handed to the schedule transform must carry no surviving setter of [mz]
      ([Ll_test.count_set] counts [Zero_out] too). The executed leg keeps a fully discriminating
-     nonzero reference by ADDING the zero operand ([(ma + mz) * mb] = part 1's reference), so a
-     dropped [Zero_out] over a garbage-filled buffer still shows; the value-bearing correctness of
-     the upload machinery itself rides parts 1-2's nonzero constants, which share it. *)
+     nonzero reference by ADDING the zero operand ([(ma + mz) * mb] = part 1's reference), and its
+     accumulator [mc3] is prefilled like part 1's. That cannot reach [mz]'s own zero, though: a
+     fresh device buffer in practice already holds zeros, so a lost [mz] upload reads as the zero it
+     should upload, and no prefill can stand in for the garbage that would expose it -- the upload
+     happens at link time, before any host write, so a prefill of [mz] would be the value the
+     routine reads and would change the correct result (gh-ocannl-1625). The value-bearing
+     correctness of the upload machinery itself rides parts 1-2's nonzero constants, which share
+     it. *)
   let mz = TDSL.ndarray [| 0. |] ~label:[ "mz" ] ~input_dims:[ k ] ~output_dims:[ m ] () in
   Train.set_materialized mz.Tensor.value;
   let%op mc3 = (ma + mz) * mb in
@@ -120,7 +133,7 @@ let () =
   let ctx3, routine3 =
     Context.compile ~lowered_transform:(fun o -> [ transform3 o ]) ctx3 comp3 Ir.Indexing.Empty
   in
-  let ctx3 = Context.run ctx3 routine3 in
+  let ctx3 = Context.run (prefill ctx3 mc3.Tensor.value) routine3 in
   let values3 = Context.get_values ctx3 mc3.Tensor.value in
   Verdict.pass_fail_all2
     "scheduled matmul adding a materialized broadcast-zero constant matches reference" values3

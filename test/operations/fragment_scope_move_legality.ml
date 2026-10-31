@@ -259,6 +259,14 @@ let () =
   in
   let values tensor = function
     | Ok (ctx, routine) ->
+        (* The schedules expand the target's zero; fresh buffers are zero and would hide a dropped
+           or short expansion (gh-ocannl-1625), so every run starts it off every result (the sums
+           stay at most 512). *)
+        let tn = tensor.Tensor.value in
+        let numel = Array.fold (Tn.dims_without_padding tn) ~init:1 ~f:( * ) in
+        let ctx =
+          Context.set_values ctx tn (Array.init numel ~f:(fun c -> Float.of_int (1000 + c)))
+        in
         let ctx = Context.run ctx routine in
         Ok (Context.get_values ctx tensor.Tensor.value, routine.Context.mma)
     | Error (SO.Classified c) -> Error (Sexp.to_string_hum (SO.sexp_of_classified_cause c))

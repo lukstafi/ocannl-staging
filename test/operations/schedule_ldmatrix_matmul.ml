@@ -208,6 +208,11 @@ let leg ?schedule_of ~tag ~build ~src_a ~src_b ~swz_a ~swz_b ~check ~acc_prec ?(
     in
     (* The census is a field of the compiled routine since gh-ocannl-626. *)
     let census = Ll_test.renderings routine.Context.mma in
+    (* The schedule expands [t0]'s zero; fresh buffers are zero and would hide a dropped or short
+       expansion (gh-ocannl-1625), so [t0] starts off its result (the exact sums below stay under
+       50). *)
+    let prefill = Array.init (Array.length want) ~f:(fun c -> Float.of_int (1000 + c)) in
+    let ctx = Context.set_values ctx t0.Tensor.value prefill in
     let ctx = Context.run ctx routine in
     let got = Context.get_values ctx t0.Tensor.value in
     (* The nonzero guard is not ceremony: a fragment mapping that reads outside the staged block

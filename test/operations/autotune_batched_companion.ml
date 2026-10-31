@@ -248,7 +248,9 @@ let () =
             ~lowered_transform:(fun o -> [ transform o ])
             (Context.auto ()) comp Ir.Indexing.Empty
         in
-        let sctx = Context.run sctx sroutine in
+        (* Twice: fresh buffers are already zero, so a zero companion that misses cells shows only
+           over the first run's sums (gh-ocannl-1625). *)
+        let sctx = Context.run (Context.run sctx sroutine) sroutine in
         Context.get_values sctx y.Tensor.value
       with
       | got -> Array.for_all2_exn got expected ~f:(fun a b -> Float.(abs (a - b) < 1e-3))
@@ -268,7 +270,8 @@ let () =
       ~report:(fun r -> reports := r :: !reports)
       ctx comp Ir.Indexing.Empty
   in
-  let ctx = Context.run ctx routine in
+  (* Twice, as the seeds run: the winner's zero handling (gh-ocannl-1625). *)
+  let ctx = Context.run (Context.run ctx routine) routine in
   let got = Context.get_values ctx y.Tensor.value in
   p_close "bc: tuned batched head matches the reference" got expected ~tol:(fun _ -> 1e-3);
   (* Exactly one report, then its census: the callback contract is a claim of its own, and the
@@ -493,7 +496,9 @@ let () =
        let ctx, routine =
          Context.compile ~lowered_transform:transforms (Context.auto ()) comp_e Ir.Indexing.Empty
        in
-       let ctx = Context.run ctx routine in
+       (* Twice: fresh buffers are already zero, so a zero segment that never runs shows only over
+          the first run's sums (gh-ocannl-1625). *)
+       let ctx = Context.run (Context.run ctx routine) routine in
        (Context.get_values ctx z_e.Tensor.value, Context.get_values ctx r_e.Tensor.value)
      with
     | got_z, got_r -> approx got_z z_expected && approx got_r r_expected
@@ -527,7 +532,8 @@ let () =
         let ctx, routine =
           Context.compile ~lowered_transform:transforms (Context.auto ()) comp_s Ir.Indexing.Empty
         in
-        let ctx = Context.run ctx routine in
+        (* Twice, as the finer form runs (gh-ocannl-1625). *)
+        let ctx = Context.run (Context.run ctx routine) routine in
         (Context.get_values ctx z_s.Tensor.value, Context.get_values ctx r_s.Tensor.value)
       with
       | got_z, got_r -> approx got_z z_expected && approx got_r r_expected
@@ -547,7 +553,8 @@ let () =
         ~report:(fun rep -> reports := rep :: !reports)
         ctx comp Ir.Indexing.Empty
     in
-    let ctx = Context.run ctx routine in
+    (* Twice, as the finer form runs (gh-ocannl-1625). *)
+    let ctx = Context.run (Context.run ctx routine) routine in
     ((Context.get_values ctx z.Tensor.value, Context.get_values ctx r.Tensor.value), !reports)
   in
   let (got_z, got_r), reports = tune_once () in

@@ -365,6 +365,15 @@ let fusion () =
   let before = AC.snapshot () in
   let ctx', routine = Context.compile ~lowered_transform ctx (Train.forward out) IDX.empty in
   let measured = delta_between before (AC.snapshot ()) in
+  (* The fused schedule expands [prod]'s zero; fresh buffers are zero and would hide a dropped or
+     short expansion (gh-ocannl-1625), so on a CPU backend, where [prod] stays on the device, [prod]
+     starts off every value (its sums stay under 200). A GPU keeps it in shared memory. *)
+  let ctx' =
+    if on_gpu then ctx'
+    else
+      Context.set_values ctx' prod.Tensor.value
+        (Array.init (m * nn) ~f:(fun c -> Float.of_int (1000 + c)))
+  in
   let got = Context.get_values (Context.run ctx' routine) out.Tensor.value in
   Context.release ctx';
   let f = Option.value_exn !floor and unscheduled = Option.value_exn !unscheduled in

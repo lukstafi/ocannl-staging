@@ -5,6 +5,17 @@ open Nn_blocks.DSL_modules
 
 module type Backend = Ir.Backend_intf.Backend
 
+(* Compiles [t]'s forward, prefills [t]'s value with per-cell values off every value the routine
+   writes, then runs it. A fresh device buffer is already zero, so a one-shot run from fresh buffers
+   cannot tell an elided initialization from a kept one (gh-ocannl-1625). *)
+let forward_prefilled ctx (t : Tensor.t) =
+  let ctx, routine = Train.to_routine ctx IDX.empty (Train.forward t) in
+  let n = Ir.Tnode.num_elems t.Tensor.value in
+  let ctx =
+    Context.set_values ctx t.Tensor.value (Array.init n (fun k -> -.(100. +. Float.of_int k)))
+  in
+  Context.run ctx routine
+
 (** Test that einsum reductions properly accumulate values *)
 let test_einsum_reduction () =
   Stdio.printf "\n=== Testing einsum reduction (surjective but not injective) ===\n";
@@ -22,7 +33,7 @@ let test_einsum_reduction () =
   Train.set_materialized result.value;
   Train.every_non_literal_materialized result;
 
-  let ctx = Train.forward_once ctx result in
+  let ctx = forward_prefilled ctx result in
 
   Stdio.printf "Input tensor (shape: batch=2, input=3, output=4):\n";
   Train.printf ~here:[%here] ~with_code:false ~with_grad:false ctx input;
@@ -47,7 +58,7 @@ let test_diagonal_tensor () =
   let%op diagonal = input ++ "i=>ii" in
 
   Train.set_materialized diagonal.value;
-  let ctx = Train.forward_once ctx diagonal in
+  let ctx = forward_prefilled ctx diagonal in
 
   Stdio.printf "Input (1D tensor of size 5):\n";
   Train.printf ~here:[%here] ~with_code:false ~with_grad:false ctx input;
@@ -70,7 +81,7 @@ let test_fixed_index_projection () =
   let%op _ = sparse ++ "i2=>i" in
 
   Train.set_materialized sparse.value;
-  let ctx = Train.forward_once ctx sparse in
+  let ctx = forward_prefilled ctx sparse in
 
   Stdio.printf "Input (1D tensor of size 4):\n";
   Train.printf ~here:[%here] ~with_code:false ~with_grad:false ctx input;
@@ -92,7 +103,7 @@ let test_bijective_transpose () =
   let%op transposed = input ++ "ij=>ji" in
 
   Train.set_materialized transposed.value;
-  let ctx = Train.forward_once ctx transposed in
+  let ctx = forward_prefilled ctx transposed in
 
   Stdio.printf "Input (3x4 matrix):\n";
   Train.printf ~here:[%here] ~with_code:false ~with_grad:false ctx input;

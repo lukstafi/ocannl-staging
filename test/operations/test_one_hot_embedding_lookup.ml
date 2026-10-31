@@ -119,6 +119,17 @@ let build_embedding id_values =
 
 open Verdict.Claims
 
+(* [Train.forward_once], with [t]'s value prefilled off every value the routine writes between the
+   compile and the run: a fresh device buffer is already zero, so a zero row the routine never wrote
+   would read as one it did (gh-ocannl-1625). *)
+let forward_prefilled ctx (t : Tensor.t) =
+  let ctx, routine = Train.to_routine ctx Train.IDX.empty (Train.forward t) in
+  let n = Ir.Tnode.num_elems t.Tensor.value in
+  let ctx =
+    Context.set_values ctx t.Tensor.value (Array.init n ~f:(fun k -> -.(100. +. Float.of_int k)))
+  in
+  Context.run ctx routine
+
 let () =
   (* --- Forward equivalence + observability (in-range indices) --- Run first so the forward comp is
      fully assembled and memory modes are fixed, then re-lower the same graph to inspect the
@@ -170,7 +181,7 @@ let () =
   let oob = [| 1.; Float.of_int vocab (* == vocab, out of [0,vocab) *) |] in
   let _ids2, embedded2 = build_embedding oob in
   let ctx2 = Context.cpu () in
-  let ctx2 = Train.forward_once ctx2 embedded2 in
+  let ctx2 = forward_prefilled ctx2 embedded2 in
   let got2 = Context.get_values ctx2 embedded2.Tensor.value in
   let row1 = Array.init embed ~f:(fun o -> Float.of_int ((o * vocab) + 1)) in
   p_alli "in-range row of OOB batch is correct" (Array.to_list got2) ~f:(fun i v ->
@@ -183,7 +194,7 @@ let () =
   let frac = [| 2.; 1.5 |] in
   let _ids3, embedded3 = build_embedding frac in
   let ctx_f = Context.cpu () in
-  let ctx_f = Train.forward_once ctx_f embedded3 in
+  let ctx_f = forward_prefilled ctx_f embedded3 in
   let got3 = Context.get_values ctx_f embedded3.Tensor.value in
   let row2 = Array.init embed ~f:(fun o -> Float.of_int ((o * vocab) + 2)) in
   p_alli "integer row of fractional batch is correct" (Array.to_list got3) ~f:(fun i v ->
@@ -234,7 +245,7 @@ let () =
   in
   let%op embedded_int = c_int * Nn_blocks.one_hot_of_ids ~num_classes:vocab ids_int in
   let ctx6 = Context.cpu () in
-  let ctx6 = Train.forward_once ctx6 embedded_int in
+  let ctx6 = forward_prefilled ctx6 embedded_int in
   let got_int = Context.get_values ctx6 embedded_int.Tensor.value in
   let expected_int =
     Array.concat_map [| 1; 3; 0 |] ~f:(fun idx ->

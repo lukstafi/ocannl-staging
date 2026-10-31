@@ -253,11 +253,17 @@ let () =
     let post = if key = 0 then Some reinsert_barriers else None in
     compile_depth ?post ~key ~pipeline_depth:(max key 1) ~out:mc.Tensor.value comp
   in
+  (* Each leg expands its target's zero; fresh buffers are zero and would hide a dropped or short
+     expansion (gh-ocannl-1625), so each target starts off its every result. *)
+  let mc_prefill = Array.init (n * n) ~f:(fun c -> Float.of_int (1000 + c)) in
+  p_all2 "the prefill of the targets differs from the serial twin's result in every cell" mc_prefill
+    got_serial ~f:(fun a b -> Float.(a <> b));
   let results =
     if on_gpu then
       Some
         (List.map legs ~f:(fun ((key, mc, _) as leg) ->
              let ctx, routine = compile_leg leg in
+             let ctx = Context.set_values ctx mc.Tensor.value mc_prefill in
              let ctx = Context.run ctx routine in
              (key, Context.get_values ctx mc.Tensor.value)))
     else None

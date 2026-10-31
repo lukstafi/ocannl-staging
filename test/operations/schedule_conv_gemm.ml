@@ -460,7 +460,9 @@ let () =
          (named tag (Train.forward y))
          Ir.Indexing.Empty
      in
-     let ctx = Context.run ctx routine in
+     (* Run twice: the Grid twin's zero expansion missing cells shows only over the first run's
+        sums, fresh buffers being already zero (gh-ocannl-1625). *)
+     let ctx = Context.run (Context.run ctx routine) routine in
      let got = Context.get_values ctx y.Tensor.value in
      ( (not (Array.is_empty got))
        && Array.for_all2_exn got want2 ~f:(fun a b -> Float.(abs (a - b) < 1e-3)),
@@ -551,7 +553,8 @@ let () =
       (named "cvt_tuned" (Train.forward y))
       Ir.Indexing.Empty
   in
-  let ctx = Context.run ctx routine in
+  (* Twice, as [run_fiss_sched] runs: the winner's zero handling (gh-ocannl-1625). *)
+  let ctx = Context.run (Context.run ctx routine) routine in
   let got_t = Context.get_values ctx y.Tensor.value in
   (match !reports with
   | [ r ] ->
@@ -721,7 +724,9 @@ let () =
         (named name (Train.forward y))
         Ir.Indexing.Empty
     in
-    let ctx = Context.run ctx routine in
+    (* Run twice: fresh buffers are already zero, so a zero segment or expansion that misses cells
+       shows only on the second run, as the first run's sums left in them (gh-ocannl-1625). *)
+    let ctx = Context.run (Context.run ctx routine) routine in
     (Context.get_values ctx y.Tensor.value, routine.Context.mma)
   in
   let want8 =
@@ -1065,7 +1070,8 @@ let () =
       (named "cvu_tuned" (Train.forward y))
       Ir.Indexing.Empty
   in
-  let ctx = Context.run ctx routine in
+  (* Twice, as [run_fiss_sched] runs: the winner's zero handling (gh-ocannl-1625). *)
+  let ctx = Context.run (Context.run ctx routine) routine in
   let got_u = Context.get_values ctx y.Tensor.value in
   (match !reports with
   | [ r ] ->
@@ -1187,7 +1193,8 @@ let () =
       (named "cvu2_tuned" (Train.forward y))
       Ir.Indexing.Empty
   in
-  let ctx = Context.run ctx routine in
+  (* Twice, as [run_fiss_sched] runs: the winner's zero handling (gh-ocannl-1625). *)
+  let ctx = Context.run (Context.run ctx routine) routine in
   let got_u2 = Context.get_values ctx y.Tensor.value in
   (match !reports with
   | [ r ] ->
@@ -1394,7 +1401,8 @@ let () =
       (named "cvb_tuned" (Train.forward y))
       Ir.Indexing.Empty
   in
-  let ctx = Context.run ctx routine in
+  (* Twice, as [run_fiss_sched] runs: the winner's zero handling (gh-ocannl-1625). *)
+  let ctx = Context.run (Context.run ctx routine) routine in
   let got_b = Context.get_values ctx y.Tensor.value in
   (match !reports with
   | [ r ] ->
@@ -1527,7 +1535,8 @@ let () =
       (named "cvmb_tuned" (Train.forward y))
       Ir.Indexing.Empty
   in
-  let ctx = Context.run ctx routine in
+  (* Twice, as [run_fiss_sched] runs: the winner's zero handling (gh-ocannl-1625). *)
+  let ctx = Context.run (Context.run ctx routine) routine in
   let got_mb = Context.get_values ctx y.Tensor.value in
   (match !reports with
   | [ r ] ->
@@ -1619,7 +1628,8 @@ let () =
       (named "cva_tuned" (Train.forward y))
       Ir.Indexing.Empty
   in
-  let ctx = Context.run ctx routine in
+  (* Twice, as [run_fiss_sched] runs: the winner's zero handling (gh-ocannl-1625). *)
+  let ctx = Context.run (Context.run ctx routine) routine in
   let got_m = Context.get_values ctx y.Tensor.value in
   (match !reports with
   | [ r ] ->
@@ -1689,7 +1699,10 @@ let () =
   let leg =
     Verdict.sub_leg cpu_leg ~when_:(lazy (not (List.is_empty (Lazy.force tiled)))) ~on:backend_name
   in
-  let run name p_ =
+  (* [~runs:2] for the twin, once for its sibling: both apply the same zero handling, so only a
+     correct (idempotent) twin run over the first run's sums matches a fresh sibling, fresh buffers
+     being already zero (gh-ocannl-1625). *)
+  let run ?(runs = 1) name p_ =
     let y = make name in
     let ctx, routine =
       Context.compile
@@ -1699,7 +1712,7 @@ let () =
         (named name (Train.forward y))
         Ir.Indexing.Empty
     in
-    let ctx = Context.run ctx routine in
+    let ctx = Fn.apply_n_times ~n:runs (fun ctx -> Context.run ctx routine) ctx in
     Context.get_values ctx y.Tensor.value
   in
   let results =
@@ -1707,7 +1720,7 @@ let () =
       (List.mapi (Lazy.force tiled) ~f:(fun i s ->
            let t = Option.value_exn s.Autotune.sk_tile in
            let name = Printf.sprintf "cvr_t%d" i in
-           let got = run name s in
+           let got = run ~runs:2 name s in
            let src = Generated.read name in
            let header =
              Printf.sprintf "Tile_mma register tiling: %dx%d C-tile of %d-lane"

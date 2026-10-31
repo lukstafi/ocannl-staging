@@ -179,7 +179,9 @@ let run_forward ?(transform = fun (opt : LL.optimized) -> opt) ?transforms ~name
     | Some transforms ->
         Context.compile ~lowered_transform:transforms ctx (named name (Train.forward t)) Idx.Empty
   in
-  let ctx = Context.run ctx routine in
+  (* Twice: the partials a split mints have no host handle to prefill, and fresh buffers are zero,
+     so only a second run can see a partials init that never ran (gh-ocannl-1625). *)
+  let ctx = Context.run (Context.run ctx routine) routine in
   Context.get_values ctx t.Tensor.value
 
 let () =
@@ -378,7 +380,9 @@ let run_update ?(transform = fun (opt : LL.optimized) -> opt) ?transforms ~name 
     | Some transforms ->
         Context.compile ~lowered_transform:transforms ctx (named name update) Idx.Empty
   in
-  let ctx = Context.run ctx routine in
+  (* Twice, as in [run_forward] (gh-ocannl-1625): the update re-zeroes the gradients and takes no
+     SGD step, so a correct routine is idempotent while a dropped partials zero doubles the sum. *)
+  let ctx = Context.run (Context.run ctx routine) routine in
   Context.get_values ctx grad
 
 (* The statement containing the scatter into [grad], and the position loop inside it. *)

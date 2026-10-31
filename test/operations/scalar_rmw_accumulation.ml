@@ -77,6 +77,9 @@ let () =
   let%op total = indices + produced ++ "...|... => |->0" in
   let ctx = Context.auto () in
   let ctx, routine = Context.compile ctx (Train.forward total) Ir.Indexing.Empty in
+  (* Prefill the accumulator off the oracle: a fresh device buffer is already zero, so a one-shot
+     run could not tell a dropped zero-init from a kept one (gh-ocannl-1625). *)
+  let ctx = Context.set_values ctx total.value [| -100. |] in
   let ctx = Context.run ctx routine in
   let got = (Context.get_values ctx total.value).(0) in
   let expected =

@@ -44,6 +44,13 @@ let () = Test_utils.Generated.init ~backend_name
 let rows = 6
 let cols = 7
 
+(* Uploads per-cell values off every reduction's result (they are negative, the results positive)
+   into an accumulator between its compile and its run: a fresh device buffer is already zero, so
+   without it a dropped or wrongly forwarded zero-init would match the host reference anyway
+   (gh-ocannl-1625). *)
+let prefill ctx tn =
+  Context.set_values ctx tn (Array.init (Tn.num_elems tn) ~f:(fun k -> -.(100. +. Float.of_int k)))
+
 (* Discriminating producer: varies with both symbols, never zero. *)
 let elem i j = 1.0 +. (10.0 *. Float.of_int i) +. Float.of_int j
 let data = Array.init (rows * cols) ~f:(fun n -> elem (n / cols) (n % cols))
@@ -79,15 +86,15 @@ let () =
   let ctx, r_total =
     Context.compile ~name:"res_total" ctx (Train.forward total) Ir.Indexing.Empty
   in
-  let ctx = Context.run ctx r_total in
+  let ctx = Context.run (prefill ctx total.Tensor.value) r_total in
   let ctx, r_per_col =
     Context.compile ~name:"res_per_col" ctx (Train.forward per_col) Ir.Indexing.Empty
   in
-  let ctx = Context.run ctx r_per_col in
+  let ctx = Context.run (prefill ctx per_col.Tensor.value) r_per_col in
   let ctx, r_index_total =
     Context.compile ~name:"res_index_total" ctx (Train.forward index_total) Ir.Indexing.Empty
   in
-  let ctx = Context.run ctx r_index_total in
+  let ctx = Context.run (prefill ctx index_total.Tensor.value) r_index_total in
   let got_total = (Context.get_values ctx total.Tensor.value).(0) in
   let got_per_col = Context.get_values ctx per_col.Tensor.value in
   let got_index_total = (Context.get_values ctx index_total.Tensor.value).(0) in

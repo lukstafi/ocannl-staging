@@ -191,7 +191,10 @@ let run_with name s ~lowered_transform =
   let ctx, routine =
     Context.compile ~lowered_transform init (named name (Train.forward y)) Ir.Indexing.Empty
   in
-  let ctx = Context.run ctx routine in
+  (* Run twice (the forward is idempotent): fresh buffers are already zero, so a seed's zero
+     companion or zero segment that misses cells shows only over the first run's sums
+     (gh-ocannl-1625). *)
+  let ctx = Context.run (Context.run ctx routine) routine in
   let got = Context.get_values ctx y.Tensor.value in
   Context.release ctx;
   Context.release init;

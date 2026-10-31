@@ -319,6 +319,14 @@ let compile_run ?(simd_width = n) ~name ~leg (out : Tensor.t) =
   let ctx, routine =
     Context.compile ~lowered_transform:(fun o -> [ transform o ]) ctx comp Ir.Indexing.Empty
   in
+  (* The tensorized legs expand [out]'s zero; fresh buffers are zero and would hide a dropped or
+     short expansion (gh-ocannl-1625), so every leg starts [out] off its result (the sums here stay
+     under 64 * 3 * 8). *)
+  let numel = Array.fold (Tn.dims_without_padding out.Tensor.value) ~init:1 ~f:( * ) in
+  let ctx =
+    Context.set_values ctx out.Tensor.value
+      (Array.init numel ~f:(fun c -> Float.of_int (10_000 + c)))
+  in
   let ctx = Context.run ctx routine in
   (Context.get_values ctx out.Tensor.value, routine.Context.mma)
 

@@ -137,6 +137,16 @@ let composed_schedule ~a ~b (opt : LL.optimized) : Sched.schedule =
   @ [ stage b [ k_i; j ]; stage a [ i_i; k_i ] ]
   @ if on_cpu then [ fst (Sched.tensorize ~i:i_i ~j ~k:k_i ~simd_width:1 ()) ] else []
 
+(* The expanded-zero legs below seed their target off every value it ends with: fresh buffers are
+   zero and would hide a dropped or short zero expansion (gh-ocannl-1625). The sums stay below [64 *
+   8 * 11]. *)
+let zero_prefill = Array.init (n * n) ~f:(fun c -> Float.of_int (10_000 + c))
+
+let prefilled ~what ~want ctx (out : Tensor.t) =
+  pf_all2 "%s: the prefill of the target differs from the serial twin's result in every cell" what
+    zero_prefill want ~f:(fun a b -> Float.(a <> b));
+  Context.set_values ctx out.Tensor.value zero_prefill
+
 let run_composed ~name ~a ~b (out : Tensor.t) =
   let comp = named name (Train.forward out) in
   let transform opt = Sched.apply (composed_schedule ~a ~b opt) opt in
@@ -237,6 +247,7 @@ let () =
       (named "pmm_grid_mma" (Train.forward gc1))
       Ir.Indexing.Empty
   in
+  let ctx = prefilled ~what:"pmm_grid_mma" ~want:want_g ctx gc1 in
   let ctx = Context.run ctx routine in
   let got_g = Context.get_values ctx gc1.Tensor.value in
   p_all2 "grid-blocked tensorized matmul matches the serial twin bitwise" got_g want_g
@@ -297,6 +308,7 @@ let () =
       (named "pmm_par_packed" (Train.forward pp1))
       Ir.Indexing.Empty
   in
+  let ctx = prefilled ~what:"pmm_par_packed" ~want:want_pp ctx pp1 in
   let ctx = Context.run ctx routine in
   let got_pp = Context.get_values ctx pp1.Tensor.value in
   p_all2 "parallel packed matmul matches the serial twin bitwise" got_pp want_pp ~f:Float.equal;
@@ -377,6 +389,7 @@ let () =
       (named "pmm_gridpack" (Train.forward hc1))
       Ir.Indexing.Empty
   in
+  let ctx = prefilled ~what:"pmm_gridpack" ~want ctx hc1 in
   let ctx = Context.run ctx routine in
   let got = Context.get_values ctx hc1.Tensor.value in
   p_all2 "grid + hoisted-pack matmul matches the serial twin bitwise" got want ~f:Float.equal;
@@ -461,6 +474,7 @@ let () =
       (named "pmm_mixed" (Train.forward mx1))
       Ir.Indexing.Empty
   in
+  let ctx = prefilled ~what:"pmm_mixed" ~want ctx mx1 in
   let ctx = Context.run ctx routine in
   let got = Context.get_values ctx mx1.Tensor.value in
   p_all2 "mixed grid-outermost matmul matches the serial twin bitwise" got want ~f:Float.equal;

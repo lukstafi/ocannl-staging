@@ -529,11 +529,16 @@ let () =
   let update = named "fission_bwd" (Train.grad_update l) in
   let ctx = Train.init_params (Context.auto ()) IDX.empty l in
   let ctx, routine = Train.to_routine ctx IDX.empty update in
-  let ctx = Context.run ctx routine in
   let w =
     List.find_exn (Set.to_list l.Tensor.params) ~f:(fun t ->
         String.equal (Tn.label_name t.Tensor.value) "w")
   in
+  (* The gradient is prefilled clear of every value [x] holds, cell by cell: fresh buffers are
+     already zero, so a gradient zero that never runs would be invisible (gh-ocannl-1625). *)
+  let prefill = Array.init (n * n) ~f:(fun k -> Float.of_int (100 + k)) in
+  p_all2 "the prefill differs from the gradient in every cell" prefill xv ~f:(fun a b ->
+      Float.(a <> b));
+  let ctx = Context.run (Context.set_values ctx (grad_of w) prefill) routine in
   let wg = Context.get_values ctx (grad_of w) in
   (* dl/dw = x. *)
   p_close "backward gradient values correct" wg xv ~tol:approx_tol;

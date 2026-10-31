@@ -16,7 +16,7 @@ HERE: test/einsum/test_virtual_diagonal.ml:27:21
 
 
 Reference: materialized diagonal i=>ii (consumer reads diagonal+1):
-HERE: test/einsum/test_virtual_diagonal.ml:41:21
+HERE: test/einsum/test_virtual_diagonal.ml:49:21
 ┌───────────────────────────────────────┐
 │[3]: +_consumer shape 0:5,1:5          │
 │┌──────┬──────────────────────────────┐│
@@ -32,7 +32,7 @@ HERE: test/einsum/test_virtual_diagonal.ml:41:21
 
 
 Partially diagonal ij=>iji inlined into a generic consumer (+ 1):
-HERE: test/einsum/test_virtual_diagonal.ml:54:21
+HERE: test/einsum/test_virtual_diagonal.ml:62:21
 ┌──────────────────────────────────┐
 │[3]: +_consumer shape 0:3,1:4,2:3 │
 │┌──────┬─────────────────────┐    │

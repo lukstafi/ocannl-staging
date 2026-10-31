@@ -1,2 +1,3 @@
 packed tiled matmul matches the naive twin: true
+the prefill of the accumulator differs from the naive twin's result in every cell: true
 packed tiles are plain local arrays, no barriers, no guards: true

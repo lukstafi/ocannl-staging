@@ -1,4 +1,5 @@
 hoisted-packed matmul matches the naive twin: true
+the prefill of the accumulator differs from the naive twin's result in every cell: true
 no in-kernel scratch or copy nests; packed constants are buffer params: true
 mixed hoisted + in-kernel packing on edge tiles matches the naive twin: true
 hoisting a non-constant source is rejected: true
