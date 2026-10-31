@@ -87,6 +87,10 @@
 open Base
 open Stdio
 
+(* The dependency set arrives as a `@<path>` response file, because a list that grows with the
+   repository does not belong on a Windows command line (gh-ocannl-1748); see
+   [Test_utils.Scan_argv]. *)
+let argv = Test_utils.Scan_argv.expand Stdlib.Sys.argv
 let base_dir = Test_utils.Dune_stanza_scan.base_dir
 let repo_relative = Test_utils.Dune_stanza_scan.repo_relative
 
@@ -3876,8 +3880,8 @@ module Harness_contract = struct
 end
 
 let () =
-  if Array.length Stdlib.Sys.argv < 2 then (
-    eprintf "Usage: %s <workspace_root> <ocannl_config and shell scripts...>\n" Stdlib.Sys.argv.(0);
+  if Array.length argv < 2 then (
+    eprintf "Usage: %s <workspace_root> <ocannl_config and shell scripts...>\n" argv.(0);
     Stdlib.exit 1);
   (* The shebang grammar, on lines built to break it rather than on the two shapes this repository's
      scripts happen to use. Each case reads as what the parser must make of the line, so the golden
@@ -3899,7 +3903,7 @@ let () =
   Errexit_and_list.controls ();
   Errexit_execution_controls.controls ();
   Harness_contract.controls ();
-  let base = base_dir Stdlib.Sys.argv.(1) in
+  let base = base_dir argv.(1) in
   (* Reported repository-relative, opened as dune handed them over: the working directory is deep in
      the build tree and the paths arrive relative to it. *)
   (* A `.sh` file is in scope by its name; anything else the globs hand over is in scope only if it
@@ -3911,7 +3915,7 @@ let () =
     || Shebang.mentions_a_shell (Option.value ~default:"" (first_line_of path))
   in
   let scripts =
-    Array.to_list Stdlib.Sys.argv |> Fn.flip List.drop 2
+    Array.to_list argv |> Fn.flip List.drop 2
     |> List.filter ~f:(fun path -> (not (Stdlib.Sys.is_directory path)) && in_scope path)
     |> List.map ~f:(fun path -> (repo_relative base path, path))
     (* The `*.sh` glob and the two directory globs overlap, so the same script arrives twice; one

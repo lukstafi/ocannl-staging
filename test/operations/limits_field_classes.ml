@@ -39,6 +39,12 @@ open Verdict.Claims
 module BI = Ir.Backend_intf
 module SC = Ir.Schedule_cache
 open Ppxlib.Parsetree
+
+(* The dependency set arrives as a `@<path>` response file, because a list that grows with the
+   repository does not belong on a Windows command line (gh-ocannl-1748); see
+   [Test_utils.Scan_argv]. *)
+let argv = Test_utils.Scan_argv.expand Stdlib.Sys.argv
+
 module Ast_traverse = Ppxlib.Ast_traverse
 
 (* A record with every field present (options [Some], the [[@sexp.option]] ones included), so its
@@ -866,7 +872,7 @@ let () =
 
 let () =
   let sources =
-    Array.to_list (Array.subo (Sys.get_argv ()) ~pos:1)
+    Array.to_list (Array.subo argv ~pos:1)
     |> List.filter ~f:(String.is_suffix ~suffix:".ml")
     |> List.filter ~f:(fun path -> not (String.is_suffix path ~suffix:".pp.ml"))
   in

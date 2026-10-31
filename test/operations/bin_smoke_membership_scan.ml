@@ -20,6 +20,12 @@
 open Base
 open Stdio
 open Verdict.Claims
+
+(* The dependency set arrives as a `@<path>` response file, because a list that grows with the
+   repository does not belong on a Windows command line (gh-ocannl-1748); see
+   [Test_utils.Scan_argv]. *)
+let argv = Test_utils.Scan_argv.expand Stdlib.Sys.argv
+
 module Dune_scan = Test_utils.Dune_stanza_scan
 
 type declaration = { local : string; public : string }
@@ -2248,7 +2254,7 @@ let report result =
   p "bin-smoke covers every public bin executable exactly once" (complete result)
 
 let () =
-  match Array.to_list Stdlib.Sys.argv with
+  match Array.to_list argv with
   | [ _; "--refusal-control" ] ->
       let child = Fresh_process.run [ "--negative-control" ] in
       let ok =

@@ -23,6 +23,12 @@
 
 open Base
 open Stdio
+
+(* The dependency set arrives as a `@<path>` response file, because a list that grows with the
+   repository does not belong on a Windows command line (gh-ocannl-1748); see
+   [Test_utils.Scan_argv]. *)
+let argv = Test_utils.Scan_argv.expand Stdlib.Sys.argv
+
 module Backends = Context.Backends
 module Dune_scan = Test_utils.Dune_stanza_scan
 
@@ -586,12 +592,12 @@ let control_results () =
   (checks, refusal_diagnostics)
 
 let () =
-  if Array.length Stdlib.Sys.argv < 2 then (
-    eprintf "Usage: %s <workspace_root> <expected-or-dune-file...>\n" Stdlib.Sys.argv.(0);
+  if Array.length argv < 2 then (
+    eprintf "Usage: %s <workspace_root> <expected-or-dune-file...>\n" argv.(0);
     Stdlib.exit 1);
-  let base = Dune_scan.base_dir Stdlib.Sys.argv.(1) in
+  let base = Dune_scan.base_dir argv.(1) in
   let arguments =
-    Array.to_list (Array.subo Stdlib.Sys.argv ~pos:2)
+    Array.to_list (Array.subo argv ~pos:2)
     |> List.map ~f:(fun path -> (Dune_scan.repo_relative base path, path))
   in
   let backends = List.map Backends.all_of_backend ~f:Backends.backend_name |> sorted in

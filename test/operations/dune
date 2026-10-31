@@ -3607,7 +3607,7 @@
 
 (rule
  ; ocannl-backend: none -- links no backend: it reads ocannl_config.reference, the globbed sources and an agent note as text.
- (target test_config_consistency.actual)
+ (targets test_config_consistency.actual test_config_consistency.filelist)
  (package neural_nets_lib)
  (deps
   (alias runtest-env_spelling_gate)
@@ -3620,12 +3620,16 @@
   (glob_files_rec ../../tools/*.ml)
   (glob_files_rec ../../benchmarks/runners/ocannl/*.ml))
  (action
-  (with-stdout-to
-   %{target}
-   (run
-    %{dep:test_config_consistency.exe}
-    %{dep:../../ocannl_config.reference}
-    %{deps}))))
+  (progn
+   (with-stdout-to
+    test_config_consistency.filelist
+    (echo "%{deps}"))
+   (with-stdout-to
+    test_config_consistency.actual
+    (run
+     %{dep:test_config_consistency.exe}
+     %{dep:../../ocannl_config.reference}
+     @test_config_consistency.filelist)))))
 
 (rule
  (alias runtest-test_config_consistency)
@@ -3780,14 +3784,23 @@
  (package neural_nets_lib)
  (deps
   ocannl_config
+  ; Listed because `no-infer` below stops `%{test}` declaring it.
+  slot_kind_live.exe
   (glob_files_rec ../../dune)
   (glob_files_rec ../../ocannl_config)
   (glob_files_rec ../../dune-project)
   (glob_files_rec ../../dune-file)
   (glob_files_rec ../../*.t)
   (glob_files ../../dune-workspace))
+ ; The dependency set goes over as a response file, never on the command line (gh-ocannl-1748): a
+ ; test may declare no targets, so `no-infer` lets the action write it.
  (action
-  (run %{test} %{workspace_root} %{deps}))
+  (no-infer
+   (progn
+    (with-stdout-to
+     slot_kind_live.filelist
+     (echo "%{deps}"))
+    (run %{test} %{workspace_root} @slot_kind_live.filelist))))
  (modules slot_kind_live)
  (libraries base stdio test_utils arrayjit.verdict))
 
@@ -4048,7 +4061,7 @@
 
 (rule
  ; ocannl-backend: none -- links no backend: it reads the config-key classification table and the globbed sources as text.
- (target digest_completeness.actual)
+ (targets digest_completeness.actual digest_completeness.filelist)
  (package neural_nets_lib)
  (deps
   (alias runtest-env_spelling_gate)
@@ -4060,9 +4073,13 @@
   (glob_files_rec ../../tools/*.ml)
   (glob_files_rec ../../benchmarks/runners/ocannl/*.ml))
  (action
-  (with-stdout-to
-   %{target}
-   (run %{dep:digest_completeness.exe} %{deps}))))
+  (progn
+   (with-stdout-to
+    digest_completeness.filelist
+    (echo "%{deps}"))
+   (with-stdout-to
+    digest_completeness.actual
+    (run %{dep:digest_completeness.exe} @digest_completeness.filelist)))))
 
 (rule
  (alias runtest-digest_completeness)
@@ -4413,7 +4430,9 @@
 (rule
  ; ocannl-backend: none -- links the backend closure only to enumerate its derived constant; it
  ; opens no device, compiles nothing, and scans expected filenames and dune comments as text.
- (target backend_golden_family_scan.actual)
+ (targets
+  backend_golden_family_scan.actual
+  backend_golden_family_scan.filelist)
  (package neural_nets_lib)
  (deps
   (alias runtest-env_spelling_gate)
@@ -4421,9 +4440,16 @@
   (glob_files_rec ../../*.expected)
   (glob_files_rec ../../dune))
  (action
-  (with-stdout-to
-   %{target}
-   (run %{dep:backend_golden_family_scan.exe} %{workspace_root} %{deps}))))
+  (progn
+   (with-stdout-to
+    backend_golden_family_scan.filelist
+    (echo "%{deps}"))
+   (with-stdout-to
+    backend_golden_family_scan.actual
+    (run
+     %{dep:backend_golden_family_scan.exe}
+     %{workspace_root}
+     @backend_golden_family_scan.filelist)))))
 
 (rule
  (alias runtest-backend_golden_family_scan)
@@ -4445,16 +4471,25 @@
 
 (rule
  ; ocannl-backend: none -- links no backend and parses repository dune files as text.
- (target bin_smoke_membership_scan.actual)
+ (targets
+  bin_smoke_membership_scan.actual
+  bin_smoke_membership_scan.filelist)
  (package neural_nets_lib)
  (deps
   (alias runtest-env_spelling_gate)
   ocannl_config
   (glob_files_rec ../../dune))
  (action
-  (with-stdout-to
-   %{target}
-   (run %{dep:bin_smoke_membership_scan.exe} %{workspace_root} %{deps}))))
+  (progn
+   (with-stdout-to
+    bin_smoke_membership_scan.filelist
+    (echo "%{deps}"))
+   (with-stdout-to
+    bin_smoke_membership_scan.actual
+    (run
+     %{dep:bin_smoke_membership_scan.exe}
+     %{workspace_root}
+     @bin_smoke_membership_scan.filelist)))))
 
 (rule
  (alias runtest-bin_smoke_membership_scan)
@@ -4502,7 +4537,7 @@
 
 (rule
  ; ocannl-backend: none -- links no backend: it parses lib/ sources handed over by the glob.
- (target optional_arg_inventory.actual)
+ (targets optional_arg_inventory.actual optional_arg_inventory.filelist)
  (package neural_nets_lib)
  (deps
   (alias runtest-env_spelling_gate)
@@ -4510,9 +4545,16 @@
   (glob_files_rec ../../lib/*.ml)
   (glob_files_rec ../../lib/*.mli))
  (action
-  (with-stdout-to
-   %{target}
-   (run %{dep:optional_arg_inventory.exe} %{workspace_root} %{deps}))))
+  (progn
+   (with-stdout-to
+    optional_arg_inventory.filelist
+    (echo "%{deps}"))
+   (with-stdout-to
+    optional_arg_inventory.actual
+    (run
+     %{dep:optional_arg_inventory.exe}
+     %{workspace_root}
+     @optional_arg_inventory.filelist)))))
 
 (rule
  (alias runtest-optional_arg_inventory)
@@ -4543,7 +4585,7 @@
 
 (rule
  ; ocannl-backend: none -- links no backend: it reads dune files as text.
- (target config_dep_completeness.actual)
+ (targets config_dep_completeness.actual config_dep_completeness.filelist)
  (package neural_nets_lib)
  (deps
   (alias runtest-env_spelling_gate)
@@ -4551,9 +4593,16 @@
   (glob_files_rec ../../dune)
   (glob_files_rec ../../ocannl_config))
  (action
-  (with-stdout-to
-   %{target}
-   (run %{dep:config_dep_completeness.exe} %{workspace_root} %{deps}))))
+  (progn
+   (with-stdout-to
+    config_dep_completeness.filelist
+    (echo "%{deps}"))
+   (with-stdout-to
+    config_dep_completeness.actual
+    (run
+     %{dep:config_dep_completeness.exe}
+     %{workspace_root}
+     @config_dep_completeness.filelist)))))
 
 (rule
  (alias runtest-config_dep_completeness)
@@ -9142,7 +9191,7 @@
 
 (rule
  ; ocannl-backend: none -- links no backend: it hands shell scripts to `bash -n`/`sh -n` and runs no kernels.
- (target shell_scripts_parse.actual)
+ (targets shell_scripts_parse.actual shell_scripts_parse.filelist)
  (package neural_nets_lib)
  (deps
   (alias runtest-env_spelling_gate)
@@ -9167,9 +9216,16 @@
   ; instead, so they cannot influence the run and need no dependency edge (round 6).
   (env_var PATH))
  (action
-  (with-stdout-to
-   %{target}
-   (run %{dep:shell_scripts_parse.exe} %{workspace_root} %{deps}))))
+  (progn
+   (with-stdout-to
+    shell_scripts_parse.filelist
+    (echo "%{deps}"))
+   (with-stdout-to
+    shell_scripts_parse.actual
+    (run
+     %{dep:shell_scripts_parse.exe}
+     %{workspace_root}
+     @shell_scripts_parse.filelist)))))
 
 (rule
  (alias runtest-shell_scripts_parse)
@@ -11372,7 +11428,7 @@
 (rule
  ; ocannl-backend: none -- links no backend: it compares synthetic limits records and reads the
  ; globbed sources as text.
- (target limits_field_classes.actual)
+ (targets limits_field_classes.actual limits_field_classes.filelist)
  (package neural_nets_lib)
  (deps
   (alias runtest-env_spelling_gate)
@@ -11384,9 +11440,13 @@
   (glob_files_rec ../../tools/*.ml)
   (glob_files_rec ../../benchmarks/runners/ocannl/*.ml))
  (action
-  (with-stdout-to
-   %{target}
-   (run %{dep:limits_field_classes.exe} %{deps}))))
+  (progn
+   (with-stdout-to
+    limits_field_classes.filelist
+    (echo "%{deps}"))
+   (with-stdout-to
+    limits_field_classes.actual
+    (run %{dep:limits_field_classes.exe} @limits_field_classes.filelist)))))
 
 (rule
  (alias runtest-limits_field_classes)
@@ -11561,14 +11621,24 @@
  (deps
   ocannl_config
   (env_var OCANNL_BACKEND)
+  ; Listed because `no-infer` below stops `%{test}` declaring it.
+  self_operand_sites.exe
   (glob_files ../../lib/*.ml)
   (glob_files ../../tensor/*.ml))
+ ; The dependency set goes over as a response file, never on the command line (gh-ocannl-1748): a
+ ; test may declare no targets, so `no-infer` lets the action write it.
  (action
-  (run %{test} %{deps}))
+  (no-infer
+   (progn
+    (with-stdout-to
+     self_operand_sites.filelist
+     (echo "%{deps}"))
+    (run %{test} @self_operand_sites.filelist))))
  (modules self_operand_sites)
  (libraries
   base
   stdio
+  test_utils
   ppxlib
   ocannl
   neural_nets_lib.einsum_parser

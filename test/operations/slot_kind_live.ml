@@ -15,17 +15,23 @@
 open Base
 open Stdio
 open Verdict.Claims
+
+(* The dependency set arrives as a `@<path>` response file, because a list that grows with the
+   repository does not belong on a Windows command line (gh-ocannl-1748); see
+   [Test_utils.Scan_argv]. *)
+let argv = Test_utils.Scan_argv.expand Stdlib.Sys.argv
+
 module Scan = Test_utils.Dune_stanza_scan
 module Slot_kind = Test_utils.Slot_kind
 
 let () =
-  if Array.length Stdlib.Sys.argv < 2 then (
-    eprintf "Usage: %s <workspace_root> <declared input...>\n" Stdlib.Sys.argv.(0);
+  if Array.length argv < 2 then (
+    eprintf "Usage: %s <workspace_root> <declared input...>\n" argv.(0);
     Stdlib.exit 1);
   (* Paths arrive relative to the test's directory deep in the build tree; [Scan.base_dir] and
      [Scan.repo_relative] turn them into repository-relative ones. *)
-  let base = Scan.base_dir Stdlib.Sys.argv.(1) in
-  let handed = Array.to_list (Array.subo Stdlib.Sys.argv ~pos:2) in
+  let base = Scan.base_dir argv.(1) in
+  let handed = Array.to_list (Array.subo argv ~pos:2) in
   let opened = ref [] in
   let read path =
     opened := path :: !opened;
