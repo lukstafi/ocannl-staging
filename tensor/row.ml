@@ -3547,6 +3547,146 @@ let globals_differences
     ]
     ~f:(fun (name, same) -> if same then None else Some name)
 
+(* {2 Shape-scheme support (gh-ocannl-404)}
+
+   A shape scheme is a trace's constraints read off the session before its rewind, renamed per
+   application. Variables of both kinds share one counter ([uid]), so "minted since the trace began"
+   is an id comparison. *)
+
+let var_mark () = !uid
+let dim_var_id (v : dim_var) = v.id
+let row_var_id (Row_var.Row_var id) = id
+let discardable_vars env = env.discardable_vars
+
+type renaming = { rn_dim : dim_var -> dim_var; rn_row : row_var -> row_var }
+
+let rec rename_dim rn = function
+  | Var v -> Var (rn.rn_dim v)
+  | (Dim _ | Sym _) as d -> d
+  | Affine { stride; over; conv; stride_offset } ->
+      let conv = Option.map conv ~f:(fun c -> { c with kernel = rename_dim rn c.kernel }) in
+      Affine { stride; over = rename_dim rn over; conv; stride_offset }
+  | Concat dims -> Concat (List.map dims ~f:(rename_dim rn))
+
+let rename_row rn { beg_dims; dims; bcast; prov } =
+  {
+    beg_dims = List.map beg_dims ~f:(rename_dim rn);
+    dims = List.map dims ~f:(rename_dim rn);
+    bcast = (match bcast with Row_var v -> Row_var (rn.rn_row v) | Broadcastable -> Broadcastable);
+    prov;
+  }
+
+let rename_total_elems rn = function
+  | (Num_elems _ | Range_elems _) as n -> n
+  | Strided_var s -> Strided_var { s with var = rn.rn_dim s.var }
+
+let rename_row_constraint rn = function
+  | Unconstrained -> Unconstrained
+  | Total_elems { numerator; divided_by; keep_axis } ->
+      Total_elems
+        {
+          numerator = rename_total_elems rn numerator;
+          divided_by = List.map divided_by ~f:rn.rn_dim;
+          keep_axis;
+        }
+  | Exact dims -> Exact (List.map dims ~f:(rename_dim rn))
+
+let rename_constraint rn = function
+  | Dim_eq { d1; d2; origin } -> Dim_eq { d1 = rename_dim rn d1; d2 = rename_dim rn d2; origin }
+  | Row_eq { r1; r2; origin } -> Row_eq { r1 = rename_row rn r1; r2 = rename_row rn r2; origin }
+  | Dim_ineq { res; opnd; from_; origin } ->
+      Dim_ineq { res = rename_dim rn res; opnd = rename_dim rn opnd; from_; origin }
+  | Row_ineq { res; opnd; origin } ->
+      Row_ineq { res = rename_row rn res; opnd = rename_row rn opnd; origin }
+  | Dim_constr { d; constr; origin } -> Dim_constr { d = rename_dim rn d; constr; origin }
+  | Rows_constr { r; constr; origin } ->
+      Rows_constr
+        { r = List.map r ~f:(rename_row rn); constr = rename_row_constraint rn constr; origin }
+  | Terminal_dim (b, d, origin) -> Terminal_dim (b, rename_dim rn d, origin)
+  | Terminal_row (b, r, origin) -> Terminal_row (b, rename_row rn r, origin)
+  | Shape_row (r, origin) -> Shape_row (rename_row rn r, origin)
+
+(* The variables of a value, collected through the renaming traversal: one owner for the
+   positions. *)
+let collect_vars ~f =
+  let dims = ref [] and rows = ref [] in
+  let rn =
+    {
+      rn_dim =
+        (fun v ->
+          dims := v :: !dims;
+          v);
+      rn_row =
+        (fun v ->
+          rows := v :: !rows;
+          v);
+    }
+  in
+  f rn;
+  ( List.dedup_and_sort ~compare:compare_dim_var !dims,
+    List.dedup_and_sort ~compare:compare_row_var !rows )
+
+let constraint_vars c = collect_vars ~f:(fun rn -> ignore (rename_constraint rn c : constraint_))
+let row_vars r = collect_vars ~f:(fun rn -> ignore (rename_row rn r : t))
+
+let add_constraint_origin o = function
+  | Dim_eq r -> Dim_eq { r with origin = o :: r.origin }
+  | Row_eq r -> Row_eq { r with origin = o :: r.origin }
+  | Dim_ineq r -> Dim_ineq { r with origin = o :: r.origin }
+  | Row_ineq r -> Row_ineq { r with origin = o :: r.origin }
+  | Dim_constr r -> Dim_constr { r with origin = o :: r.origin }
+  | Rows_constr r -> Rows_constr { r with origin = o :: r.origin }
+  | Terminal_dim (b, d, origin) -> Terminal_dim (b, d, o :: origin)
+  | Terminal_row (b, r, origin) -> Terminal_row (b, r, o :: origin)
+  | Shape_row (r, origin) -> Shape_row (r, o :: origin)
+
+(* A [Strided_var] coefficient is a lazy over the precision of the trace's own nodes: a scheme
+   cannot carry it past the rewind. *)
+let has_lazy_coefficient c =
+  let lazy_constr = function
+    | Total_elems { numerator = Strided_var _; _ } -> true
+    | Total_elems _ | Unconstrained | Exact _ -> false
+  in
+  match c with Rows_constr { constr; _ } -> lazy_constr constr | _ -> false
+
+(* The policy marks added since a capture: the solver's per-variable sets steer closure's guesses,
+   and a rewind takes the trace's additions back, so a scheme carries them. *)
+type marks = {
+  m_pending_roles : (Ir.Indexing.static_symbol * [ `Extent | `Slice ]) list;
+  m_resolve_at_use_dim : dim_var list;
+  m_safe_to_guess : row_var list;
+  m_used_in_spec_or_compose : row_var list;
+  m_used_in_pointwise : row_var list;
+  m_concat_component_vars : dim_var list;
+  m_resolve_at_use : row_var list;
+}
+
+let marks_since (g : globals) =
+  let diff now before = Set.to_list (Set.diff now before) in
+  let rec roles_since acc = function
+    | l when phys_equal l g.g_pending_roles -> List.rev acc
+    | [] -> List.rev acc
+    | r :: rest -> roles_since (r :: acc) rest
+  in
+  {
+    m_pending_roles = roles_since [] !pending_roles;
+    m_resolve_at_use_dim = diff !resolve_at_use_dim g.g_resolve_at_use_dim;
+    m_safe_to_guess = diff !safe_to_guess g.g_safe_to_guess;
+    m_used_in_spec_or_compose = diff !used_in_spec_or_compose g.g_used_in_spec_or_compose;
+    m_used_in_pointwise = diff !used_in_pointwise g.g_used_in_pointwise;
+    m_concat_component_vars = diff !concat_component_vars g.g_concat_component_vars;
+    m_resolve_at_use = diff !resolve_at_use g.g_resolve_at_use;
+  }
+
+let add_marks rn m =
+  List.iter m.m_pending_roles ~f:(fun (sym, role) -> claim_symbol_role sym role);
+  List.iter m.m_resolve_at_use_dim ~f:(fun v -> add_resolve_at_use_dim (rn.rn_dim v));
+  List.iter m.m_safe_to_guess ~f:(fun v -> add_safe_to_guess (rn.rn_row v));
+  List.iter m.m_used_in_spec_or_compose ~f:(fun v -> add_used_in_spec_or_compose (rn.rn_row v));
+  List.iter m.m_used_in_pointwise ~f:(fun v -> add_used_in_pointwise (rn.rn_row v));
+  List.iter m.m_concat_component_vars ~f:(fun v -> add_concat_component (rn.rn_dim v));
+  List.iter m.m_resolve_at_use ~f:(fun v -> add_resolve_at_use (rn.rn_row v))
+
 let%debug5_sexp solve_row_ineq ~(stage : stage) origin ~(res : t) ~(opnd : t) env :
     constraint_ list * _ =
   let nonredundant ?(more = []) v vs =

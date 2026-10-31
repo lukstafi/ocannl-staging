@@ -482,3 +482,59 @@ val to_bases_bio : t -> string array * string array * string array
 val parse_n5_layout : string -> int array
 (** Parse a N5_layout priority string (e.g., "0,1,2") into display indices. Only supports integer
     labels (Fixed_index). *)
+
+(** {2 Shape schemes (gh-ocannl-404)}
+
+    The shape-inference half of [Tensor.Scheme]: use that. A scheme is the constraints a traced
+    function registers, read off the session before the trace's rewind, with the solution equations
+    of their variables; an instantiation renames the variables the trace minted (the generalized
+    ones), keeps the older ones (shared parameters' and every other pre-existing tensor's: fixed),
+    and relates the scheme's boundary rows to given argument and result shapes. It runs no function
+    body and registers no update step: the next closure applies the solution to the boundary shapes
+    and closes them. *)
+module Scheme : sig
+  type shape := t
+  type t
+
+  (** Negative controls for the tests: each disables one part of the mechanism. *)
+  type sabotage =
+    | No_generalization  (** Rename nothing: applications share the trace's variables. *)
+    | Sever_shared
+        (** Rename every variable and drop the anchors: no application stays tied to pre-existing
+            shapes. *)
+    | No_marks  (** Re-add none of the trace's policy marks ([instantiate] only). *)
+    | No_end_validation  (** Skip the end-of-trace solve of the whole window ([trace] only). *)
+
+  val label : t -> string
+  val arity : t -> int
+  val num_results : t -> int
+
+  val trace :
+    ?sabotage:sabotage ->
+    var_mark:int ->
+    label:string ->
+    args:shape list ->
+    (unit -> shape list) ->
+    t
+  (** [trace ~var_mark ~label ~args f] runs [f], which returns the result shapes, and reads the
+      scheme off the session. [args] are the tracers' shapes, made after [var_mark] was read with
+      [Row.var_mark] (so their variables are generalized) and before this call (so their own
+      constraints are not the scheme's). Must run inside a rewound window ([Tensor.with_rewind]),
+      which undoes the trace. While [f] runs, [finish_inference] raises. Refuses, with
+      [Row.Shape_error] prefixed ["tracing the shape scheme <label>: "] like every error of the
+      trace: a precision-dependent total-elements constraint, a capture reference made outside the
+      window and bound or set in it, and a contradiction among the window's constraints (solved at
+      Stage1 once more at the end, so a trailing [set_dim] is checked too). *)
+
+  val instantiate :
+    ?sabotage:sabotage -> t -> application:string -> args:shape list -> results:shape list -> unit
+  (** Adds the scheme's renamed constraints and the equalities of its boundary rows with [args] and
+      [results] (and of its anchored pre-existing shapes with their current rows), solves them at
+      Stage1, and registers the boundary shapes with the next closure. Every added constraint
+      carries an origin naming the scheme and [application], so a closure-time failure names them
+      too. Raises [Row.Shape_error] prefixed
+      ["applying the shape scheme <label> to <application>: "]: before anything is written, on an
+      arity mismatch, a boundary or anchored shape discarded by a rewind, or a closure since the
+      trace when the scheme depends on open state no anchored shape holds; after registering
+      (tainting the session, as a failed construction does), on a contradiction. *)
+end

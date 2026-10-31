@@ -1549,9 +1549,52 @@ let with_rewind ?label f =
       (try rewind ck with Session_error _ -> ());
       Stdlib.Printexc.raise_with_backtrace exn bt
 
+(** {2 Shape schemes (gh-ocannl-404)} *)
+
+module Scheme = struct
+  type t = Shape.Scheme.t
+
+  let label = Shape.Scheme.label
+  let arity = Shape.Scheme.arity
+  let num_results = Shape.Scheme.num_results
+
+  let applications = ref 0
+  [@@mutation_serial.exempt "a counter naming default application labels, not inference state"]
+
+  let trace_impl ?sabotage ~label arity f =
+    with_rewind ~label:[%string "the trace of the shape scheme %{label}"] (fun () ->
+        let var_mark = Row.var_mark () in
+        let tracers =
+          List.init arity ~f:(fun i ->
+              term ~grad_spec:Prohibit_grad ~label:[ [%string "%{label}.arg%{i#Int}"] ] ())
+        in
+        Shape.Scheme.trace ?sabotage ~var_mark ~label
+          ~args:(List.map tracers ~f:(fun t -> t.shape))
+          (fun () -> List.map (f tracers) ~f:(fun t -> t.shape)))
+
+  let trace ~label arity f = trace_impl ~label arity f
+
+  let instantiate_impl ?sabotage ?application s ~args ~results =
+    let application =
+      match application with
+      | Some a -> a
+      | None ->
+          Int.incr applications;
+          [%string "application #%{!applications#Int}"]
+    in
+    Shape.Scheme.instantiate ?sabotage s ~application ~args ~results
+
+  let instantiate ?application s ~args ~results = instantiate_impl ?application s ~args ~results
+end
+
 module For_testing = struct
   let restore_categories =
     [ "node discard"; "roots"; "seed"; "nodes" ] @ Shape.Checkpoint.categories
+
+  let trace_scheme ~sabotage ~label arity f = Scheme.trace_impl ~sabotage ~label arity f
+
+  let instantiate_scheme ~sabotage ?application s ~args ~results =
+    Scheme.instantiate_impl ~sabotage ?application s ~args ~results
 
   let rewind_omitting ~omit ck =
     if not (List.mem restore_categories omit ~equal:String.equal) then
