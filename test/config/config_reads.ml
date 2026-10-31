@@ -14,8 +14,12 @@ open Base
 (** The file [--read=<key>] writes, in the working directory of the rule running it. *)
 let file_of_key key = "ocannl_" ^ key ^ ".txt"
 
-(** The deprecated spellings the backend selector still accepts, each with the backend it names --
-    [Backends.get_backend]'s, held equal to it by [test/operations/marker_backend_vocabulary]. *)
+(** The deprecated spellings the backend selector still accepts, each with the backend it names: the
+    entries of [Backends.accepted_names] that are not a backend's own name.
+    [test/operations/marker_backend_vocabulary] holds the two equal, so an alias added to the parse
+    table alone fails there rather than resolving here to a name no backend has. Restated rather
+    than read because this library links [base] alone, for the tests and scans that link no backend.
+*)
 let deprecated_aliases = [ ("sync_cc", "cc"); ("multicore_cc", "multidev_cc") ]
 
 (** A backend setting as the backend's own name: lower case, a deprecated alias resolved. A stream
@@ -26,9 +30,10 @@ let canonical_backend setting =
   let name = String.lowercase setting in
   Option.value (List.Assoc.find deprecated_aliases name ~equal:String.equal) ~default:name
 
-(** The extension a backend's emitted code carries, for a canonical backend name; [None] for a name
-    this reader was never taught, which [marker_backend_vocabulary] refuses for every backend OCANNL
-    has. *)
+(** The extension a backend's emitted code carries, without the dot, for a canonical backend name;
+    [None] for a name this reader was never taught. [marker_backend_vocabulary] holds it equal, for
+    every backend OCANNL has, to the [source_extension] fact the backend's artifact writer appends
+    ([Ir.Backend_intf.backend_facts]); restated for the same reason as {!deprecated_aliases}. *)
 let code_extension = function
   | "cc" | "multidev_cc" -> Some "c"
   | "cuda" -> Some "cu"

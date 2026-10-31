@@ -89,11 +89,21 @@ let uninitialized where =
     (where ^ ": Test_utils.Generated.init ~backend_name must be called before any compile, so that "
    ^ "artifacts left by earlier runs cannot be mistaken for this run's")
 
-(** The source extension the run's backend emits: [.metal], [.cu], [.hip], or [.c] for the C
-    backends. *)
+(** The source extension, dot included, a backend writes its generated routines under: the name
+    looked up exactly, case-insensitively and with a deprecated alias resolved, in
+    [Config_reads.code_extension], which [marker_backend_vocabulary] holds equal to each backend's
+    own [source_extension] fact. Raises [Invalid_argument] on a name that is no backend's: a
+    misspelt backend must not read artifacts under some other backend's extension (the substring
+    test this replaced read [xcuda] as CUDA and anything it did not recognize as C). *)
 let extension_of_backend backend_name =
-  let has s = String.is_substring (String.lowercase backend_name) ~substring:s in
-  if has "metal" then ".metal" else if has "cuda" then ".cu" else if has "hip" then ".hip" else ".c"
+  match Config_reads.code_extension (Config_reads.canonical_backend backend_name) with
+  | Some ext -> "." ^ ext
+  | None ->
+      invalid_arg
+        (Printf.sprintf
+           "Test_utils.Generated.extension_of_backend: %S is not a backend name, so it names no \
+            source extension"
+           backend_name)
 
 let extension () =
   match !backend with
@@ -140,7 +150,8 @@ let remove_or_fail ~context p =
     artifact found later was emitted by this run. Call it once at the top of the test, before any
     compile -- [Verdict.fail]s if a read happens without it.
 
-    [~backend_name] selects the source extension; tests already derive it as
+    [~backend_name] selects the source extension ({!extension_of_backend}; a name that is no
+    backend's aborts the run here); tests already derive it as
     [String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")]. It is passed in
     rather than read here to keep the dependency at [arrayjit.utils]: this module resolves paths, it
     does not choose backends. *)
@@ -151,6 +162,10 @@ let is_symlink p =
   | exception Unix.Unix_error _ -> false
 
 let init ~backend_name =
+  (* An unknown backend is refused here, before any compile, rather than at the first read. *)
+  (match extension_of_backend backend_name with
+  | (_ : string) -> ()
+  | exception Invalid_argument msg -> abort ("Generated.init: " ^ msg));
   backend := Some (String.lowercase backend_name);
   Hashtbl.clear read_digests;
   (* The ROOT is inspected before anything that could create through it. [Utils.build_files_dir]

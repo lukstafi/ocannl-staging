@@ -922,6 +922,11 @@ type backend_facts = {
       (** The dialect's tensor-node identifier prefix ([C_syntax_config.node_ident_prefix],
           gh-ocannl-1338): ["t_"] where the vendor headers declare global names outside the reserved
           namespace. *)
+  source_extension : string;
+      (** The extension, dot included, of the routine source a backend writes as its [build_files/]
+          artifact: what each backend's artifact writer appends, and what
+          [test/config/config_reads.ml]'s [code_extension] -- linked by tests that link no backend
+          -- is held equal to by [test/operations/marker_backend_vocabulary]. *)
 }
 [@@deriving equal]
 
@@ -959,6 +964,7 @@ let cc_facts =
     retries_contended_window = false;
     host_load_attributable = true;
     node_ident_prefix = "";
+    source_extension = ".c";
   }
 
 let cuda_facts =
@@ -970,6 +976,7 @@ let cuda_facts =
     retries_contended_window = false;
     host_load_attributable = false;
     node_ident_prefix = "t_";
+    source_extension = ".cu";
   }
 
 let hip_facts =
@@ -981,6 +988,7 @@ let hip_facts =
     retries_contended_window = false;
     host_load_attributable = false;
     node_ident_prefix = "t_";
+    source_extension = ".hip";
   }
 
 let metal_facts =
@@ -992,6 +1000,7 @@ let metal_facts =
     retries_contended_window = true;
     host_load_attributable = false;
     node_ident_prefix = "t_";
+    source_extension = ".metal";
   }
 
 (** {2 Cache identity of the device description (gh-ocannl-1253)}

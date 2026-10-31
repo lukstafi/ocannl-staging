@@ -289,7 +289,9 @@ end = struct
 
   let write_source_artifact ~name cu_src =
     if Utils.settings.output_debug_files_in_build_directory then (
-      let build_file = Utils.open_build_file ~base_name:name ~extension:".cu" in
+      let build_file =
+        Utils.open_build_file ~base_name:name ~extension:Backend_intf.cuda_facts.source_extension
+      in
       Stdio.Out_channel.output_string build_file.oc cu_src;
       build_file.finalize ())
 

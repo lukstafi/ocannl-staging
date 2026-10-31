@@ -1614,10 +1614,11 @@ module Impl = struct
       ~routine_logging:(Utils.debug_log_from_routines ())
       ~math_api:(Lazy.force runtime_math_api)
 
-  (* Writes [source] as the [<name>.metal] build artifact when debug files are on. *)
+  (* Writes [source] as the [<name>.metal] build artifact when debug files are on: the extension is
+     the backend's stated [source_extension] fact, which test-side readers are held equal to. *)
   let write_source_artifact ~name source =
     if Utils.settings.output_debug_files_in_build_directory then (
-      let metal_file = Utils.build_file (name ^ ".metal") in
+      let metal_file = Utils.build_file (name ^ Backend_intf.metal_facts.source_extension) in
       Stdio.Out_channel.write_all metal_file ~data:source;
       Some metal_file)
     else None
@@ -1824,12 +1825,13 @@ using namespace metal;|}
      this link's. [.part<k>] is a spelling no routine name takes. *)
   let clear_part_artifacts name =
     if Utils.settings.output_debug_files_in_build_directory then
-      let dir = Stdlib.Filename.dirname (Utils.build_file (name ^ ".metal")) in
+      let extension = Backend_intf.metal_facts.source_extension in
+      let dir = Stdlib.Filename.dirname (Utils.build_file (name ^ extension)) in
       try
         Array.iter (Stdlib.Sys.readdir dir) ~f:(fun file ->
             if
               String.is_prefix file ~prefix:(name ^ ".part")
-              && String.is_suffix file ~suffix:".metal"
+              && String.is_suffix file ~suffix:extension
             then try Stdlib.Sys.remove (Stdlib.Filename.concat dir file) with Sys_error _ -> ())
       with Sys_error _ -> ()
 
