@@ -567,7 +567,6 @@ struct
         fun expr -> fp8_from_float (unop_syntax Ops.single v (string "(float)" ^^ parens expr))
     | Relu, Ops.Single_prec _ -> f "fmaxf(0.0, " ")"
     | Relu, Ops.Half_prec _ -> f "__hmax_nan(__ushort_as_half((unsigned short)0x0000U), " ")"
-    | Relu, Ops.Byte_prec _ -> f "fmax(0, " ")"
     (* Mixing a [__hip_bfloat16] with a literal of another arithmetic type is ambiguous under hiprtc
        for the same reason as [fma] on bfloat16 operands (see [ternop_syntax] below), so [fmax(0.0,
        bf16)] does not compile. Bridge through float like the bf16 binops above, and produce the
@@ -576,7 +575,6 @@ struct
         let prefix, suffix = Dialect.bf16_relu in
         f prefix suffix
     | Relu, _ -> f "fmax(0.0, " ")"
-    | Satur01, Byte_prec _ -> f "fmax(0, fmin(1, " "))"
     | Satur01, Bfloat16_prec _ ->
         f "__float2bfloat16(fmaxf(0.0f, fminf(1.0f, __bfloat162float(" "))))"
     | Satur01, Half_prec _ ->
@@ -638,7 +636,9 @@ struct
     | Trunc, Double_prec _ -> func "trunc"
     | Trunc, Bfloat16_prec _ -> bf16_func "truncf"
     | Trunc, _ -> func "truncf"
-    | Tanh_approx, Byte_prec _ ->
+    (* Every integer precision: [tanh] has float and double overloads only, so an integer operand
+       makes the call ambiguous under nvrtc (gh-ocannl-1731). *)
+    | Tanh_approx, p when Ops.is_integer p ->
         invalid_arg
           (Dialect.error_prefix
          ^ ".unop_syntax: Tanh_approx not supported for byte/integer precisions")
@@ -648,6 +648,9 @@ struct
     | Tanh_approx, _ -> func "tanh"
     (* [bf16 == 0.0] is ambiguous for the same reason as [1 / bf16] above. *)
     | Not, Bfloat16_prec _ -> f "__float2bfloat16(__bfloat162float(" ") == 0.0f ? 1.0f : 0.0f)"
+    (* [__half == 0.0] is ambiguous too: the built-in comparison and [__half]'s own [operator==]
+       both match (gh-ocannl-1731). *)
+    | Not, Half_prec _ -> f "__float2half(__half2float(" ") == 0.0f ? 1.0f : 0.0f)"
     | Not, _ -> f "(" " == 0.0 ? 1.0 : 0.0)"
 
   let vec_unop_syntax prec op v =
