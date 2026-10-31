@@ -519,8 +519,8 @@ module For_testing : sig
   (** Overrides the [op_shape_schemes] setting in-process ([None]: back to the setting). *)
 
   val discarded_registry_sizes : unit -> int * int
-  (** The number of nodes the rewinds' registry of discarded nodes holds one by one, and of the id
-      ranges that stand for the nodes of finished id-neutral windows (traces, definition checks). *)
+  (** The number of nodes the rewinds' registry of discarded nodes holds, and of the still-reachable
+      nodes the weak registry of finished id-neutral windows (traces, definition checks) holds. *)
 
   val without_id_neutrality : (unit -> 'a) -> 'a
   (** Runs the function with the shape-scheme windows allocating session ids: a negative control of

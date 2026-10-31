@@ -243,15 +243,17 @@ let () =
            (error_message (fun () -> Tensor.Scheme.For_ppx.apply h [ bad ] (fun () -> ()))));
       p_empty "and left the session as it was too" ~over:Tensor.For_testing.restore_categories
         (Tensor.For_testing.checkpoint_differences ck));
-  Verdict.case "a trace's discarded nodes are kept as one id range" (fun () ->
+  Verdict.case "a trace's discarded nodes are held weakly" (fun () ->
       Tensor.unsafe_reinitialize ();
-      let nodes0, ranges0 = Tensor.For_testing.discarded_registry_sizes () in
+      Stdlib.Gc.full_major ();
+      let nodes0, weak0 = Tensor.For_testing.discarded_registry_sizes () in
       for _ = 1 to 20 do
         ignore (layer () : Tensor.t -> Tensor.t)
       done;
-      let nodes1, ranges1 = Tensor.For_testing.discarded_registry_sizes () in
+      Stdlib.Gc.full_major ();
+      let nodes1, weak1 = Tensor.For_testing.discarded_registry_sizes () in
       p "twenty traces leave no node in the per-node registry" (nodes1 = nodes0);
-      p "and one id range each" (ranges1 - ranges0 = 20);
+      p "and the weak registry keeps none of their nodes once unreachable" (weak1 = weak0);
       let f = leaky () in
       let stale = Option.value_exn !leaked in
       ignore (f (leaf "x" [ 2 ]) : Tensor.t);

@@ -311,30 +311,45 @@ let discarded_nodes : (int, string) Hashtbl.t = Hashtbl.create (module Int)
 (* Id-neutral windows (gh-ocannl-1751), see [Scheme.with_id_neutral]: a window that is always
    rewound -- a shape-scheme trace, a definition check -- allocates its tensors' ids from a reserved
    range above every session id. Every node such a window allocated is discarded when it ends, so
-   its nodes leave [discarded_nodes] then and the window's id range stands for them: a long session
-   tracing a scheme per closure keeps one entry per window, not one per node. Keyed by the range's
-   first id, ranges [[lo, hi)], disjoint. *)
+   its nodes then move from [discarded_nodes] to a weak registry, which holds each only while the
+   node is reachable: a long session tracing a scheme per closure does not accumulate them. Only the
+   nodes the frontend allocated are entered, as in [discarded_nodes] (a node made with [Tn.create]
+   directly, whatever its id, is not the frontend's). *)
 let reserved_id_base = 1 lsl 40
 
-let discarded_id_ranges : (int * string) Map.M(Int).t ref = ref (Map.empty (module Int))
+module Weak_discards = Stdlib.Ephemeron.K1.Make (struct
+  type t = Tn.t
+
+  let equal = phys_equal
+  let hash (tn : Tn.t) = Int.hash tn.uid
+end)
+
+let discarded_window_nodes_table : string Weak_discards.t option ref = ref None
 [@@mutation_serial.kept
-  "a registry of the id ranges id-neutral windows discarded: windows extend it, never restore it"]
+  "a registry of the nodes id-neutral windows discarded, held weakly: windows extend it, never \
+   restore it"]
+
+let discarded_window_nodes () =
+  match !discarded_window_nodes_table with
+  | Some table -> table
+  | None ->
+      let table = Weak_discards.create 64 in
+      discarded_window_nodes_table := Some table;
+      table
+[@@mutation_serial.boundary
+  "the weak registry's creation on first use: an empty registry, which no rewind restores"]
 
 let id_neutral_depth = ref 0
 [@@mutation_serial.exempt "the nesting of id-neutral windows, restored by their own finally"]
 
-(* The uids of the reserved-range nodes rewinds discarded in the current id-neutral window. *)
-let window_discarded_uids : int list ref = ref []
+(* The nodes rewinds discarded in the current id-neutral window. *)
+let window_discarded_nodes : Tn.t list ref = ref []
 [@@mutation_serial.exempt "scratch of the current id-neutral window, emptied when it ends"]
 
 let discarded_by (tn : Tn.t) =
   match Hashtbl.find discarded_nodes tn.uid with
   | Some _ as provenance -> provenance
-  | None when tn.id >= reserved_id_base -> (
-      match Map.closest_key !discarded_id_ranges `Less_or_equal_to tn.id with
-      | Some (_, (hi, provenance)) when tn.id < hi -> Some provenance
-      | _ -> None)
-  | None -> None
+  | None -> Weak_discards.find_opt (discarded_window_nodes ()) tn
 
 let with_unchanged_roots ~f =
   let fwd_roots = session_state.forward_roots in
@@ -1520,20 +1535,21 @@ let random_seeds () =
 
 let install_validity_check () =
   Tn.validity_check :=
-    if Hashtbl.is_empty discarded_nodes && Map.is_empty !discarded_id_ranges then None
+    if Hashtbl.is_empty discarded_nodes && Weak_discards.length (discarded_window_nodes ()) = 0 then
+      None
     else
       Some
         (fun tn ->
           Option.iter (discarded_by tn) ~f:(fun provenance ->
               raise @@ Session_error (discarded_message tn provenance, None)))
 
-(* The end of an id-neutral window, whose every node a rewind discarded: those nodes leave the
-   per-node registry, and the window's id range [[first, last)] stands for them. *)
-let end_id_neutral_window ~first ~last ~label =
-  List.iter !window_discarded_uids ~f:(fun uid -> Hashtbl.remove discarded_nodes uid);
-  window_discarded_uids := [];
-  if last > first then
-    discarded_id_ranges := Map.set !discarded_id_ranges ~key:first ~data:(last, label);
+(* The end of an id-neutral window, whose every node a rewind discarded: those nodes move to the
+   weak registry, under the window's provenance. *)
+let end_id_neutral_window ~label =
+  List.iter !window_discarded_nodes ~f:(fun (tn : Tn.t) ->
+      Hashtbl.remove discarded_nodes tn.uid;
+      Weak_discards.replace (discarded_window_nodes ()) tn label);
+  window_discarded_nodes := [];
   install_validity_check ()
 [@@mutation_serial.boundary
   "the end of an id-neutral window: it compacts what the window's rewinds discarded, which no \
@@ -1557,8 +1573,7 @@ let restore_checkpoint ?omit ~provenance ck =
     in
     List.iter (since [] !open_nodes) ~f:(fun (tn : Tn.t) ->
         Hashtbl.set discarded_nodes ~key:tn.uid ~data:provenance;
-        if !id_neutral_depth > 0 && tn.id >= reserved_id_base then
-          window_discarded_uids := tn.uid :: !window_discarded_uids);
+        if !id_neutral_depth > 0 then window_discarded_nodes := tn :: !window_discarded_nodes);
     install_validity_check ());
   if not (skip "roots") then (
     (* The checkpoint's roots, wholesale: a root a discarded construction embedded (via [Tensor.op]
@@ -1703,7 +1718,7 @@ module Scheme = struct
           reserved_next_id := max !reserved_next_id last;
           assert (!reserved_next_id < Int.max_value / 2);
           session_state.next_id <- saved;
-          end_id_neutral_window ~first ~last ~label))
+          end_id_neutral_window ~label))
 
   (* The trace proper, to run inside a rewound window. *)
   let trace_core ?sabotage ~label arity f =
@@ -1919,7 +1934,9 @@ module For_testing = struct
   let set_op_shape_schemes v =
     Scheme.mode_override := Option.map v ~f:(fun b -> if b then Scheme.Check else Scheme.Off)
 
-  let discarded_registry_sizes () = (Hashtbl.length discarded_nodes, Map.length !discarded_id_ranges)
+  let discarded_registry_sizes () =
+    Weak_discards.clean (discarded_window_nodes ());
+    (Hashtbl.length discarded_nodes, Weak_discards.length (discarded_window_nodes ()))
 
   let without_id_neutrality f =
     Scheme.id_neutral_sabotaged := true;
