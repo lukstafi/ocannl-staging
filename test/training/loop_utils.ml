@@ -370,8 +370,10 @@ let frozen_backbone_accumulation () =
    A leaf built with [Operation.init ~grad_spec:Require_grad] (the deterministic-values test idiom)
    gets a gradient but never joins [t.params], so the params-driven helpers used to compile empty
    routines: the optimizer step was a silent no-op and this file's own executed-parity claims once
-   passed vacuously. They now raise [Session_error] when the loss trains no registered parameters;
-   [?params] remains as the explicit escape hatch. *)
+   passed vacuously. The optimizer-side ones now raise [Session_error] when the loss trains no
+   registered parameters, naming [?params], the way to select such a leaf. [zero_params_grads] is
+   the exception: its default is what [grad_update ~accum_steps] accumulates, every leaf gradient
+   the backprop writes, the unregistered leaf's included (gh-ocannl-1743). *)
 
 let paramless_guard () =
   Tensor.unsafe_reinitialize ();
@@ -389,12 +391,21 @@ let paramless_guard () =
   let raises f = match f () with () -> false | exception Tensor.Session_error _ -> true in
   Verdict.p "sgd_update rejects a loss that trains no registered parameters"
     (raises (fun () -> ignore (Train.sgd_update ~learning_rate loss : Ir.Assignments.comp)));
+  Verdict.p "the refusal names ?params, the way to step such a leaf"
+    (match Train.sgd_update ~learning_rate loss with
+    | _ -> false
+    | exception Tensor.Session_error (msg, _) -> String.is_substring msg ~substring:"[?params]");
   Verdict.p "grad_l2_norm rejects a loss that trains no registered parameters"
     (raises (fun () -> ignore (Train.grad_l2_norm loss : Tensor.t * Ir.Assignments.comp)));
   Verdict.p "grad_checksum rejects a loss that trains no registered parameters"
     (raises (fun () -> ignore (Train.grad_checksum loss : Tensor.t * Ir.Assignments.comp)));
-  Verdict.p "zero_params_grads rejects a loss that trains no registered parameters"
-    (raises (fun () -> ignore (Train.zero_params_grads loss : Ir.Assignments.comp)));
+  Verdict.p "zero_params_grads zeroes the unregistered leaf's gradient by default"
+    (match Train.zero_params_grads loss with
+    | comp ->
+        Set.mem
+          (Ir.Assignments.collect_written comp.Ir.Assignments.asgns)
+          (Option.value_exn ~here:[%here] w.Tensor.diff).Tensor.grad
+    | exception Tensor.Session_error _ -> false);
   Verdict.p "an explicit ?params override bypasses the derivation"
     (not
        (raises (fun () ->

@@ -69,7 +69,10 @@ val training_state :
     The routines are the compiled ones the loop runs, so the optimizer's moments are found however
     the optimizer was written: an update that reads its own state without the clearing [=:] prefix
     declares it persistent (see [docs/syntax_extensions.md]), and that is what is read here. Nothing
-    is matched by label. *)
+    is matched by label. A differentiable leaf that is not a parameter but is optimized (an input
+    stepped by {!Train.sgd_update}[ ~params]) is found the same way, through the routine that
+    updates it; [?extra] lists the nodes no passed routine carries (it is unrelated to
+    [progress.extra], the host-side key-value metadata) (gh-ocannl-1743). *)
 
 val carried_state : Context.routine -> Ir.Tnode.t_set
 (** The nodes a compiled routine carries between runs: those it writes whose value on entry it also

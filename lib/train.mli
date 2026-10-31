@@ -77,8 +77,16 @@ val trainable_params : Tensor.t -> (Tensor.t, Tensor.comparator_witness) Base.Se
     {!Operation.stop_gradient} (a frozen backbone) stays in [loss.params] while its gradient is
     neither zeroed nor written. Stepping it anyway would apply weight decay to weights the user
     froze (gh-ocannl-673); the optimizer-side helpers ({!sgd_update}, {!grad_l2_norm},
-    {!clip_by_global_norm}, {!grad_checksum}, {!zero_params_grads}) therefore derive this set
-    instead of trusting [loss.params]. Empty when [loss] is not differentiable. *)
+    {!clip_by_global_norm}, {!grad_checksum}) therefore derive this set instead of trusting
+    [loss.params]. Empty when [loss] is not differentiable.
+
+    It is the optimizer's {e default}: the weights it steps. A differentiable leaf that is not a
+    parameter ([Operation.init ~grad_spec:Require_grad] -- an optimized input, an adversarial
+    perturbation) is left out by design: it is stepped apart from the weights, and its gradient must
+    not rescale ({!clip_by_global_norm}) or gate ({!grad_checksum}) the weight step. Select it
+    through each helper's [?params]. Gradient {e life cycle} -- what {!grad_update}[ ~accum_steps]
+    accumulates and {!zero_params_grads} resets -- is not keyed on this set but on every leaf
+    gradient the backprop writes, parameters and [Require_grad] leaves alike (gh-ocannl-1743). *)
 
 val grad_update :
   ?setup_for_parallel:bool ->
@@ -100,22 +108,25 @@ val grad_update :
     of {!sgd_update}).
 
     When [accum_steps] is given (gh-ocannl-465), the returned code is a {e micro-step} of gradient
-    accumulation, llm.c-style: parameter gradients are NOT zeroed here (they are materialized so
-    they persist across runs, and each micro-step's backprop [=+]-accumulates into them — run
-    {!zero_params_grads} at the start of each accumulation cycle instead), while intermediate
-    gradients are still zeroed every micro-step; and the backprop seed is pre-scaled by
+    accumulation, llm.c-style: leaf gradients — of parameters and of [~grad_spec:Require_grad]
+    leaves alike, every one the backprop writes (gh-ocannl-1743) — are NOT zeroed here (they are
+    materialized so they persist across runs, and each micro-step's backprop [=+]-accumulates into
+    them — run {!zero_params_grads} at the start of each accumulation cycle instead), while
+    intermediate gradients are still zeroed every micro-step; and the backprop seed is pre-scaled by
     [1/accum_steps] (folded with [loss_scale] if both are given), so after [accum_steps] runs the
-    parameter gradients hold the mean of the micro-batch gradients — matching a single batch
+    leaf gradients hold the mean of the micro-batch gradients — matching a single batch
     [accum_steps] times larger under a mean-reduced loss. Run the optimizer step once per cycle,
     after the last micro-step. *)
 
 val zero_params_grads :
   ?params:(Tensor.t, Tensor.comparator_witness) Base.Set.t -> Tensor.t -> Ir.Assignments.comp
-(** Code zeroing the trained parameters' gradients ({!trainable_params}, or [?params]), as a
-    standalone computation: the gradient-accumulation counterpart of {!grad_update}[ ~accum_steps]
-    (which deliberately does not zero them). Compile it as its own routine and run it at the start
-    of each accumulation cycle — before the first micro-step, llm.c-style ("we're about to +=
-    accumulate into them"). *)
+(** Code zeroing the leaf gradients [loss]'s backprop writes, or [?params]'s, as a standalone
+    computation: the gradient-accumulation counterpart of {!grad_update}[ ~accum_steps] (which
+    deliberately does not zero them), so its default is exactly the set accumulation keeps — the
+    trained parameters' gradients {e and} those of [~grad_spec:Require_grad] leaves (gh-ocannl-1743;
+    before, only the parameters', and an accumulated input gradient grew across cycles). Compile it
+    as its own routine and run it at the start of each accumulation cycle — before the first
+    micro-step, llm.c-style ("we're about to += accumulate into them"). *)
 
 val grad_checksum :
   ?params:(Tensor.t, Tensor.comparator_witness) Base.Set.t ->
@@ -172,7 +183,8 @@ val sgd_update :
   Ir.Assignments.comp
 (** Maps {!sgd_one} over the parameters [loss] trains ({!trainable_params}, or [?params]): a
     parameter frozen behind {!Operation.stop_gradient} takes no step — in particular no weight decay
-    (gh-ocannl-673). *)
+    (gh-ocannl-673). A [~grad_spec:Require_grad] leaf (input optimization) takes a step only when
+    passed in [?params]; raises when the default set is empty, as for a loss with no parameters. *)
 
 val sequential_loop : f:(unit -> unit) -> (Ir.Indexing.static_symbol * int ref) list -> unit
 (** All and only bindings with associated ranges are iterated, with the binding's initial value

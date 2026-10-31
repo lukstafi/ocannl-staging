@@ -32,9 +32,10 @@ the trainable gradient accumulates the same as the big batch: PASS
 an unregistered differentiable leaf does not join loss.params: true
 trainable_params is empty for the paramless loss: true
 sgd_update rejects a loss that trains no registered parameters: true
+the refusal names ?params, the way to step such a leaf: true
 grad_l2_norm rejects a loss that trains no registered parameters: true
 grad_checksum rejects a loss that trains no registered parameters: true
-zero_params_grads rejects a loss that trains no registered parameters: true
+zero_params_grads zeroes the unregistered leaf's gradient by default: true
 an explicit ?params override bypasses the derivation: true
 z-score is nan while the window fills: true
 ordinary z: 7.071e-1, spike z: 1.215e+2

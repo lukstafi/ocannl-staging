@@ -88,7 +88,10 @@ val data_parallel :
     per-shard gradients are all-reduced onto the owner between backward and the optimizer step.
     Gradients and parameters move across shards only through per-stream merge buffers
     ([device_to_device ~into_merge_buffer:Copy], internally gated by [wait_for_ready]) -- the one
-    cross-stream channel that survived gh-ocannl-341.
+    cross-stream channel that survived gh-ocannl-341. What is replicated and reduced is the loss's
+    {e parameters} (its trained subset, for the gradients): they are the initialized state every
+    shard holds a copy of. A [~grad_spec:Require_grad] leaf built from a shard's slice is that
+    shard's data, so its gradient is neither averaged nor broadcast (gh-ocannl-1743).
 
     Per-shard RNG streams diverge by default: shard i's graph is built after
     [set_random_seed ~seed:(base_seed + i)], so randomized ops (dropout, [uniform_at]) draw
