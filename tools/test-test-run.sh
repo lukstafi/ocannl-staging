@@ -13,7 +13,7 @@
 # #group' leg_N` (scripts/harness-support.sh), its name led by the leg numbers
 # below and closed by the one group it belongs to (gh-ocannl-1202):
 # #group-alive (1-5), #stop (6-8, 67), #queries (39), #repeat (9-25, 38, 83-85),
-# #options (26-28, 37, 89), #width (29-34, 48-52, 64, 70), #digest (35-36,
+# #options (26-28, 37, 89, 94), #width (29-34, 48-52, 64, 70), #digest (35-36,
 # 68-69, 71-73, 80, 87, 92), #fresh (81), #lifecycle (40-47, 65, 74: the run/start
 # lifecycle with its signal legs, and both fork-window negative controls),
 # #source (59-63, 66), #slot (53-58, 78, 88, 93), #device (75-77, 91), #credentials (79, 90),
@@ -261,6 +261,19 @@
 #      the aliases to dune; and where a real dune is at hand, its own listing.
 #      Where dune is made to color (CLICOLOR_FORCE=1), its escaped `Error`
 #      tag reads as the plain one, from the fixture and from a real dune.
+#  94. targeted batches (gh-ocannl-1740): `--targets-file` hands dune the
+#      listed aliases after its own words (comments, blank lines, CRLF and
+#      padding skipped; a relative file read from the caller's directory;
+#      `build` by default; repeatable; before dune's `--`), and refuses, dune
+#      never invoked, an empty list, a line that is not one `@` operand, a
+#      missing file, a subcommand other than build, the option after the dune
+#      arguments or on repeat; `--cpu`/`--gpu` are refused pointing at the
+#      slot; a refused `runtest-NAME` names the directory's `slow-NAME`, and a
+#      refusal with no sibling names none; `aliases PATH...` lists a test's
+#      aliases by family from dune's listing (a source, a golden, a variant, a
+#      qualified golden by its longest test prefix, a directory, a dune file; a helper and an unknown directory exit 1 with
+#      the rest listed; outside the worktree exit 2), and its output read
+#      back as a targets file is the batch it lists.
 #  90. the runner's own OCANNL_TOOL_TESTRUN_BG, _RD and _OWN reach no dune: a
 #      run, a probed GPU run under a slot, a probed repeat's iterations.
 #  59-63 sit after leg 47: the source a run tested, recorded at launch
@@ -7754,6 +7767,188 @@ else
 fi
 }
 harness_leg_run '89: an alias dune does not know is refused before the slot #options' leg_89
+
+# ---------------------------------------------------------------------------
+# Leg 94: targeted batches from a file, and a test's aliases by family
+# (gh-ocannl-1740)
+# ---------------------------------------------------------------------------
+# A 75-alias batch once had to go through a wrapper script because the
+# caller's shell expansion of the list was refused, and a batch built from the
+# files a change touched asked for `runtest-NAME` where NAME was a `@slow`
+# member. Every refusal here is asserted with dune's calls empty: "runs
+# nothing" is what makes the exit 2 a usage verdict.
+leg_94() {
+tf_label="--targets-file: the listed aliases reach dune after its own words; bad lists are refused before dune"
+tf_cpu_label="--cpu/--gpu are refused before dune, pointing at the fleet slot"
+tf_hint_label="a refused runtest-NAME names the directory's slow-NAME; no sibling, no hint"
+tf_aliases_label="aliases: a test's per-test aliases by family, from dune's listing, readable back as a targets file"
+tf_detail=
+tf_dir=$TMP/targets
+mkdir -p "$tf_dir/sub"
+printf '# a comment\n\n  @x/runtest-a  \r\n@x/slow-b\r\n# trailing\n' >"$tf_dir/list.txt"
+printf '@y/train-c\n' >"$tf_dir/sub/more.txt"
+# Accepted: argv order, default subcommand, a relative file, two files, and
+# placement before dune's own `--`.
+for probe in "with-opts|run --targets-file $tf_dir/list.txt build -j 2|build -j 2 @x/runtest-a @x/slow-b" \
+             "default|run --targets-file $tf_dir/list.txt|build @x/runtest-a @x/slow-b" \
+             "two|start --targets-file $tf_dir/list.txt --targets-file $tf_dir/sub/more.txt build|build @x/runtest-a @x/slow-b @y/train-c" \
+             "sep|run --targets-file $tf_dir/sub/more.txt build @w -- @after|build @w @y/train-c -- @after" \
+             "relative|run --targets-file more.txt build|build @y/train-c"; do
+  IFS='|' read -r tag args want <<<"$probe"
+  tf_old=$PWD
+  [ "$tag" != relative ] || cd "$tf_dir/sub" || { harness_abandon "cannot enter $tf_dir/sub"; return; }
+  # shellcheck disable=SC2086 # the probe's operands, split on purpose
+  argv_probe "tf-$tag" $args
+  cd "$tf_old" || { harness_abandon "cannot return to $tf_old"; return; }
+  if [ "$tag" = two ] && [ "$argv_rc" = 0 ]; then
+    # `start` detaches: its dune runs after the launcher reports.
+    OCANNL_TOOL_TEST_RUNS=$TMP/argv-runs-tf-two "$repeat_root/tools/test-run.sh" wait last --timeout 60 >/dev/null 2>&1
+    argv_calls=$(cat "$TMP/tf-two.calls")
+  fi
+  { [ "$argv_rc" = 0 ] && [ "$argv_calls" = "$want" ]; } ||
+    { tf_detail="$tag: exit $argv_rc; dune calls: ${argv_calls:-<none>} (want $want); stderr: $argv_err"; break; }
+done
+# Refused, dune never invoked.
+printf '# nothing but comments\n\n' >"$tf_dir/empty.txt"
+printf '@x/runtest-a\n-j 4\n' >"$tf_dir/option.txt"
+printf '@x/runtest-a\ntest/x\n' >"$tf_dir/bare.txt"
+for probe in "empty|run --targets-file $tf_dir/empty.txt build|no alias listed" \
+             "option|run --targets-file $tf_dir/option.txt build|option.txt:2: one alias per line" \
+             "bare|run --targets-file $tf_dir/bare.txt build|bare.txt:2: not an alias operand" \
+             "missing|run --targets-file $tf_dir/absent.txt build|no readable file" \
+             "runtest|run --targets-file $tf_dir/list.txt runtest|which only dune's build takes" \
+             "valueless|run --targets-file|requires a file" \
+             "after|run build @w --targets-file $tf_dir/list.txt|belongs before the dune arguments" \
+             "repeat|repeat 2 build @w --targets-file $tf_dir/list.txt|not of repeat"; do
+  [ -z "$tf_detail" ] || break
+  IFS='|' read -r tag args want <<<"$probe"
+  # shellcheck disable=SC2086 # the probe's operands, split on purpose
+  argv_probe "tf-refused-$tag" $args
+  { [ "$argv_rc" = 2 ] && [ -z "$argv_calls" ] && grep -qF -- "$want" <<<"$argv_err"; } ||
+    tf_detail="refused $tag: exit $argv_rc (want 2); dune calls: ${argv_calls:-<none>}; stderr: $argv_err"
+done
+if [ -z "$tf_detail" ]; then report 0 "$tf_label"; else report 1 "$tf_label" "$tf_detail"; fi
+
+tf_detail=
+for probe in "run --cpu build @w" "start --gpu build @w" "plan --cpu=1 build @w"; do
+  # shellcheck disable=SC2086 # the probe's operands, split on purpose
+  argv_probe tf-cpu $probe
+  { [ "$argv_rc" = 2 ] && [ -z "$argv_calls" ] &&
+    grep -qF -- "not an option of tools/test-run.sh" <<<"$argv_err" &&
+    grep -qF -- "fleet-worker.sh execution slot --" <<<"$argv_err"; } ||
+    { tf_detail="$probe: exit $argv_rc (want 2); dune calls: ${argv_calls:-<none>}; stderr: $argv_err"; break; }
+done
+if [ -z "$tf_detail" ]; then report 0 "$tf_cpu_label"; else report 1 "$tf_cpu_label" "$tf_detail"; fi
+
+# The family hint and the listing read one table: directory `fam` holds a
+# test `foo` under runtest, `bar` under slow and train with a runtest variant,
+# an aggregate, and `fam/deep` a slow member only a recursive refusal finds.
+mkdir -p "$repeat_root/fam/deep" "$repeat_root/famless"
+printf '(rule (alias runtest-foo) (action (progn)))\n' >"$repeat_root/fam/dune"
+printf '(rule (alias slow-qux) (action (progn)))\n' >"$repeat_root/fam/deep/dune"
+printf '(rule (alias other) (action (progn)))\n' >"$repeat_root/famless/dune"
+tf_table=$TMP/targets-alias-table
+printf '%s\n' 'fam runtest-foo' 'fam slow-bar' 'fam train-bar' 'fam runtest-bar-tf32' 'fam scans' 'fam runtest-qual' \
+  'fam/deep slow-qux' 'famless other' >"$tf_table"
+tf_detail=
+for probe in "run build @fam/runtest-bar|@fam/runtest-bar: neither fam nor any directory below it defines an alias runtest-bar; the same test under another family: @fam/slow-bar @fam/train-bar" \
+             "run build @@fam/slow-foo|@@fam/slow-foo: fam defines no alias slow-foo; the same test under another family: @fam/runtest-foo" \
+             "run build @fam/runtest-qux|@fam/runtest-qux: neither fam nor any directory below it defines an alias runtest-qux; the same test under another family: @fam/deep/slow-qux"; do
+  IFS='|' read -r args want <<<"$probe"
+  # shellcheck disable=SC2086 # the probe's operands, split on purpose
+  REPEAT_TEST_ALIASES=$tf_table argv_probe tf-hint $args
+  { [ "$argv_rc" = 2 ] && [ -z "$argv_calls" ] && grep -qF -- "alias refused: $want" <<<"$argv_out"; } ||
+    { tf_detail="$args: exit $argv_rc (want 2); dune calls: ${argv_calls:-<none>}; digest: $argv_out"; break; }
+done
+if [ -z "$tf_detail" ]; then
+  # The control: a refusal with no sibling under any family says nothing more,
+  # and a non-recursive one does not look below its directory.
+  for args in "build @fam/runtest-nothing" "build @@fam/runtest-qux"; do
+    # shellcheck disable=SC2086 # the probe's operands, split on purpose
+    REPEAT_TEST_ALIASES=$tf_table argv_probe tf-hint-none run $args
+    { [ "$argv_rc" = 2 ] && grep -qF -- "alias refused: " <<<"$argv_out" &&
+      ! grep -qF -- "another family" <<<"$argv_out"; } ||
+      { tf_detail="$args: exit $argv_rc (want 2, no hint); digest: $argv_out"; break; }
+  done
+fi
+if [ -z "$tf_detail" ]; then report 0 "$tf_hint_label"; else report 1 "$tf_hint_label" "$tf_detail"; fi
+
+tf_detail=
+tf_aliases() { # tag argv...: `aliases` against the table, from the fixture root
+  local rc=0
+  (cd "$repeat_root" && REPEAT_TEST_ALIASES=$tf_table PATH=$repeat_bin:$PATH \
+    OCANNL_TOOL_TEST_RUNS=$TMP/tf-aliases-runs tools/test-run.sh aliases "${@:2}") \
+    >"$TMP/$1.out" 2>"$TMP/$1.err" || rc=$?
+  tf_rc=$rc tf_out=$(cat "$TMP/$1.out") tf_err=$(cat "$TMP/$1.err")
+}
+tf_want_bar='# runtest: run by dune runtest
+@fam/runtest-bar-tf32
+# slow: outside dune runtest; dune build @slow runs them
+@fam/slow-bar
+# train: outside dune runtest; dune build @train runs them
+@fam/train-bar'
+tf_want_dir='# runtest: run by dune runtest
+@fam/runtest-bar-tf32
+@fam/runtest-foo
+@fam/runtest-qual
+# slow: outside dune runtest; dune build @slow runs them
+@fam/slow-bar
+# train: outside dune runtest; dune build @train runs them
+@fam/train-bar'
+# A source, its golden and an absolute path to it are one test; a directory
+# and its dune file are every per-test alias there, aggregates left out.
+tf_aliases tf-al-bar fam/bar.ml fam/bar.tf32.expected "$repeat_root/fam/bar.ml"
+{ [ "$tf_rc" = 0 ] && [ "$tf_out" = "$tf_want_bar" ] && [ -z "$tf_err" ]; } ||
+  tf_detail="bar: exit $tf_rc (want 0); out: $tf_out; err: $tf_err"
+# A qualified golden is its test's, by the longest `-` prefix that is a test:
+# `bar-tf32` is a variant alias of its own, never `bar`'s.
+if [ -z "$tf_detail" ]; then
+  tf_aliases tf-al-qual fam/qual-cc-0-0.log.expected fam/bar-tf32.expected
+  { [ "$tf_rc" = 0 ] && [ "$tf_out" = '# runtest: run by dune runtest
+@fam/runtest-bar-tf32
+@fam/runtest-qual' ]; } || tf_detail="qualified: exit $tf_rc (want 0); out: $tf_out; err: $tf_err"
+fi
+if [ -z "$tf_detail" ]; then
+  tf_aliases tf-al-dir fam fam/dune
+  { [ "$tf_rc" = 0 ] && [ "$tf_out" = "$tf_want_dir" ]; } || tf_detail="dir: exit $tf_rc (want 0); out: $tf_out; err: $tf_err"
+fi
+# A helper and a directory dune does not know exit 1, the rest still listed.
+if [ -z "$tf_detail" ]; then
+  tf_aliases tf-al-helper fam/foo.ml fam/helper.ml famless/x.ml
+  { [ "$tf_rc" = 1 ] && [ "$tf_out" = '# runtest: run by dune runtest
+@fam/runtest-foo' ] && grep -qF "fam/helper.ml: fam defines no per-test alias of a test helper" <<<"$tf_err" &&
+    grep -qF "affected --files fam/helper.ml" <<<"$tf_err" &&
+    grep -qF "famless/x.ml: famless defines no per-test alias of a test x" <<<"$tf_err"; } ||
+    tf_detail="helper: exit $tf_rc (want 1); out: $tf_out; err: $tf_err"
+fi
+if [ -z "$tf_detail" ]; then
+  mkdir -p "$repeat_root/unlisted"
+  tf_aliases tf-al-unknown unlisted/x.ml
+  rmdir "$repeat_root/unlisted"
+  { [ "$tf_rc" = 1 ] && [ -z "$tf_out" ] && grep -qF "dune knows no directory unlisted" <<<"$tf_err"; } ||
+    tf_detail="unknown directory: exit $tf_rc (want 1); out: $tf_out; err: $tf_err"
+fi
+# Refused before dune: outside the worktree, a directory that does not exist, no path.
+for args in "$TMP/elsewhere.ml|outside this worktree" "nowhere/x.ml|no directory" "|usage: tools/test-run.sh aliases"; do
+  [ -z "$tf_detail" ] || break
+  IFS='|' read -r arg want <<<"$args"
+  : >"$TMP/tf-al-refused.show"
+  # shellcheck disable=SC2086 # an empty operand stands for none
+  REPEAT_TEST_SHOW_CALLS=$TMP/tf-al-refused.show tf_aliases tf-al-refused $arg
+  { [ "$tf_rc" = 2 ] && [ -z "$tf_out" ] && grep -qF -- "$want" <<<"$tf_err" && [ ! -s "$TMP/tf-al-refused.show" ]; } ||
+    tf_detail="refused '$arg': exit $tf_rc (want 2); out: $tf_out; err: $tf_err; listings: $(cat "$TMP/tf-al-refused.show")"
+done
+# Read back as a targets file, the listing is the batch.
+if [ -z "$tf_detail" ]; then
+  printf '%s\n' "$tf_want_bar" >"$tf_dir/from-aliases.txt"
+  REPEAT_TEST_ALIASES=$tf_table argv_probe tf-al-roundtrip run --targets-file "$tf_dir/from-aliases.txt" build
+  { [ "$argv_rc" = 0 ] && [ "$argv_calls" = "build @fam/runtest-bar-tf32 @fam/slow-bar @fam/train-bar" ]; } ||
+    tf_detail="round trip: exit $argv_rc; dune calls: ${argv_calls:-<none>}; stderr: $argv_err"
+fi
+if [ -z "$tf_detail" ]; then report 0 "$tf_aliases_label"; else report 1 "$tf_aliases_label" "$tf_detail"; fi
+rm -rf "$repeat_root/fam" "$repeat_root/famless"
+}
+harness_leg_run '94: targeted batches from a file, and aliases by family #options' leg_94
 
 # ---------------------------------------------------------------------------
 # Leg 90: the runner's own variables never reach dune (gh-ocannl-1448)
