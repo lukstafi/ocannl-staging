@@ -45,10 +45,10 @@ let () =
     {ocaml|let%op f ?(stride = 1) () x = let _ = stride in My.( ++ ) x "stride*o+k => o"|ocaml}
     ~implemented:false ~honest:false;
   case "an einsum-shaped argument outside a unary PPX spec position is not a generated use"
-    {ocaml|let%op f ?(stride = 1) () x = let _ = stride in let ( ++ ) x _ = x in x ++ spec "stride*o+k => o"|ocaml}
+    {ocaml|let%op f ?(stride = 1) () x = let _ = stride in let ( ++ ) x _ = x in x ++ spec "stride*o+k => o" [@@ocannl.no_scheme]|ocaml}
     ~implemented:false ~honest:false;
   case "an axis-only literal without the PPX dispatch guard generates no read"
-    {ocaml|let%op f ?(stride = 1) () x = let _ = stride in let ( ++ ) x _ = x in x ++ "stride*o+k"|ocaml}
+    {ocaml|let%op f ?(stride = 1) () x = let _ = stride in let ( ++ ) x _ = x in x ++ "stride*o+k" [@@ocannl.no_scheme]|ocaml}
     ~implemented:false ~honest:false;
   case "concat generated reads are op-only"
     {ocaml|let f ?(stride = 1) x = let _ = stride in let ( ++^ ) x _ = x in [%cd x ++^ "stride*o+k; i => o"]|ocaml}
@@ -312,7 +312,7 @@ let make ?(marker = true) x = if marker then (match x with g -> g) else (match x
 let g = ()|ocaml}
     ~implemented:true ~honest:true;
   case "a dynamic binary capture operand generates no read"
-    {ocaml|let%op f ?(stride = 1) () kernel dynamic_dims = let _ = stride in let ( +* ) ?label:_ _ y = y in kernel +* kernel "stride*o+k => o" dynamic_dims|ocaml}
+    {ocaml|let%op f ?(stride = 1) () kernel dynamic_dims = let _ = stride in let ( +* ) ?label:_ _ y = y in kernel +* kernel "stride*o+k => o" dynamic_dims [@@ocannl.no_scheme]|ocaml}
     ~implemented:false ~honest:false;
   case ~argument:"feature" "recursive-module definitions retain qualification"
     {ocaml|module rec A : sig val f : ?feature:bool -> unit -> unit end = struct
