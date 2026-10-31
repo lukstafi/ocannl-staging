@@ -1,0 +1,42 @@
+; `arrayjit/lib/metal_backend.ml` compiled against the `metal` stand-in one directory up
+; (`arrayjit/vendor_stubs/dune` describes the arrangement). The stanza mirrors the `metal_backend`
+; library in `arrayjit/lib/dune` -- same preprocessing, same `arrayjit` libraries -- with
+; `metal_stub` in place of `metal`, and with `metal_math_api_runtime` (its own optional library
+; there, over `metal.runtime`) compiled in as a module. The IOKit C stubs are left out: their
+; `external` declaration type-checks without them, and nothing links this library.
+
+(copy_files#
+ (files ../../../lib/metal_backend.{ml,mli}))
+
+(copy_files#
+ (files ../../../lib/metal_backend_impl.mli))
+
+(copy_files#
+ (files ../../../lib/metal_math_api_runtime.{ml,mli}))
+
+; The vendor arm of `arrayjit.context`'s `select`, checked against the interface its fallback arm
+; also satisfies.
+
+(rule
+ (action
+  (copy# ../../../lib/metal_backend_impl.metal.ml metal_backend_impl.ml)))
+
+(library
+ (name metal_backend_stub_check)
+ (wrapped false)
+ (modules metal_backend metal_backend_impl metal_math_api_runtime)
+ (preprocessor_deps
+  (env_var OCANNL_LOG_LEVEL_METAL_BACKEND))
+ (libraries base metal_stub utils ir builtins_cc builtins_metal)
+ (preprocess
+  (per_module
+   ((pps
+     ppx_compare
+     ppx_hash
+     ppx_here
+     ppx_sexp_conv
+     ppx_string
+     ppx_variants_conv
+     ppx_minidebug)
+    metal_backend
+    metal_backend_impl))))

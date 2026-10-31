@@ -1,0 +1,234 @@
+; The vendor arms of the test and tool executables' `select`s, compiled as libraries against the
+; stand-ins (`arrayjit/vendor_stubs/dune` describes the arrangement; gh-ocannl-1688). Each such
+; executable picks its `*.real.ml` / `*.cudajit.ml` / `*.hipjit.ml` / `*.metal.ml` arm only where
+; the vendor library is installed and a stub everywhere else, so `@check` off the vendor's box
+; compiled only the stub. Here every arm is copied under the module name its executable gives it
+; and compiled, one library per executable, with that executable's libraries and preprocessing --
+; the vendor packages replaced by their stand-ins, and the vendor backends by the `typecheck/`
+; copies one directory over. An executable whose arm reaches no vendor module at all (the
+; `test/operations` arms, which drive the backend through `Context`) needs no stand-in: its copy
+; compiles against `ocannl` alone. Nothing links these libraries.
+;
+; A library compiles an arm slightly more permissively than its executable: a top-level value no
+; module uses is an error in an executable (dune gives its modules an empty interface) and silent
+; here, so a dead binding still surfaces only on the box.
+
+; arrayjit/test: test_cuda_classify_failure
+
+(rule
+ (action
+  (copy#
+   ../../test/test_cuda_classify_failure.real.ml
+   test_cuda_classify_failure.ml)))
+
+(library
+ (name test_cuda_classify_failure_arm)
+ (modules test_cuda_classify_failure)
+ (libraries base stdio cudajit_stub cuda_backend_stub_check arrayjit.ir))
+
+; arrayjit/test: test_hip_compile_failure_options, with the claims module its executable carries.
+
+(copy_files#
+ (files ../../test/hip_compile_failure_options_claims.ml))
+
+(rule
+ (action
+  (copy#
+   ../../test/test_hip_compile_failure_options.real.ml
+   test_hip_compile_failure_options.ml)))
+
+(library
+ (name test_hip_compile_failure_options_arm)
+ (modules
+  test_hip_compile_failure_options
+  hip_compile_failure_options_claims)
+ (libraries
+  base
+  stdio
+  arrayjit.utils
+  arrayjit.verdict
+  hipjit_stub
+  hip_backend_stub_check
+  arrayjit.ir))
+
+; arrayjit/test: test_hip_driver_init_deadline
+
+(rule
+ (action
+  (copy#
+   ../../test/test_hip_driver_init_deadline.real.ml
+   test_hip_driver_init_deadline.ml)))
+
+(library
+ (name test_hip_driver_init_deadline_arm)
+ (modules test_hip_driver_init_deadline)
+ (libraries
+  base
+  stdio
+  unix
+  arrayjit.utils
+  arrayjit.verdict
+  hipjit_stub
+  hip_backend_stub_check))
+
+; arrayjit/test: test_metal_storage_mode, test_metal_alloc
+
+(rule
+ (action
+  (copy#
+   ../../test/test_metal_storage_mode.real.ml
+   test_metal_storage_mode.ml)))
+
+(library
+ (name test_metal_storage_mode_arm)
+ (modules test_metal_storage_mode)
+ (libraries base stdio metal_stub metal_backend_stub_check arrayjit.ir))
+
+(rule
+ (action
+  (copy# ../../test/test_metal_alloc.real.ml test_metal_alloc.ml)))
+
+(library
+ (name test_metal_alloc_arm)
+ (modules test_metal_alloc)
+ (libraries
+  base
+  stdio
+  arrayjit.verdict
+  metal_stub
+  metal_backend_stub_check
+  arrayjit.ir))
+
+; tools: fp8_soak, the shared program with both of its arms, so that each arm is checked against
+; the signature fp8_soak.ml packs it under, not only on its own.
+
+(copy_files#
+ (files ../../../tools/fp8_soak.ml))
+
+(rule
+ (action
+  (copy# ../../../tools/fp8_soak_cuda.cudajit.ml fp8_soak_cuda.ml)))
+
+(rule
+ (action
+  (copy# ../../../tools/fp8_soak_hip.hipjit.ml fp8_soak_hip.ml)))
+
+(library
+ (name fp8_soak_arms)
+ (modules fp8_soak fp8_soak_cuda fp8_soak_hip)
+ (libraries
+  base
+  stdio
+  unix
+  arrayjit.ir
+  arrayjit.verdict
+  cudajit_stub
+  cuda_backend_stub_check
+  hipjit_stub
+  hip_backend_stub_check))
+
+; tools: vendor_idents, the shared program with its three arms.
+
+(copy_files#
+ (files ../../../tools/vendor_idents.ml))
+
+(rule
+ (action
+  (copy#
+   ../../../tools/vendor_idents_arm_cuda.cudajit.ml
+   vendor_idents_arm_cuda.ml)))
+
+(rule
+ (action
+  (copy#
+   ../../../tools/vendor_idents_arm_hip.hipjit.ml
+   vendor_idents_arm_hip.ml)))
+
+(rule
+ (action
+  (copy#
+   ../../../tools/vendor_idents_arm_metal.metal.ml
+   vendor_idents_arm_metal.ml)))
+
+(library
+ (name vendor_idents_arms)
+ (modules
+  vendor_idents
+  vendor_idents_arm_cuda
+  vendor_idents_arm_hip
+  vendor_idents_arm_metal)
+ (libraries
+  base
+  stdio
+  arrayjit.ir
+  cudajit_stub
+  cuda_backend_stub_check
+  hipjit_stub
+  hip_backend_stub_check
+  metal_stub
+  metal_backend_stub_check))
+
+; test/operations: the arms that reach their backend through `Context` and name no vendor module.
+
+(rule
+ (action
+  (copy#
+   ../../../test/operations/test_cuda_pool_offset.real.ml
+   test_cuda_pool_offset.ml)))
+
+(library
+ (name test_cuda_pool_offset_arm)
+ (modules test_cuda_pool_offset)
+ (libraries base stdio ocannl arrayjit.verdict)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+(rule
+ (action
+  (copy#
+   ../../../test/operations/test_metal_pool_bindings.real.ml
+   test_metal_pool_bindings.ml)))
+
+(library
+ (name test_metal_pool_bindings_arm)
+ (modules test_metal_pool_bindings)
+ (libraries base stdio ocannl arrayjit.verdict)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+(rule
+ (action
+  (copy#
+   ../../../test/operations/test_metal_guarded_gather_codegen.real.ml
+   test_metal_guarded_gather_codegen.ml)))
+
+(library
+ (name test_metal_guarded_gather_codegen_arm)
+ (modules test_metal_guarded_gather_codegen)
+ (libraries base stdio ocannl arrayjit.utils test_utils arrayjit.verdict)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+(rule
+ (action
+  (copy#
+   ../../../test/operations/test_metal_pool_slot_width.real.ml
+   test_metal_pool_slot_width.ml)))
+
+(library
+ (name test_metal_pool_slot_width_arm)
+ (modules test_metal_pool_slot_width)
+ (libraries base stdio ocannl arrayjit.utils test_utils arrayjit.verdict)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+(rule
+ (action
+  (copy#
+   ../../../test/operations/metal_gpu_core_count.real.ml
+   metal_gpu_core_count.ml)))
+
+(library
+ (name metal_gpu_core_count_arm)
+ (modules metal_gpu_core_count)
+ (libraries base stdio unix ocannl arrayjit.verdict))

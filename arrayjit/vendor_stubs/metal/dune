@@ -1,0 +1,79 @@
+; The `metal` stand-in; the arrangement is described in `arrayjit/vendor_stubs/dune`. Unlike
+; cudajit and hipjit, `metal` is the real package on every macOS machine (mac-studio, the macOS CI
+; leg), so there these rules check the copies against it, and the stand-in is what Linux and Windows
+; compile against.
+
+(library
+ (name metal_stub)
+ (wrapped false)
+ (modules metal runtime)
+ (modules_without_implementation metal runtime)
+ (libraries ctypes integers sexplib0))
+
+; `metal.mli` is a verbatim copy, checked like cudajit's and hipjit's: a diff against the installed
+; interface where `metal` is installed, regenerated there by `dune promote`, and a SKIPPED line
+; elsewhere. arrayjit pins `metal.dev` to ocaml-metal's `main`, so an interface change pushed there
+; turns this alias red on the next macOS build: promote it and commit the copy.
+
+(rule
+ (enabled_if %{lib-available:metal})
+ (action
+  (copy %{lib:metal:metal.mli} metal.mli.installed)))
+
+(rule
+ (alias runtest-metal)
+ (enabled_if %{lib-available:metal})
+ (action
+  (diff metal.mli metal.mli.installed)))
+
+(rule
+ (alias runtest-metal)
+ (enabled_if
+  (not %{lib-available:metal}))
+ (action
+  (echo
+   "metal stub agreement (metal.mli): SKIPPED -- metal is not installed here; it runs on macOS.\n")))
+
+; `runtime.mli` is hand-written: `metal.runtime` installs no interface to copy (its signature is
+; inferred, and `Runtime.Objc` includes all of Ctypes). Its agreement is a signature check instead:
+; `runtime_agreement.ml` wraps the stub's text as a module type and constrains the installed
+; `Runtime` by it, so the compiler fails wherever the stub promises a type or value the real library
+; does not provide. The library is `(optional)`, compiled wherever `metal.runtime` is installed (on
+; every build there, `@check` included), and `runtest-runtime` depends on its compiled interface.
+; The generator runs everywhere -- an optional library still needs its module to exist -- but
+; nothing compiles its output where `metal.runtime` is absent.
+
+(rule
+ (with-stdout-to
+  runtime_agreement.ml
+  (progn
+   (echo
+    "(* Generated from runtime.mli by arrayjit/vendor_stubs/metal/dune. *)\n\nmodule type Stub = sig\n")
+   (cat runtime.mli)
+   (echo "\nend\n\nmodule _ : Stub = Runtime\n"))))
+
+(library
+ (name metal_runtime_stub_agreement)
+ (optional)
+ (modules runtime_agreement)
+ (libraries ctypes metal.runtime))
+
+(rule
+ (alias runtest-runtime)
+ (enabled_if %{lib-available:metal.runtime})
+ (deps %{cmi:runtime_agreement})
+ (action (progn)))
+
+(rule
+ (alias runtest-runtime)
+ (enabled_if
+  (not %{lib-available:metal.runtime}))
+ (action
+  (echo
+   "metal stub agreement (runtime.mli): SKIPPED -- metal.runtime is not installed here; it runs on macOS.\n")))
+
+(alias
+ (name runtest)
+ (deps
+  (alias runtest-metal)
+  (alias runtest-runtime)))
