@@ -322,6 +322,20 @@ module Outlier_detector : sig
       where llm.c needed O(1) in a kernel-adjacent loop. A genuinely constant-valued window has
       standard deviation 0, making the z-score of any deviation [infinity] (and of [v = mean], 0).
   *)
+
+  val save_state : t -> string
+  (** The detector's state -- its window size, fill count, replacement position and every sample,
+      floats in exact hexadecimal -- as one line, for a resumable checkpoint to carry in
+      [Checkpoint.progress]'s [extra] under a key of the loop's choosing (gh-ocannl-1726). A
+      detector restarted empty at a resume scores [nan] until its window refills, so the steps it
+      would have skipped run: the resumed run is another run. *)
+
+  val restore_state : t -> string -> unit
+  (** [restore_state t s] puts the state {!save_state} encoded in [s] back into [t], a detector
+      created afresh by the resumed program; its next {!update} scores as the saved detector's would
+      have, bit for bit. Raises [Failure] when [s] is not such an encoding, or was saved from a
+      detector over a different [window_size] (naming both sizes): the window cannot be resized
+      without changing the scores. *)
 end
 
 (** {2 Compiling and running} *)

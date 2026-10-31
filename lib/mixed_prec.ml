@@ -94,6 +94,66 @@ module Loss_scaler = struct
     else (
       t.good_steps <- 0;
       set_scale t ctx (t.scale_val *. t.backoff_factor))
+
+  (* The encoding's tag: a later change to the fields bumps it, and a restore refuses a tag it does
+     not read rather than guessing at its fields. *)
+  let state_tag = "loss_scaler/1"
+  let hex = Printf.sprintf "%h"
+
+  let save_state t =
+    String.concat ~sep:" "
+      [
+        state_tag;
+        "scale=" ^ hex t.scale_val;
+        "good_steps=" ^ Int.to_string t.good_steps;
+        "growth_factor=" ^ hex t.growth_factor;
+        "backoff_factor=" ^ hex t.backoff_factor;
+        "growth_interval=" ^ Int.to_string t.growth_interval;
+      ]
+
+  let restore_state t ctx s =
+    let fail what =
+      failwith ("Mixed_prec.Loss_scaler.restore_state: " ^ what ^ " in the saved state: " ^ s)
+    in
+    let fields =
+      match String.split s ~on:' ' with
+      | tag :: fields when String.equal tag state_tag -> fields
+      | _ -> fail ("not a " ^ state_tag ^ " encoding")
+    in
+    let field key =
+      match List.filter_map fields ~f:(fun f -> String.chop_prefix f ~prefix:(key ^ "=")) with
+      | [ v ] -> v
+      | _ -> fail ("missing or repeated " ^ key)
+    in
+    let parse of_string key =
+      match of_string (field key) with Some v -> v | None -> fail ("malformed " ^ key)
+    in
+    let float_field = parse Float.of_string_opt and int_field = parse Int.of_string_opt in
+    let saved_scale = float_field "scale" and good_steps = int_field "good_steps" in
+    if not (Float.is_finite saved_scale && Float.(saved_scale > 0.)) then
+      fail "a non-positive or non-finite scale";
+    if good_steps < 0 then fail "a negative good_steps";
+    (* The schedule is the program's, not the state's: a resume under another one would not continue
+       the saved run, so it is refused rather than silently adopted or overridden. *)
+    let mismatch name show saved own =
+      failwith
+        ("Mixed_prec.Loss_scaler.restore_state: the state was saved under " ^ name ^ " "
+       ^ show saved ^ ", but this scaler was created with " ^ show own
+       ^ ": its schedule would not continue the saved run's (create it with the saved parameters)")
+    in
+    let check_float name own =
+      let saved = float_field name in
+      if not (Float.equal saved own) then mismatch name Float.to_string saved own
+    in
+    check_float "growth_factor" t.growth_factor;
+    check_float "backoff_factor" t.backoff_factor;
+    let saved_interval = int_field "growth_interval" in
+    if saved_interval <> t.growth_interval then
+      mismatch "growth_interval" Int.to_string saved_interval t.growth_interval;
+    t.good_steps <- good_steps;
+    (* The device copies are inputs the routines only read, so no checkpoint holds them: they are
+       re-established here, as the schedule last wrote them. *)
+    set_scale t ctx saved_scale
 end
 
 let scaled_grad_update ?setup_for_parallel ?accum_loss (scaler : Loss_scaler.t) loss =

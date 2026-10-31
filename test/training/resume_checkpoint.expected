@@ -16,3 +16,12 @@ a resume whose graph was built under another scoped seed is refused, naming both
 a format-1 checkpoint, recording no seed, restores under another seed with a warning: true
 a format-2 checkpoint missing its seed is refused as malformed: true
 an appending save replaces the metadata key it names and keeps the others: true
+the mixed-precision run backs the scale off after the stop step: true
+the mixed-precision run skips an outlier step after the stop step: true
+the mixed-precision masters stay single: true
+the resumed mixed-precision run's losses, z-scores, skips and scales equal the uninterrupted run's, bit for bit: true
+the resumed mixed-precision run's final master weights equal the uninterrupted run's, bit for bit: true
+a resume re-creating the loss scaler ends on other master weights: true
+a resume re-creating the outlier detector ends on other master weights: true
+restoring the scaler's state into one with another growth interval is refused, naming both: true
+restoring the detector's state into one over another window is refused, naming both: true
