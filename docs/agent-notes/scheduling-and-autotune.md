@@ -2163,12 +2163,21 @@ files.
   `gebp_padded_parity` pins where each row block accumulates.
 - **A fragment is known by membership, never by its label** (gh-ocannl-1721). `Fuse_epilogue`'s
   store-back recognizer accepts the node the store-back reads only when it is in
-  `simdgroup_fragments` (unmasked) or `masked_fragments` (every pad-masked fragment, shared or not,
-  which `contract_tensorized_accumulator` fills); a user `{ fragment }` carries the same label head,
+  `simdgroup_fragments` (unmasked) or `masked_fragments` (every pad-masked tile, shared or not,
+  which `contract_tensorized_accumulator` fills; on a staged GPU loop site it is the padded scratch
+  tile, whose own register fragment is in `simdgroup_fragments`, gh-ocannl-1736); a user `{ fragment }` carries the same label head,
   and `workgroup_shared` also holds staged operand tiles. A new fragment-minting site enrolls its
   node in one of the two sets, or the fusion declines there. `schedule_epilogue_fusion`'s forged
   leg swaps a user `fragment` node into the store-back and pins the refusal, with the enrolled
   control fusing.
+- **A masked accumulator persists through a padded scratch tile** (gh-ocannl-1736). The intrinsic
+  loads and stores move whole tiles and the masked transfers are not plain copies, so on a staged
+  GPU pipeline's loop site the masked tile becomes scratch (`masked_fragments`, workgroup-shared)
+  and a second, unmasked fragment (`simdgroup_fragments`) wraps the reduction over it: the hooks
+  are unchanged, since `fragment_region` already reads that region with the scratch as target.
+  The statement site and CPU keep one tile. The persistent path is census-visible (`fragment_scopes`)
+  and changes f16-output numerics (narrowed once per tile, not per k block); `masked_persistent_fragment`
+  pins both, and the seeding census names the forcing role (`Autotune.seeding_seed_pads`).
 - **The padded GEBP's k guard was the rest of the excess** (gh-ocannl-1631). With k padded, the
   packing nests store `Where (bk*k_o + k_i < nk)` per A~/B~ element in EVERY k block. `Bench_gebp`
   now `Partition`s `k_o` at its last full block (what `Pad`'s contract prescribes); the full
@@ -3085,10 +3094,9 @@ files.
   path the seed does not take. `perturb_code` keeps the transfers and bumps the target after the
   store-back (the `Fuse_epilogue` shape), and each perturbed seed is compiled unperturbed too: a
   differing mma census is `RERENDERED`, a failure. **A control only judges the region where a seed
-  has one** (gh-ocannl-1707): a pad-masked accumulator is never a persistent fragment
-  (`contract_tensorized_accumulator` makes it workgroup-shared or local, unmarked, a recorded
-  decline), and CUDA's 16-row wmma tile masked every seed of the smoke's 8-wide step, so the smoke
-  passed there with the defect restored. The census now counts the scopes the fragment hook
+  has one** (gh-ocannl-1707): a pad-masked accumulator was then never a persistent fragment
+  (workgroup-shared or local, unmarked), and CUDA's 16-row wmma tile masked every seed of the
+  smoke's 8-wide step, so the smoke passed there with the defect restored. The census now counts the scopes the fragment hook
   rendered (`mma_summary.fragment_scopes`, compared by the control and printed on the verdict
   line), and the smoke, at 16-wide images, claims some conv seed renders one wherever the backend
   advertises an f32 `Mma_fragment_scope`. Before citing a parity control as covering the tensor-core

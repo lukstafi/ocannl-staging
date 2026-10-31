@@ -509,7 +509,21 @@ val seeding_census_lines : where:string -> seeding_census -> string list
      excluded=N]], then indented detail lines — the claiming tree's refutations grouped by witness
     with the first refuted path, after a conv site's zeroing and real-statement count — then, for a
     census taken with [~coalesced:true], one line per coalesced layout (its refusal, or its seed
-    count and the leaves' distinct geometries, gh-ocannl-1459), and the lowering's conv nests. *)
+    count and the leaves' distinct geometries, gh-ocannl-1459), and the lowering's conv nests.
+    Before the coalesced lines, one line per distinct pad reason among the seeds, with its seed
+    count: the roles {!seeding_seed_pads} names (gh-ocannl-1736). *)
+
+(** gh-ocannl-1736: a GEMM role a GPU tensorized seed pads. A row or column pad masks the
+    accumulator's fragment transfers; a reduction pad masks nothing. *)
+type pad_role = Pad_row | Pad_column | Pad_reduction
+
+type seed_pad = { pad_role : pad_role; pad_extent : int; pad_block : int }
+
+val pad_masks_accumulator : pad_role -> bool
+
+val seeding_seed_pads : family_seeding -> sketch_params -> seed_pad list option
+(** The roles a seed pads, judged on its family's site by the predicates the seeding charges the
+    masked accumulator tile's workgroup memory by; [None] for a seed they do not judge. *)
 
 val coalesce_reduction_pair :
   ?static_indices:Ir.Indexing.static_symbol list ->

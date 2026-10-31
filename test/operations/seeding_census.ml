@@ -417,3 +417,57 @@ let () =
   p_exists "tune emits a whole-routine census line" tuned ~f:(fun l ->
       String.is_prefix l ~prefix:Autotune.seeding_census_prefix
       && mentions l ~sub:"where=\"tune whole-routine\"")
+
+(* gh-ocannl-1736: the census names the axis that forced a pad, by GEMM role, from the predicates
+   the seeding charged the masked accumulator tile by ([Autotune.seeding_seed_pads]). Three staged
+   matmul shapes on the 8x8x8 stand-in, each padding one role only: [m = 48] (a 32-row block does
+   not divide it), [n = 40] (the lane-width column block does not), [k = 40] (a 32-deep block does
+   not). A row or column pad masks the accumulator; a reduction pad alone masks nothing and is
+   reported apart, never as an accumulator mask. Whether each verdict is the applied schedule's mask
+   is [masked_persistent_fragment]'s claim. *)
+let () =
+  let pad_case tag ~m ~n ~k =
+    let a =
+      TDSL.ndarray
+        (Array.init (m * k) ~f:Float.of_int)
+        ~label:[ tag ^ "a" ]
+        ~input_dims:[ k ] ~output_dims:[ m ] ()
+    in
+    let b =
+      TDSL.ndarray
+        (Array.init (k * n) ~f:Float.of_int)
+        ~label:[ tag ^ "b" ]
+        ~input_dims:[ n ] ~output_dims:[ k ] ()
+    in
+    let%op c = a * b in
+    let opt = lowering ("census_" ^ tag) c in
+    let cen = census ~where:("matmul " ^ tag) ~is_gpu:true ~limits:gpu_limits opt in
+    let roles =
+      List.filter_map cen.Autotune.sc_seeds ~f:(fun sp ->
+          Option.map (Autotune.seeding_seed_pads cen.sc_family sp) ~f:(fun pads ->
+              List.map pads ~f:(fun (pd : Autotune.seed_pad) -> pd.pad_role)))
+    in
+    (Autotune.seeding_census_lines ~where:tag cen, roles)
+  in
+  let has_role r roles = List.exists roles ~f:(fun rs -> List.mem rs r ~equal:Poly.equal) in
+  let only_role r roles =
+    has_role r roles && List.for_all roles ~f:(List.for_all ~f:(fun r' -> Poly.equal r r'))
+  in
+  let lines_mention lines sub = List.exists lines ~f:(mentions ~sub) in
+  let row_lines, row_roles = pad_case "padrow" ~m:48 ~n:64 ~k:64 in
+  p "pad census: an m=48 site pads the row role alone" (only_role Autotune.Pad_row row_roles);
+  p "pad census: its census names the row axis as the accumulator mask's cause"
+    (lines_mention row_lines "pad-masked accumulator, forced by the row axis (extent 48"
+    && not (lines_mention row_lines "column axis"));
+  let col_lines, col_roles = pad_case "padcol" ~m:64 ~n:40 ~k:64 in
+  p "pad census: an n=40 site pads the column role alone" (only_role Autotune.Pad_column col_roles);
+  p "pad census: its census names the column axis as the accumulator mask's cause"
+    (lines_mention col_lines "pad-masked accumulator, forced by the column axis (extent 40"
+    && not (lines_mention col_lines "row axis"));
+  let red_lines, red_roles = pad_case "padred" ~m:64 ~n:64 ~k:40 in
+  p "pad census: a k=40 site pads the reduction role alone"
+    (only_role Autotune.Pad_reduction red_roles);
+  p "pad census: a reduction-only pad is reported apart, never as an accumulator mask"
+    (lines_mention red_lines
+       "reduction pad only, no accumulator mask: the reduction axis (extent 40"
+    && not (lines_mention red_lines "pad-masked accumulator"))

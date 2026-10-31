@@ -3621,17 +3621,23 @@ let contract_tensorized_accumulator ~lane ~(masks : pad_mask list) (opt : Low_le
      is introduced; that extension should promote and mark each site explicitly. *)
   let promoted = ref None in
   (* Pad masks (gh-ocannl-485) force the contraction: with the accumulator retargeted to a padded
-     scratch fragment, only the valid region round-trips through the target — the transfers below
-     carry the masks. On a GPU pipeline (recognized by staged workgroup-shared tiles) the masked
-     fragment is placed in workgroup-shared memory: the guarded transfers are not recognizable as a
-     fragment-resident scope, and per-thread [Local] arrays are not loadable by the simdgroup/wmma
-     intrinsics — a threadgroup-resident fragment keeps the intrinsic path firing, at the cost of a
-     per-statement load/store round-trip and a barrier pair around the reduction loop. A masked
-     fragment is therefore never marked in [simdgroup_fragments] (it is marked in
-     [masked_fragments], its identity for [Fuse_epilogue]) and never reaches the persistent-fragment
-     rendering: a recorded decline (gh-ocannl-1707, see [Low_level.fragment_transfer]), which the
-     seed-parity smoke's shapes avoid so that its negative control still judges a persistent
-     region. *)
+     tile, only the valid region round-trips through the target — the transfers below carry the
+     masks. The guarded transfers are not a fragment's plain copies ([Low_level.fragment_transfer]),
+     and the intrinsic loads and stores move whole tiles, so the masked tile itself is never a
+     persistent fragment; it is marked in [masked_fragments], its identity for [Fuse_epilogue].
+
+     On a GPU pipeline (recognized by staged workgroup-shared tiles) the masked tile is placed in
+     workgroup-shared memory, where the intrinsics can load it (per-thread [Local] arrays they
+     cannot), with barriers bracketing its lane-0 transfers. At the loop site it is a padded SCRATCH
+     tile staging a second, unmasked fragment (gh-ocannl-1736): lane 0 copies the whole scratch tile
+     into the fragment before the reduction and back after it, the plain region a backend's fragment
+     hook holds in registers across the whole reduction — one load and one store per output tile,
+     where accumulating in the shared tile itself paid a load/store round-trip and a barrier pair
+     per reduction step. Where the hook declines, the renderer's fallbacks address the scratch tile:
+     the per-statement intrinsics against it (the former per-step round-trip), or the lane-0 scalar
+     fallback through the fragment as a local array. The statement site keeps the single masked
+     tile: its region would bracket one [Tile_mma], holding nothing across steps. Off a GPU pipeline
+     the masked tile is a local array, as before. *)
   let masked = not (List.is_empty masks) in
   let shared_frag = masked && not (Set.is_empty opt.workgroup_shared) in
   let iprec = Ops.index_prec () in
@@ -3725,20 +3731,33 @@ let contract_tensorized_accumulator ~lane ~(masks : pad_mask list) (opt : Low_le
      body'; (barrier;) store-back] — the transfers guarded by the pad masks over the fresh fragment
      symbols: the init-load [Where]s out-of-range slots to 0 and the store-back [If]s them away, so
      only the valid region of the padded block round-trips through [target]. *)
-  let contract_around ~target ~d_base ~m ~n ~fallback ~simd_width
+  let contract_around ~site ~target ~d_base ~m ~n ~fallback ~simd_width
       ~(reloop : Low_level.t -> Low_level.t) ~(body : Low_level.t) =
     match (fallback_indices target fallback, fallback_axes fallback) with
     | Some original_d_idcs, Some (i, j) ->
         let prec = Lazy.force target.Tn.storage_prec in
-        let fragment =
-          Tn.create ~namespace:tile_namespace (Tn.Specified prec) ~id:(fresh_tile_id ())
-            ~label:("fragment" :: target.Tn.label)
-            ~unpadded_dims:(lazy [| m; n |])
-            ~padding:(lazy None)
-            ()
+        let mint ~label ~site =
+          let tn =
+            Tn.create ~namespace:tile_namespace (Tn.Specified prec) ~id:(fresh_tile_id ())
+              ~label:(label :: target.Tn.label)
+              ~unpadded_dims:(lazy [| m; n |])
+              ~padding:(lazy None)
+              ()
+          in
+          Tn.Placements.update opt.optimize_ctx.placements tn Tn.Local site;
+          ignore (get_node opt.traced_store tn : traced_array);
+          tn
         in
-        Tn.Placements.update opt.optimize_ctx.placements fragment Tn.Local (Site "178:mma-fragment");
-        ignore (get_node opt.traced_store fragment : traced_array);
+        let fragment = mint ~label:"fragment" ~site:(Site "178:mma-fragment") in
+        (* gh-ocannl-1736: a masked loop-site contraction on a GPU pipeline stages its transfers
+           through a padded scratch tile, so that the fragment itself has the plain region of an
+           unmasked one (see [staged_region] below). *)
+        let scratch =
+          match site with
+          | `Loop when shared_frag ->
+              Some (mint ~label:"pad_scratch" ~site:(Site "1736:mma-pad-scratch"))
+          | `Loop | `Statement -> None
+        in
         let fragment_idcs = [| Indexing.Iterator i; Indexing.Iterator j |] in
         let fragment_base = [| Indexing.Fixed_idx 0; Indexing.Fixed_idx 0 |] in
         let fallback =
@@ -3780,7 +3799,10 @@ let contract_tensorized_accumulator ~lane ~(masks : pad_mask list) (opt : Low_le
           let idx = normalize_affine ~terms:((1, role) :: pm.pm_terms) ~offset:pm.pm_offset in
           Binop (Ops.Cmplt, (Embed_index idx, iprec), (Constant (Float.of_int pm.pm_bound), iprec))
         in
-        let transfer ~into_fragment =
+        (* The masked transfers between [target] and [tile]: the padded block's valid region
+           round-trips, its out-of-range slots load as 0 and are never stored. [tile] is the
+           fragment itself, or the scratch tile staging it. *)
+        let transfer ~tile ~into_fragment =
           let stmt =
             if into_fragment then
               let llsc =
@@ -3789,17 +3811,12 @@ let contract_tensorized_accumulator ~lane ~(masks : pad_mask list) (opt : Low_le
                   ~f:(fun rhs pm ->
                     Ternop (Ops.Where, (mask_cond pm, iprec), (rhs, prec), (Constant 0., prec)))
               in
-              Set { tn = fragment; idcs = local_idcs; llsc; debug = "" }
+              Set { tn = tile; idcs = local_idcs; llsc; debug = "" }
             else
               List.fold masks
                 ~init:
                   (Set
-                     {
-                       tn = target;
-                       idcs = target_idcs;
-                       llsc = Get (fragment, local_idcs);
-                       debug = "";
-                     })
+                     { tn = target; idcs = target_idcs; llsc = Get (tile, local_idcs); debug = "" })
                 ~f:(fun stmt pm -> If { cond = (mask_cond pm, iprec); body = stmt })
           in
           For_loop
@@ -3811,7 +3828,7 @@ let contract_tensorized_accumulator ~lane ~(masks : pad_mask list) (opt : Low_le
               body = For_loop { index = fj; from_ = 0; to_ = n - 1; axis = Serial; body = stmt };
             }
         in
-        promoted := Some fragment;
+        promoted := Some (fragment, scratch);
         (* A shared fragment's transfers are lane 0's alone, so they are not aligned with the
            per-lane geometry the site's companions take ([companion_geometry]): a sibling zeroing or
            producer wrote [target]'s cells from every lane just before the init-load, and a
@@ -3820,14 +3837,53 @@ let contract_tensorized_accumulator ~lane ~(masks : pad_mask list) (opt : Low_le
            ([C_syntax]'s [render_mma_fragment_scope]). Without the trailing one, CUDA's unfused
            pad-masked conv seeds read the target before lane 0 stored it (gh-ocannl-1598: observed
            at 64 out-channels over a 32-lane workgroup, cifar_resnet's stage-3 convs). *)
+        let reduction =
+          match scratch with
+          | None -> [ reloop body ]
+          | Some scratch ->
+              (* gh-ocannl-1736: the fragment's own region, unmasked: lane 0 copies the whole padded
+                 scratch tile into the fragment, the reduction accumulates into the fragment, and
+                 lane 0 copies it back — the plain three-part form [Low_level.fragment_region]
+                 recognizes, with the scratch tile as its target. A backend's fragment hook then
+                 holds the accumulator in registers across the whole reduction, loading it from the
+                 scratch tile once and storing it once; the intrinsic loads and stores move whole
+                 tiles, which the scratch tile (unlike [target]) has. Every scratch slot is written
+                 by the masked init (pad slots as 0), so the whole-tile load reads no uninitialized
+                 cell. *)
+              let gi = Indexing.get_symbol () and gj = Indexing.get_symbol () in
+              let g_idcs = [| Indexing.Iterator gi; Indexing.Iterator gj |] in
+              let copy ~into ~from =
+                lane0 simd_width
+                  (For_loop
+                     {
+                       index = gi;
+                       from_ = 0;
+                       to_ = m - 1;
+                       axis = Serial;
+                       body =
+                         For_loop
+                           {
+                             index = gj;
+                             from_ = 0;
+                             to_ = n - 1;
+                             axis = Serial;
+                             body =
+                               Set
+                                 { tn = into; idcs = g_idcs; llsc = Get (from, g_idcs); debug = "" };
+                           };
+                     })
+              in
+              [ copy ~into:fragment ~from:scratch; reloop body; copy ~into:scratch ~from:fragment ]
+        in
+        let tile = Option.value scratch ~default:fragment in
         Some
           (unflat_lines
              ((if shared_frag then [ Workgroup_barrier ] else [])
-             @ [ lane0 simd_width (transfer ~into_fragment:true) ]
+             @ [ lane0 simd_width (transfer ~tile ~into_fragment:true) ]
              @ (if shared_frag then [ Workgroup_barrier ] else [])
-             @ [ reloop body ]
+             @ reduction
              @ (if shared_frag then [ Workgroup_barrier ] else [])
-             @ [ lane0 simd_width (transfer ~into_fragment:false) ]
+             @ [ lane0 simd_width (transfer ~tile ~into_fragment:false) ]
              @ if shared_frag then [ Workgroup_barrier ] else []))
     | _ -> None
   in
@@ -3867,7 +3923,7 @@ let contract_tensorized_accumulator ~lane ~(masks : pad_mask list) (opt : Low_le
       -> (
         match lane_extent fc.body with
         | Some simd_width ->
-            contract_around ~target ~d_base ~m ~n ~fallback ~simd_width
+            contract_around ~site:`Loop ~target ~d_base ~m ~n ~fallback ~simd_width
               ~reloop:(fun body -> for_loop { fc with body })
               ~body:fc.body
         | None -> None)
@@ -3935,7 +3991,7 @@ let contract_tensorized_accumulator ~lane ~(masks : pad_mask list) (opt : Low_le
                  ^ " coincides with an operand")
             | [ Tile_mma { d = target, d_base; m; n; fallback; _ } ] -> (
                 match
-                  contract_around ~target ~d_base ~m ~n ~fallback
+                  contract_around ~site:`Statement ~target ~d_base ~m ~n ~fallback
                     ~simd_width:(to_ - from_ + 1)
                     ~reloop:Fn.id ~body:(For_loop fc)
                 with
@@ -3990,7 +4046,18 @@ let contract_tensorized_accumulator ~lane ~(masks : pad_mask list) (opt : Low_le
        qualified (an outer term of a pad guard may be bound inside the reduction loop)";
   match !promoted with
   | None -> { opt with llc }
-  | Some fragment ->
+  | Some (fragment, Some scratch) ->
+      (* gh-ocannl-1736: the staged masked form. The scratch tile is the pad-masked accumulator tile
+         (workgroup-shared, the store-back [Fuse_epilogue] fuses at), the fragment an ordinary
+         persistent one around it. *)
+      {
+        opt with
+        llc;
+        workgroup_shared = Set.add opt.workgroup_shared scratch;
+        masked_fragments = Set.add opt.masked_fragments scratch;
+        simdgroup_fragments = Set.add opt.simdgroup_fragments fragment;
+      }
+  | Some (fragment, None) ->
       if masked then
         {
           opt with

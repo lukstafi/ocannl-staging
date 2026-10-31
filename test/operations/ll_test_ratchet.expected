@@ -2,7 +2,7 @@ Source floor: test/ >= 200
 Source floor: arrayjit/test/ >= 20
 Adoption threshold: 1 record construction or 1 private traversal
 Ll_builders values outside the IR surface (adopt nothing): (none)
-Ll_test values outside the IR surface (adopt nothing): backend_accum_prec, base_ctx, blank, blind_axis, close, count, coverage_verified, cycle, cycle_flat, drift, exact_partials, flat, grain_exponent, hooks_of, ignore1, matmul_products, max_modulus, no_hooks, place_residues, reduction_cells, refused_as_local, same, seeded_census, sentinel, uncovered_residues, unflat, weighted
+Ll_test values outside the IR surface (adopt nothing): backend_accum_prec, base_ctx, blank, blind_axis, close, count, coverage_verified, cycle, cycle_flat, drift, exact_partials, flat, grain_exponent, hooks_of, ignore1, matmul_products, max_modulus, no_hooks, place_residues, reduction_cells, refused_as_local, residency_body_holds, residency_holds, residency_markers, resident_regions, same, seeded_census, sentinel, uncovered_residues, unflat, weighted
 Adopted tests still hand-building IR (non-refusing census):
 arrayjit/test/test_cross_cse.ml -- records=2 traversals=2
 arrayjit/test/test_local_scope_init.ml -- records=6 traversals=0
@@ -30,6 +30,7 @@ test/operations/gpu_lane_reduction.ml -- records=0 traversals=3
 test/operations/gpu_serial_lanes.ml -- records=2 traversals=5
 test/operations/integer_power_domain.ml -- records=1 traversals=0
 test/operations/launch_dim_gate.ml -- records=2 traversals=0
+test/operations/masked_persistent_fragment.ml -- records=0 traversals=1
 test/operations/narrow_storage_compute.ml -- records=0 traversals=1
 test/operations/online_softmax.ml -- records=8 traversals=4
 test/operations/online_softmax_block.ml -- records=11 traversals=8

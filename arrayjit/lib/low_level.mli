@@ -1516,12 +1516,16 @@ type optimized = {
           marking and use the ordinary local-array code; Metal maps the marked region to a
           persistent [simdgroup_matrix] array. *)
   masked_fragments : Set.M(Tnode).t;
-      (** The pad-masked accumulator fragments [Schedule.Tensorize]'s contraction minted
-          (gh-ocannl-485): a masked fragment is kept out of [simdgroup_fragments] (renderers read
-          that set as persistent simdgroup matrices, which the guarded transfers are not), so this
-          set is what identifies it -- [Schedule.Fuse_epilogue] recognizes a fragment store-back by
-          membership here or in [simdgroup_fragments], never by the node's label (gh-ocannl-1721).
-          Read by scheduling only: no renderer consults it. *)
+      (** The pad-masked accumulator tiles [Schedule.Tensorize]'s contraction minted
+          (gh-ocannl-485): the tile whose guarded transfers round-trip the valid region of a padded
+          block through the accumulator. Such a tile is kept out of [simdgroup_fragments] (renderers
+          read that set as persistent simdgroup matrices, which the guarded transfers are not), so
+          this set is what identifies it -- [Schedule.Fuse_epilogue] recognizes a fragment
+          store-back by membership here or in [simdgroup_fragments], never by the node's label
+          (gh-ocannl-1721). On a staged GPU pipeline's loop-site contraction the tile is a
+          workgroup-shared padded scratch tile staging an unmasked fragment, which is in
+          [simdgroup_fragments] (gh-ocannl-1736). Read by scheduling only: no renderer consults it.
+      *)
   swizzled : swizzle_kind Map.M(Tnode).t;
       (** Nodes stored in an XOR-swizzled layout (docs/proposals/tensorize-mma.md, "Swizzled
           staging"), keyed by the remap's granularity ({!type-swizzle_kind}): codegen remaps every
@@ -1873,14 +1877,13 @@ val fragment_transfer :
     renderer's fragment-scope recognition and the cost model's operand-load count (gh-ocannl-1254)
     both read regions through it.
 
-    A pad-masked contraction's store-back, its [Set] under the masks' [If]s, is not a transfer, and
-    that is a recorded decline rather than a missed match (gh-ocannl-1707): the contraction never
-    marks a masked fragment as a simdgroup fragment (it is workgroup-shared on a staged GPU
-    pipeline, a local array otherwise), so its region would render literally even if recognized. The
-    intrinsic loads and stores move whole tiles, so a masked persistent fragment would need its
-    transfers staged through a padded scratch tile, in every backend's fragment hook. A marked
-    fragment's region that this function does not recognize is refused by
-    [Schedule.fragment_scope_violations]. *)
+    A pad-masked contraction's guarded transfers (the init's [Where], the store-back's [If]s) are
+    not transfers, by design: the intrinsic loads and stores move whole tiles, which a padded target
+    does not have. A staged GPU pipeline's masked loop-site contraction instead stages them through
+    a padded scratch tile and wraps the reduction in a plain region whose target is that tile
+    (gh-ocannl-1736, [Schedule.contract_tensorized_accumulator]); elsewhere the masked tile is never
+    marked as a simdgroup fragment. A marked fragment's region that this function does not recognize
+    is refused by [Schedule.fragment_scope_violations]. *)
 
 val lane_selected_writes : t -> Tnode.t list
 (** The nodes [llc] writes under a lane-selecting guard ([if lane == 0] of an enclosing [Workgroup]

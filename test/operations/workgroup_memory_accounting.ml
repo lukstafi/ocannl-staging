@@ -280,13 +280,19 @@ let conv_leg ~what opt =
 let () =
   (* 16 output rows and 8 input channels: every extent a multiple of the 8x8x8 tile, so no flavor is
      masked and the staged operand tiles are the whole charge. *)
+  (* An accumulator tile is known by membership in the sets the contraction fills, never by its
+     label (gh-ocannl-1721): the masked tile -- since gh-ocannl-1736 the padded scratch tile a
+     register fragment is staged through -- in [masked_fragments], a fragment in
+     [simdgroup_fragments]. *)
+  let is_accumulator_tile (o : LL.optimized) tn =
+    Set.mem o.LL.masked_fragments tn || Set.mem o.LL.simdgroup_fragments tn
+  in
   let unmasked =
     conv_leg ~what:"unmasked" (lowering "wmem_conv_u" (make_conv "wmu" ~hw:18 ~ic:8))
   in
   p_all "unmasked: no flavor places its accumulator fragment in workgroup memory" unmasked
     ~f:(fun (_, _, o) ->
-      Set.for_all o.LL.workgroup_shared ~f:(fun tn ->
-          match tn.Tn.label with "fragment" :: _ -> false | _ -> true));
+      Set.for_all o.LL.workgroup_shared ~f:(fun tn -> not (is_accumulator_tile o tn)));
   (* 16 output rows and 4 input channels: only the reduction pads, and [Tensorize] discharges that
      guard (the padded operand slots are zeros), so the accumulator stays unmasked and no fragment
      is workgroup-shared (Codex P2 on the first push charged one). *)
@@ -297,14 +303,39 @@ let () =
       p.Autotune.sk_bk > 0);
   p_all "reduction-padded: no flavor places its accumulator fragment in workgroup memory" k_padded
     ~f:(fun (_, _, o) ->
-      Set.for_all o.LL.workgroup_shared ~f:(fun tn ->
-          match tn.Tn.label with "fragment" :: _ -> false | _ -> true));
+      Set.for_all o.LL.workgroup_shared ~f:(fun tn -> not (is_accumulator_tile o tn)));
   (* 9 output rows and 4 input channels, padded to the tile: every flavor's accumulator is masked
-     (the row pad or the non-dividing row block), and its accumulator fragment, at the f32 output
-     precision, is workgroup-shared beside the tiles. *)
+     (the row pad or the non-dividing row block). Since gh-ocannl-1736 the masked tile is a padded
+     scratch tile at the f32 output precision, workgroup-shared beside the operand tiles, and the
+     accumulator itself is a register fragment staged through it, never in workgroup memory. *)
   let masked = conv_leg ~what:"masked" (lowering "wmem_conv_m" (make_conv "wmm" ~hw:11 ~ic:4)) in
-  p_all "masked: every flavor places an f32 accumulator fragment in workgroup memory" masked
-    ~f:(fun (_, _, o) ->
-      Set.exists o.LL.workgroup_shared ~f:(fun tn ->
-          (match tn.Tn.label with "fragment" :: _ -> true | _ -> false)
-          && Ir.Ops.equal_prec (Lazy.force tn.Tn.storage_prec) Ir.Ops.single))
+  let scratch_tiles (o : LL.optimized) =
+    Set.to_list (Set.inter o.LL.workgroup_shared o.LL.masked_fragments)
+  in
+  p_all
+    "masked: every flavor stages a register fragment through one f32 scratch tile, the only \
+     accumulator tile in workgroup memory"
+    masked ~f:(fun (_, _, o) ->
+      (match scratch_tiles o with
+        | [ tn ] -> Ir.Ops.equal_prec (Lazy.force tn.Tn.storage_prec) Ir.Ops.single
+        | _ -> false)
+      && (not (Set.is_empty o.LL.simdgroup_fragments))
+      && Set.for_all o.LL.simdgroup_fragments ~f:(fun tn -> not (Set.mem o.LL.workgroup_shared tn)));
+  (* The estimate charges the scratch tile and nothing for the fragment: taking the scratch tile out
+     of workgroup memory lowers it by exactly the tile's bytes (at the stand-in's 4-byte granule,
+     which an f32 tile already meets), so the masked estimates above exceed the unmasked ones by the
+     scratch tile alone. *)
+  p_all "masked: the gate's estimate charges exactly the scratch tile beyond the operand tiles"
+    masked ~f:(fun (_, est, o) ->
+      match scratch_tiles o with
+      | [ tn ] ->
+          let bytes =
+            Array.fold (Lazy.force tn.Tn.dims) ~init:1 ~f:( * )
+            * Ir.Ops.prec_in_bytes (Lazy.force tn.Tn.storage_prec)
+          in
+          let without =
+            Sched.workgroup_memory_bytes ~capabilities:standin
+              { o with LL.workgroup_shared = Set.remove o.LL.workgroup_shared tn }
+          in
+          est - without = bytes
+      | _ -> false)

@@ -1126,12 +1126,16 @@ type optimized = {
           enclosing serial reduction. Metal renders their marked lifetime as persistent
           [simdgroup_matrix] fragments; scalar fallback backends retain the local-array meaning. *)
   masked_fragments : Set.M(Tnode).t;
-      (** The pad-masked accumulator fragments [Schedule.Tensorize]'s contraction minted
-          (gh-ocannl-485): a masked fragment is kept out of [simdgroup_fragments] (renderers read
-          that set as persistent simdgroup matrices, which the guarded transfers are not), so this
-          set is what identifies it -- [Schedule.Fuse_epilogue] recognizes a fragment store-back by
-          membership here or in [simdgroup_fragments], never by the node's label (gh-ocannl-1721).
-          Read by scheduling only: no renderer consults it. *)
+      (** The pad-masked accumulator tiles [Schedule.Tensorize]'s contraction minted
+          (gh-ocannl-485): the tile whose guarded transfers round-trip the valid region of a padded
+          block through the accumulator. Such a tile is kept out of [simdgroup_fragments] (renderers
+          read that set as persistent simdgroup matrices, which the guarded transfers are not), so
+          this set is what identifies it -- [Schedule.Fuse_epilogue] recognizes a fragment
+          store-back by membership here or in [simdgroup_fragments], never by the node's label
+          (gh-ocannl-1721). On a staged GPU pipeline's loop-site contraction the tile is a
+          workgroup-shared padded scratch tile staging an unmasked fragment, which is in
+          [simdgroup_fragments] (gh-ocannl-1736). Read by scheduling only: no renderer consults it.
+      *)
   swizzled : swizzle_kind Map.M(Tnode).t;
       (** Nodes stored in an XOR-swizzled layout (docs/proposals/tensorize-mma.md, "Swizzled
           staging"), keyed by the remap's granularity ({!type-swizzle_kind}): codegen remaps every

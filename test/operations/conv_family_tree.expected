@@ -32,9 +32,9 @@
         conv-rows = rows-bm32  [refuted: row block gives fewer than two blocks of the 9 rows]
       conv-staging = pipelined
         conv-rows = rows-whole
-          twin = depth2  [excluded: pad-masked flavor: Tensorize stays on the barrier-bracketed per-call arm, whose leading bracket sits between the prefetch and the compute, so the twin could only pay the doubled footprint (Codex P2 on PR #303)]
+          twin = depth2  [excluded: padded flavor (row, column or reduction pad): a conservative policy pending measurement, not a hardware limit; the twin was judged (Codex P2 on PR #303) on the barrier-bracketed per-call arm, whose leading bracket sits between the prefetch and the compute, which a masked loop-site accumulator no longer takes (gh-ocannl-1736)]
         conv-rows = rows-bm8
-          twin = depth2  [excluded: pad-masked flavor: Tensorize stays on the barrier-bracketed per-call arm, whose leading bracket sits between the prefetch and the compute, so the twin could only pay the doubled footprint (Codex P2 on PR #303)]
+          twin = depth2  [excluded: padded flavor (row, column or reduction pad): a conservative policy pending measurement, not a hardware limit; the twin was judged (Codex P2 on PR #303) on the barrier-bracketed per-call arm, whose leading bracket sits between the prefetch and the compute, which a masked loop-site accumulator no longer takes (gh-ocannl-1736)]
         conv-rows = rows-bm16  [refuted: row block gives fewer than two blocks of the 9 rows]
         conv-rows = rows-bm32  [refuted: row block gives fewer than two blocks of the 9 rows]
   fusion = fused  [refuted: Schedule.Fuse_epilogue: no statement follows the reduction over y]
@@ -152,9 +152,9 @@ tail, CPU: the fused Grid flavor is a leaf: true
         conv-rows = rows-bm32  [refuted: row block gives fewer than two blocks of the 9 rows]
       conv-staging = pipelined
         conv-rows = rows-whole
-          twin = depth2  [excluded: pad-masked flavor: Tensorize stays on the barrier-bracketed per-call arm, whose leading bracket sits between the prefetch and the compute, so the twin could only pay the doubled footprint (Codex P2 on PR #303)]
+          twin = depth2  [excluded: padded flavor (row, column or reduction pad): a conservative policy pending measurement, not a hardware limit; the twin was judged (Codex P2 on PR #303) on the barrier-bracketed per-call arm, whose leading bracket sits between the prefetch and the compute, which a masked loop-site accumulator no longer takes (gh-ocannl-1736)]
         conv-rows = rows-bm8
-          twin = depth2  [excluded: pad-masked flavor: Tensorize stays on the barrier-bracketed per-call arm, whose leading bracket sits between the prefetch and the compute, so the twin could only pay the doubled footprint (Codex P2 on PR #303)]
+          twin = depth2  [excluded: padded flavor (row, column or reduction pad): a conservative policy pending measurement, not a hardware limit; the twin was judged (Codex P2 on PR #303) on the barrier-bracketed per-call arm, whose leading bracket sits between the prefetch and the compute, which a masked loop-site accumulator no longer takes (gh-ocannl-1736)]
         conv-rows = rows-bm16  [refuted: row block gives fewer than two blocks of the 9 rows]
         conv-rows = rows-bm32  [refuted: row block gives fewer than two blocks of the 9 rows]
 9x9 conv + bias/relu tail, GPU: the tree's leaves are the seed list: true
@@ -214,9 +214,9 @@ pad waste: the lowered threshold is in force: true
         conv-rows = rows-bm32  [refuted: row block gives fewer than two blocks of the 20 rows]
       conv-staging = pipelined
         conv-rows = rows-whole
-          twin = depth2  [excluded: pad-masked flavor: Tensorize stays on the barrier-bracketed per-call arm, whose leading bracket sits between the prefetch and the compute, so the twin could only pay the doubled footprint (Codex P2 on PR #303)]
+          twin = depth2  [excluded: padded flavor (row, column or reduction pad): a conservative policy pending measurement, not a hardware limit; the twin was judged (Codex P2 on PR #303) on the barrier-bracketed per-call arm, whose leading bracket sits between the prefetch and the compute, which a masked loop-site accumulator no longer takes (gh-ocannl-1736)]
         conv-rows = rows-bm8
-          twin = depth2  [excluded: pad-masked flavor: Tensorize stays on the barrier-bracketed per-call arm, whose leading bracket sits between the prefetch and the compute, so the twin could only pay the doubled footprint (Codex P2 on PR #303)]
+          twin = depth2  [excluded: padded flavor (row, column or reduction pad): a conservative policy pending measurement, not a hardware limit; the twin was judged (Codex P2 on PR #303) on the barrier-bracketed per-call arm, whose leading bracket sits between the prefetch and the compute, which a masked loop-site accumulator no longer takes (gh-ocannl-1736)]
         conv-rows = rows-bm16  [excluded: pad waste: padding row=20 to 32 does 1.60x the site's work, 1.33x the 1.20x of this menu's least-padded geometry, at or above the 1.25x search-economy threshold (config autotune_pad_waste_max)]
         conv-rows = rows-bm32  [refuted: row block gives fewer than two blocks of the 20 rows]
   fusion = fused  [refuted: Schedule.Fuse_epilogue: no statement follows the reduction over y]
