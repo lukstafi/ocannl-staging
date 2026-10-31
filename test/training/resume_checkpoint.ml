@@ -428,12 +428,12 @@ let build_mp () =
   let batch_n, bindings = IDX.get_static_symbol ~static_range:n_batches IDX.empty in
   let mlp = MP.with_master_weights ~prec:Ir.Ops.half make_mlp in
   let loss = batch_loss ~mlp ~xs ~ys batch_n in
+  (* f16 gradients, where loss scaling matters; the activations stay single. With f16 activations
+     too, this graph's forward computes an infinite loss on x86 under gcc (and a finite one on arm64
+     from the same generated C), so nothing would train and the controls could not discriminate
+     there. *)
   Precision_policy.apply
-    {
-      Precision_policy.param_prec = None;
-      activation_prec = Some Ir.Ops.half;
-      grad_prec = Some Ir.Ops.half;
-    }
+    { Precision_policy.param_prec = None; activation_prec = None; grad_prec = Some Ir.Ops.half }
     loss;
   let scaler =
     MP.Loss_scaler.create ~init_scale:mp_init_scale ~growth_interval:mp_growth_interval ()
@@ -548,6 +548,10 @@ let mp_parent () =
         ~f:(fun (_, s) -> not s.finite);
       p_exists "the mixed-precision run skips an outlier step after the stop step" resumed_part
         ~f:(fun (_, s) -> s.outlier);
+      p_exists "the mixed-precision run takes an optimizer step after the stop step" resumed_part
+        ~f:(fun (_, s) -> s.finite && not s.outlier);
+      p_all "the mixed-precision run's losses are finite" steps ~f:(fun (_, s) ->
+          Float.is_finite s.loss);
       p_all "the mixed-precision masters stay single" prog.mp_params ~f:(fun tn ->
           Ir.Ops.equal_prec (Lazy.force tn.Tn.storage_prec) Ir.Ops.single);
       (* The interrupted run. *)
