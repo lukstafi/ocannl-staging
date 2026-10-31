@@ -12244,6 +12244,34 @@
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
+;; gh-ocannl-1752: what shape schemes buy in inference cost on repeated blocks (off, check and
+;; guided): registration and constraint counts claimed, timings on stderr; `--bench` measures.
+
+(test
+ (name scheme_payoff)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules scheme_payoff)
+ (libraries base ocannl stdio mtime mtime.clock.os arrayjit.verdict)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+;; gh-ocannl-1752: where op_shape_schemes=off|check|guided report the suite's shape-error classes
+;; (definition, application or closure): the catalogue in docs/shape_inference.md.
+
+(test
+ (name scheme_error_locality)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules scheme_error_locality)
+ (libraries base ocannl stdio arrayjit.verdict)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
 ;; gh-ocannl-1751: Tensor.Scheme.check_definition over every schemed nn_blocks block, with an
 ;; inconsistent definition as the control.
 

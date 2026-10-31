@@ -1,0 +1,235 @@
+(* gh-ocannl-1752: what shape schemes buy in inference cost, on stacks where one block repeats N
+   times, under op_shape_schemes=off|check|guided. Each workload is built in a fresh session; the
+   closure that ends it is forced, and the registration statistics say what each source added to the
+   constraint store and where the shape-registration time went. Nothing is compiled.
+
+   The deterministic counts are claimed (stdout); the full count and timing tables go to stderr,
+   which is not part of the golden. [--bench REPS N...] times the workloads instead: the measurement
+   behind docs/shape_inference.md's numbers. *)
+
+open Base
+open Ocannl.Nn_blocks.DSL_modules
+open Verdict.Claims
+module Nn = Ocannl.Nn_blocks
+
+type mode = [ `Off | `Check | `Guided ]
+
+let modes : mode list = [ `Off; `Check; `Guided ]
+let mode_name = function `Off -> "off" | `Check -> "check" | `Guided -> "guided"
+let d_model = 16
+
+(* The repeated block: schemed at its [()] stage, made of schemed nn_blocks layers. *)
+let%op block ~label () =
+  let ffn = Nn.mlp_layer ~label:("ffn" :: label) ~hid_dim:d_model () in
+  let ln = Nn.layer_norm ~label:("ln" :: label) () in
+  fun x -> ln (x + ffn x)
+
+let input () =
+  Tensor.term ~grad_spec:Prohibit_grad ~label:[ "x" ] ~batch_dims:[ 8 ] ~output_dims:[ d_model ] ()
+
+(* A workload builds a model of depth [n] on a fresh input; it returns the result. *)
+type workload = { w_name : string; build : int -> Tensor.t }
+
+let workloads =
+  [
+    {
+      w_name = "distinct";
+      (* [n] blocks, each its own closure (own parameters) applied once: a plain deep stack. *)
+      build =
+        (fun n ->
+          let layers = List.init n ~f:(fun i -> block ~label:[ "l" ^ Int.to_string i ] ()) in
+          List.fold layers ~init:(input ()) ~f:(fun x layer -> layer x));
+    };
+    {
+      w_name = "shared";
+      (* One closure applied [n] times: a weight-tied stack (an unrolled recurrence). *)
+      build =
+        (fun n ->
+          let layer = block ~label:[ "tied" ] () in
+          Fn.apply_n_times ~n layer (input ()));
+    };
+    {
+      w_name = "decoder";
+      (* nn_blocks' decoder-only transformer: its blocks stay unschemed (~train_step and ~mask come
+         after (), gh-ocannl-1792), their layer norms and feed-forward layers are schemed. *)
+      build =
+        (fun n ->
+          let model =
+            Nn.decoder_only ~label:[ "dec" ] ~num_layers:n ~num_heads:2 ~d_k:8 ~d_v:8 ~d_ff:32 ()
+          in
+          let x =
+            Tensor.term ~grad_spec:Prohibit_grad ~label:[ "x" ] ~batch_dims:[ 2; 8 ]
+              ~output_dims:[ d_model ] ()
+          in
+          let mask =
+            NTDSL.init ~l:"mask" ~prec:Ir.Ops.single ~b:[ 8 ] ~i:[ 8 ] ~o:[]
+              ~f:(function [| s; t |] -> if s >= t then 1. else 0. | _ -> 0.)
+              ()
+          in
+          model ~train_step:None x ~mask);
+    };
+  ]
+
+type run = {
+  counts : Shape.registration_counts;
+  times : Shape.registration_times;
+  construction_s : float;
+  total_s : float;
+  dims : int list list;  (** The closed dims of the result and of every parameter. *)
+}
+
+let seconds started = Mtime.Span.to_float_ns (Mtime_clock.count started) /. 1e9
+
+let run_one (mode : mode) w n =
+  Tensor.For_testing.set_op_shape_schemes (Some mode);
+  Tensor.unsafe_reinitialize ();
+  Tensor.Scheme.reset_registration_counts ();
+  Tensor.Scheme.reset_registration_times ();
+  let started = Mtime_clock.counter () in
+  let y = w.build n in
+  let construction_s = seconds started in
+  let result_dims = Array.to_list (Shape.to_dims y.Tensor.shape) in
+  let total_s = seconds started in
+  let params =
+    Set.to_list y.Tensor.params
+    |> List.map ~f:(fun p -> Array.to_list (Shape.to_dims p.Tensor.shape))
+  in
+  {
+    counts = Tensor.Scheme.registration_counts ();
+    times = Tensor.Scheme.registration_times ();
+    construction_s;
+    total_s;
+    dims = result_dims :: params;
+  }
+
+let row_header =
+  "workload depth mode | guided fallback unmatched backward inline | C' E' boundary ties \
+   backward_c inline_c | closure_constraints"
+
+let count_row w n mode (c : Shape.registration_counts) =
+  Printf.sprintf "%s %d %s | %d %d %d %d %d | %d %d %d %d %d %d | %d" w n (mode_name mode)
+    c.guided_steps c.fallback_steps c.unmatched_steps c.backward_steps c.inline_registrations
+    c.instantiated_constraints c.instantiated_solutions c.instantiated_boundary c.tie_equations
+    c.backward_constraints c.inline_constraints c.closure_constraints
+
+let ms x = Printf.sprintf "%.2f" (x *. 1000.)
+
+let time_header =
+  "workload depth mode | construction_ms closure_ms total_ms | tracing instantiation guided_steps \
+   backward_steps inline_steps (ms)"
+
+let time_row w n mode r =
+  let t = r.times in
+  String.concat ~sep:" "
+    [
+      w;
+      Int.to_string n;
+      mode_name mode;
+      "|";
+      ms r.construction_s;
+      ms t.closure_s;
+      ms r.total_s;
+      "|";
+      ms t.tracing_s;
+      ms t.instantiation_s;
+      ms t.guided_steps_s;
+      ms t.backward_steps_s;
+      ms t.inline_steps_s;
+    ]
+
+(* The test's depths: the counts' relationships show by depth 4; the measurement goes deeper. *)
+let depths = [ 1; 2; 4 ]
+let find_workload name = List.find_exn workloads ~f:(fun x -> String.equal x.w_name name)
+
+let median xs =
+  let a = List.sort xs ~compare:Float.compare |> Array.of_list in
+  a.(Array.length a / 2)
+
+(* The measurement: per workload, depth and mode, one warm-up run and the median of [reps] runs
+   (each column's own median), with the range of the total. *)
+let bench reps cells =
+  Stdio.printf "%s | total range (ms)\n%!" time_header;
+  let counts = ref [] in
+  List.iter cells ~f:(fun (w, ns) ->
+      List.iter ns ~f:(fun n ->
+          List.iter modes ~f:(fun mode ->
+              ignore (run_one mode w n : run);
+              let rs = List.init reps ~f:(fun _ -> run_one mode w n) in
+              let med f = median (List.map rs ~f) in
+              let r =
+                {
+                  (List.hd_exn rs) with
+                  construction_s = med (fun r -> r.construction_s);
+                  total_s = med (fun r -> r.total_s);
+                  times =
+                    {
+                      tracing_s = med (fun r -> r.times.tracing_s);
+                      instantiation_s = med (fun r -> r.times.instantiation_s);
+                      guided_steps_s = med (fun r -> r.times.guided_steps_s);
+                      backward_steps_s = med (fun r -> r.times.backward_steps_s);
+                      inline_steps_s = med (fun r -> r.times.inline_steps_s);
+                      closure_s = med (fun r -> r.times.closure_s);
+                    };
+                }
+              in
+              counts := count_row w.w_name n mode r.counts :: !counts;
+              let totals = List.map rs ~f:(fun r -> r.total_s) in
+              let lo = List.reduce_exn totals ~f:Float.min
+              and hi = List.reduce_exn totals ~f:Float.max in
+              Stdio.printf "%s | total range %s-%s\n%!" (time_row w.w_name n mode r) (ms lo) (ms hi))));
+  Stdio.printf "%s\n" row_header;
+  List.iter (List.rev !counts) ~f:(Stdio.printf "%s\n")
+
+let () =
+  match Array.to_list (Sys.get_argv ()) with
+  | [ _; "--one"; w; n; mode ] ->
+      (* One run, for profiling. *)
+      let w = find_workload w and n = Int.of_string n in
+      let mode = List.find_exn modes ~f:(fun m -> String.equal (mode_name m) mode) in
+      let r = run_one mode w n in
+      Stdio.printf "%s\n%s\n" (count_row w.w_name n mode r.counts) (time_row w.w_name n mode r)
+  | _ :: "--bench" :: reps :: cells ->
+      (* [--bench REPS distinct=1,4,16 shared=1,4,16 decoder=1,4,8] *)
+      bench (Int.of_string reps)
+        (List.map cells ~f:(fun cell ->
+             match String.lsplit2 cell ~on:'=' with
+             | Some (w, ns) -> (find_workload w, List.map (String.split ns ~on:',') ~f:Int.of_string)
+             | None -> failwith ("scheme_payoff --bench: expected workload=depths, got " ^ cell)))
+  | _ ->
+      let results =
+        List.concat_map workloads ~f:(fun w ->
+            List.concat_map depths ~f:(fun n ->
+                List.map modes ~f:(fun mode -> ((w.w_name, n, mode), run_one mode w n))))
+      in
+      Tensor.For_testing.set_op_shape_schemes None;
+      Stdio.eprintf "(not part of the golden) %s\n" row_header;
+      List.iter results ~f:(fun ((w, n, mode), r) ->
+          Stdio.eprintf "(not part of the golden) %s\n" (count_row w n mode r.counts));
+      Stdio.eprintf "(not part of the golden) %s\n" time_header;
+      List.iter results ~f:(fun ((w, n, mode), r) ->
+          Stdio.eprintf "(not part of the golden) %s\n" (time_row w n mode r));
+      let get w n mode = List.Assoc.find_exn results (w, n, mode) ~equal:Poly.equal in
+      let cells = List.filter results ~f:(fun ((_, _, mode), _) -> Poly.equal mode `Off) in
+      Verdict.case "what each mode adds to inference" (fun () ->
+          p_all "every mode closes the shapes it closes without schemes" results
+            ~f:(fun ((w, n, _), r) -> List.equal (List.equal Int.equal) r.dims (get w n `Off).dims);
+          p_all "checking leaves the closure the constraint store it has without schemes" cells
+            ~f:(fun ((w, n, _), off) ->
+              (get w n `Check).counts.closure_constraints = off.counts.closure_constraints);
+          (* As many guided steps per application at every depth: [steps(n) * apps(1)] equals
+             [steps(1) * apps(n)]. *)
+          p_all "a guided application registers as many guided steps at every depth" cells
+            ~f:(fun ((w, n, _), _) ->
+              let c = (get w n `Guided).counts
+              and c1 = (get w (List.hd_exn depths) `Guided).counts in
+              c.guided_steps > 0
+              && c.guided_steps * c1.guided_applications = c1.guided_steps * c.guided_applications);
+          p_all "guided registration skips most of the body's own inequalities" cells
+            ~f:(fun ((w, n, _), off) ->
+              let g = (get w n `Guided).counts in
+              g.inline_constraints + g.backward_constraints < off.counts.inline_constraints);
+          (* The instantiated constraints and the steps' ties stand beside each other until the
+             closure: gh-ocannl-1800's first lever targets this. *)
+          p_all "under guided registration the closure holds more constraints than without schemes"
+            cells ~f:(fun ((w, n, _), off) ->
+              (get w n `Guided).counts.closure_constraints > off.counts.closure_constraints))

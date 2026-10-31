@@ -504,6 +504,12 @@ module Scheme : sig
 
   val reset_registration_counts : unit -> unit
 
+  val registration_times : unit -> Shape.registration_times
+  (** Process-wide shape-registration wall time since the last reset (gh-ocannl-1752): see
+      {!Shape.registration_times}. *)
+
+  val reset_registration_times : unit -> unit
+
   val check_definition : name:string -> (unit -> unit) -> string list
   (** [check_definition ~name (fun () -> ignore (block conf ()))] runs a trial application of a
       [%op] block definition inside a window that is always rewound and allocates no session ids, so

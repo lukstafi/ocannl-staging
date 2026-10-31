@@ -1811,6 +1811,8 @@ module Scheme = struct
 
   let registration_counts = Shape.registration_counts
   let reset_registration_counts = Shape.reset_registration_counts
+  let registration_times = Shape.registration_times
+  let reset_registration_times = Shape.reset_registration_times
 
   type state =
     | Pending
@@ -1847,6 +1849,7 @@ module Scheme = struct
       ()
     else
       let label = [%string "the trace of the shape scheme %{h.name}"] in
+      Shape.timed `Tracing @@ fun () ->
       with_id_neutral ~label (fun () ->
           let ck = checkpoint ~label () in
           match

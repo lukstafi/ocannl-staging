@@ -49,18 +49,7 @@ let counted f =
   let c0 = Tensor.Scheme.registration_counts () in
   let result = f () in
   let c1 = Tensor.Scheme.registration_counts () in
-  let d (g : Shape.registration_counts -> int) = g c1 - g c0 in
-  ( result,
-    Shape.
-      {
-        guided_applications = d (fun c -> c.guided_applications);
-        checked_applications = d (fun c -> c.checked_applications);
-        guided_steps = d (fun c -> c.guided_steps);
-        fallback_steps = d (fun c -> c.fallback_steps);
-        unmatched_steps = d (fun c -> c.unmatched_steps);
-        backward_steps = d (fun c -> c.backward_steps);
-        inline_registrations = d (fun c -> c.inline_registrations);
-      } )
+  (result, Shape.diff_registration_counts c1 c0)
 
 let report name (c : Shape.registration_counts) =
   Stdio.eprintf "(not part of the golden) %s: %s\n%!" name
