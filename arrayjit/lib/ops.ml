@@ -1048,6 +1048,11 @@ let c_convert_precision ~from ~to_ =
       invalid_arg
         ("Ops.c_convert_precision: no plain conversion from uint4x32 to " ^ prec_string to_
        ^ "; convert random bits with Uint4x32_to_prec_uniform1 or Uint4x32_to_prec_uniform")
+  (* The C table's [<prec>_to_uint4x32] takes the 16- and 8-bit floating formats as their storage
+     bits, which [bfloat16] and [fp8] nodes already are; a [half] node is [HALF_T], [_Float16] where
+     the compiler has it, so passing it bare converted its VALUE (1.5 became counter 1), unlike the
+     host stub and every other backend (gh-ocannl-1704). *)
+  | Half_prec _, Uint4x32_prec _ -> ("half_to_uint4x32(HALF_TO_UINT16(", "))")
   | _, Uint4x32_prec _ -> (prec_string from ^ "_to_uint4x32(", ")")
   (* Default case for all other conversions *)
   | _ -> ("(" ^ c_typ_of_prec to_ ^ ")(", ")")

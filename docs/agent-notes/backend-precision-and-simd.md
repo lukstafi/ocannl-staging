@@ -2228,10 +2228,17 @@ files.
   shared with the C table (probed, or excluded: the f32-fallback double forms) or named Metal-only
   with a reason. Its first run found Metal's `byte_to_uint4x32` taking `int8_t`, sign-extending
   every byte from 0x80 up into a different counter than every other backend's. The emulation
-  never runs a device, so `byte_counter_conversion` (gh-ocannl-1673) executes the conversion on the
-  selected backend, all 256 bytes into a materialized `uint4x32` cast, against the host's
-  `Ops.byte_to_uint4x32`; it is backend-uniform, so the Metal leg is an `OCANNL_BACKEND=metal` run
-  (the sweep's, or by hand), and `int8_t` planted back fails it at exactly the bytes >= 0x80.
+  never runs a device, so `uint4x32_counter_conversion` (gh-ocannl-1673, gh-ocannl-1704) executes
+  every `<prec>_to_uint4x32` source on the selected backend, a materialized `uint4x32` cast of a
+  host-initialized source, against the host's `Ops.<prec>_to_uint4x32` (cells decoded by
+  `Test_utils.uint4x32_words`): every bit pattern of the 8- and 16-bit sources (non-NaN for
+  `half`), a structured sample of the wider ones (single bits, their complements, low masks,
+  splitmix64). It is backend-uniform, so the Metal leg is an `OCANNL_BACKEND=metal` run (the
+  sweep's, or by hand). Its first run found `half` converted by VALUE on both cc and Metal (1.5
+  became counter 1): the C table takes the narrow floats as storage bits, which a `_Float16` node
+  is not (cc's conversion now wraps it in `HALF_TO_UINT16`), and Metal's parameter was `uint16_t`
+  (now `half` through `as_type`, as `bfloat16` and CUDA/HIP do). A Metal rotation planted at 15
+  fails its `uint32` leg in 1117 of 1119 cells.
   Under mingw without a C++ front end the comparison is an `Environment` skip; elsewhere a missing one fails.
   The shared half RNG function returns `HALF_T`, while its OCaml wrapper explicitly extracts bits
   with `HALF_TO_UINT16`. `test_shared_builtins` executes separately compiled default and emulated
