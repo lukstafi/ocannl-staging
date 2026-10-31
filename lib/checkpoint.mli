@@ -23,6 +23,15 @@
     step-dependent inputs (a scheduled learning rate is set from [progress.step], see
     [Train.scheduled_learning_rate]) and the shuffling generator.
 
+    Host-side helpers that keep state of their own carry it in [progress.extra], under keys the loop
+    chooses (gh-ocannl-1726): a mixed-precision run's [Mixed_prec.Loss_scaler] (its current scale
+    and good-step count, which no device state holds) through [Loss_scaler.save_state] and
+    [restore_state], and each [Train.Outlier_detector] (its sliding window) through its own pair.
+    The resumed program creates them afresh with the same parameters, and the restores refuse a
+    state saved under other ones. A checkpoint saved without those keys -- any version-1 or
+    version-2 one -- still restores: the format is unchanged, and what the loop does about the
+    missing state is its own decision.
+
     Device-side randomness needs no generator state saved: OCANNL's random operations are
     counter-based (threefry over the random seed, the node and a counter), so a resumed program with
     the same seed ([fixed_state_for_init], or {!Ocannl_tensor.Tensor.set_random_seed}) whose
@@ -56,8 +65,9 @@ type progress = {
           [Stdlib.Random.get_state ()] and [Stdlib.Random.set_state] the restored one. (Base's
           [Random.State.t] is abstract and cannot be captured: draw from a [Stdlib] one.) *)
   extra : (string * string) list;
-      (** Anything else the loop keeps on the host -- an early-stopping counter, a best loss -- as
-          key-value pairs, returned by {!restore} as saved. *)
+      (** Anything else the loop keeps on the host -- an early-stopping counter, a best loss, a loss
+          scaler's or an outlier detector's [save_state] -- as key-value pairs, returned by
+          {!restore} as saved. *)
 }
 
 val training_state :

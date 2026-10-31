@@ -71,8 +71,14 @@ files.
   the recorded ones (gh-ocannl-1727). Every seed the session created, not the current singleton: a
   graph built under `with_saved_random_seed` (`Parallel.data_parallel`'s shards) keeps its scoped
   seed after the singleton is restored. A format-1 checkpoint, which predates the seeds, restores
-  with a stderr warning instead. Executed oracle: `test/training/resume_checkpoint.ml`
-  (fresh-process resume, bit for bit on cc, with momentum- and RNG-dropping controls).
+  with a stderr warning instead. Host helpers carry their own state in `progress.extra`, the format
+  unchanged (gh-ocannl-1726): `Mixed_prec.Loss_scaler.save_state`/`restore_state` (the scale's
+  device copies are read-only inputs, so `carried_state` never holds them and `restore_state`
+  rewrites them) and `Train.Outlier_detector`'s pair; each refuses a state saved under other
+  schedule parameters or window size. Executed oracle: `test/training/resume_checkpoint.ml`
+  (fresh-process resume, bit for bit on cc, with momentum-, RNG-, scaler- and detector-dropping
+  controls; the f16 leg needs a growth interval short enough for the scale to overflow after
+  the stop step, or a re-created scaler's power-of-two scale changes no bits).
 - `Train.to_routine` returns `Context.t * Context.routine` (gh-ocannl-772), like `Context.compile`
   and `Train.run_once`. `routine.Context.context` is the same value, so both spellings work; prefer
   chaining the returned context.

@@ -492,6 +492,61 @@ module Outlier_detector = struct
         t.window.(t.index) <- v;
         t.index <- (t.index + 1) % n;
         z
+
+  (* The encoding's tag: a later change to the fields bumps it, and a restore refuses a tag it does
+     not read rather than guessing at its fields. *)
+  let state_tag = "outlier_detector/1"
+
+  let save_state t =
+    String.concat ~sep:" "
+      [
+        state_tag;
+        "window_size=" ^ Int.to_string (Array.length t.window);
+        "count=" ^ Int.to_string t.count;
+        "index=" ^ Int.to_string t.index;
+        "window=" ^ String.concat_array ~sep:"," (Array.map t.window ~f:(Printf.sprintf "%h"));
+      ]
+
+  let restore_state t s =
+    let fail what =
+      failwith ("Train.Outlier_detector.restore_state: " ^ what ^ " in the saved state: " ^ s)
+    in
+    let fields =
+      match String.split s ~on:' ' with
+      | tag :: fields when String.equal tag state_tag -> fields
+      | _ -> fail ("not a " ^ state_tag ^ " encoding")
+    in
+    let field key =
+      match List.filter_map fields ~f:(fun f -> String.chop_prefix f ~prefix:(key ^ "=")) with
+      | [ v ] -> v
+      | _ -> fail ("missing or repeated " ^ key)
+    in
+    let int_field key =
+      match Int.of_string_opt (field key) with Some v -> v | None -> fail ("malformed " ^ key)
+    in
+    let n = Array.length t.window in
+    let saved_n = int_field "window_size" in
+    if saved_n <> n then
+      failwith
+        ("Train.Outlier_detector.restore_state: the state was saved from a detector over a window \
+          of " ^ Int.to_string saved_n ^ " samples, but this one's window holds " ^ Int.to_string n
+       ^ ": its scores would not continue the saved run's (create it with the saved window_size)");
+    let count = int_field "count" and index = int_field "index" in
+    (* [index] only advances once the window is full. *)
+    if count < 0 || count > n || index < 0 || index >= n || (count < n && index <> 0) then
+      fail "inconsistent count and index";
+    let window =
+      String.split (field "window") ~on:','
+      |> List.map ~f:(fun v ->
+          match Float.of_string_opt v with
+          | Some x when Float.is_finite x -> x
+          | _ -> fail "malformed window sample")
+      |> Array.of_list
+    in
+    if Array.length window <> n then fail "window length differs from window_size";
+    Array.blit ~src:window ~src_pos:0 ~dst:t.window ~dst_pos:0 ~len:n;
+    t.count <- count;
+    t.index <- index
 end
 
 let set_virtual (a : Tn.t) = Tn.update_memory_mode a Virtual (Site "29:set-virtual")

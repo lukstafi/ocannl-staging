@@ -19,13 +19,25 @@
    seeds restores -- the default one above, and a graph's scoped seed below -- and one built under
    others is refused, naming both sides' seeds, a different scoped seed under the same global one
    included. A format-1 checkpoint, which predates the recorded seed, restores under any seed with a
-   warning; a format-2 one missing its seed is refused as malformed. *)
+   warning; a format-2 one missing its seed is refused as malformed.
+
+   The mixed-precision leg (gh-ocannl-1726): master weights with f16 cast twins and gradients,
+   dynamic loss scaling ([Mixed_prec.scaled_grad_update] / [scaled_sgd_update], the checksum read on
+   the host between the two routines), and a [Train.Outlier_detector] on the loss whose verdict
+   skips the optimizer step. The scaler's scale and good-step count and the detector's window are
+   host state no device checkpoint holds; they travel in [progress.extra] through their [save_state]
+   / [restore_state] pairs, and the fresh-process resume continues bit for bit -- losses, z-scores,
+   skips, scales and final master weights. The controls: a resume re-creating the scaler, and one
+   re-creating the detector, both end on other parameters; and both restores refuse a state saved
+   under other schedule parameters. *)
 
 open Base
 open Ocannl
 open Stdio
 module IDX = Train.IDX
 module Tn = Ir.Tnode
+module MP = Mixed_prec
+module Outliers = Train.Outlier_detector
 open Nn_blocks.DSL_modules
 
 let n_batches = 4
@@ -50,9 +62,7 @@ type program = {
   state : Tn.t_set;
 }
 
-(* Built identically by every run: the same construction order gives the same node ids, which is how
-   a checkpoint matches its nodes. *)
-let build_graph () =
+let dataset () =
   let xs =
     NTDSL.init ~l:"xs" ~prec:Ir.Ops.single ~b:[ n_batches; batch_size ] ~o:[ 2 ]
       ~f:(function [| b; i; d |] -> x_val ((b * batch_size) + i) d | _ -> assert false)
@@ -63,22 +73,37 @@ let build_graph () =
       ~f:(function [| b; i; _ |] -> y_val ((b * batch_size) + i) | _ -> assert false)
       ()
   in
-  let batch_n, bindings = IDX.get_static_symbol ~static_range:n_batches IDX.empty in
+  (xs, ys)
+
+let make_mlp () =
   let%op mlp x = { w2 } * relu ({ b1; o = [ hidden ] } + ({ w1 } * x)) in
+  mlp
+
+(* The regression loss of [mlp] on the batch [batch_n] selects. *)
+let batch_loss ~mlp ~xs ~ys batch_n =
   let%op input = xs @| batch_n in
   let%op target = ys @| batch_n in
   let%op diff = mlp input - target in
   let%op loss = ((diff *. diff) ++ "...|... => |->0") /. !..batch_size in
-  let learning_rate, set_lr =
-    Train.scheduled_learning_rate
-      {
-        Train.Lr_schedule.kind = Cosine;
-        base_lr = 0.1;
-        warmup_steps = 2;
-        total_steps;
-        final_frac = 0.1;
-      }
-  in
+  loss
+
+let cosine_learning_rate ~total_steps =
+  Train.scheduled_learning_rate
+    {
+      Train.Lr_schedule.kind = Cosine;
+      base_lr = 0.1;
+      warmup_steps = 2;
+      total_steps;
+      final_frac = 0.1;
+    }
+
+(* Built identically by every run: the same construction order gives the same node ids, which is how
+   a checkpoint matches its nodes. *)
+let build_graph () =
+  let xs, ys = dataset () in
+  let batch_n, bindings = IDX.get_static_symbol ~static_range:n_batches IDX.empty in
+  let loss = batch_loss ~mlp:(make_mlp ()) ~xs ~ys batch_n in
+  let learning_rate, set_lr = cosine_learning_rate ~total_steps in
   let update = Train.grad_update loss in
   let sgd = Train.sgd_update ~learning_rate ~momentum:0.9 ~weight_decay:1e-3 loss in
   let ctx = Train.init_params (Context.cpu ()) bindings loss in
@@ -368,4 +393,225 @@ let parent () =
              (find ("extra." ^ order_key))
              (Some (show_order (order_of_progress progress)))))
 
-let () = match Stdlib.Sys.argv with [| _; "resume"; path |] -> child path | _ -> parent ()
+(* ----- The mixed-precision leg (gh-ocannl-1726) ----- *)
+
+let mp_total_steps = 16
+let mp_stop_step = 8
+
+(* Regrown every two good steps, the scale climbs until the f16 gradients overflow (here at 2^19):
+   the step is skipped and the scale backs off, again and again through the run, so a scaler
+   re-created at the resume overflows on other steps. *)
+let mp_init_scale = 65536.
+let mp_growth_interval = 2
+let mp_window = 3
+
+(* Low enough that the loss's batch-to-batch spread trips it now and then. *)
+let mp_outlier_threshold = 1.0
+
+type mp_program = {
+  mp_ctx : Context.t;
+  grad_routine : Context.routine;
+  sgd_routine : Context.routine;
+  checksum : Tensor.t;
+  scaler : MP.Loss_scaler.t;
+  mp_loss : Tensor.t;
+  mp_set_lr : Context.t -> step:int -> Context.t;
+  mp_batch : int ref;
+  mp_params : Tn.t list;  (** In id order. *)
+  mp_state : Tn.t_set;
+}
+
+let build_mp () =
+  Tensor.unsafe_reinitialize ();
+  Tensor.set_random_seed ();
+  let xs, ys = dataset () in
+  let batch_n, bindings = IDX.get_static_symbol ~static_range:n_batches IDX.empty in
+  let mlp = MP.with_master_weights ~prec:Ir.Ops.half make_mlp in
+  let loss = batch_loss ~mlp ~xs ~ys batch_n in
+  (* f16 gradients, where loss scaling matters; the activations stay single. With f16 activations
+     too, this graph's forward computes an infinite loss on x86 under gcc (and a finite one on arm64
+     from the same generated C), so nothing would train and the controls could not discriminate
+     there. *)
+  Precision_policy.apply
+    { Precision_policy.param_prec = None; activation_prec = None; grad_prec = Some Ir.Ops.half }
+    loss;
+  let scaler =
+    MP.Loss_scaler.create ~init_scale:mp_init_scale ~growth_interval:mp_growth_interval ()
+  in
+  let learning_rate, set_lr = cosine_learning_rate ~total_steps:mp_total_steps in
+  let checksum, grad_comp = MP.scaled_grad_update scaler loss in
+  let sgd_comp = MP.scaled_sgd_update scaler ~learning_rate ~momentum:0.9 loss in
+  let ctx = Train.init_params (Context.cpu ()) bindings loss in
+  let ctx, grad_routine = Train.to_routine ctx bindings grad_comp in
+  let ctx, sgd_routine = Train.to_routine ctx IDX.empty sgd_comp in
+  {
+    mp_ctx = ctx;
+    grad_routine;
+    sgd_routine;
+    checksum;
+    scaler;
+    mp_loss = loss;
+    mp_set_lr = set_lr;
+    mp_batch = IDX.find_exn grad_routine.Context.bindings batch_n;
+    mp_params =
+      Set.to_list loss.Tensor.params
+      |> List.map ~f:(fun p -> p.Tensor.value)
+      |> List.sort ~compare:(fun a b -> Int.compare a.Tn.id b.Tn.id);
+    mp_state = Checkpoint.training_state ~routines:[ grad_routine; sgd_routine ] loss;
+  }
+
+let scaler_key = "loss_scaler"
+let detector_key = "loss_outliers"
+
+type mp_step = { loss : float; z : float; finite : bool; outlier : bool; scale : float }
+
+let show_step i s =
+  Printf.sprintf "step %d loss %s z %s finite %b outlier %b scale %h" i (bits s.loss) (bits s.z)
+    s.finite s.outlier s.scale
+
+(* The batch is the step's, so the data needs no position of its own here: the first leg covers
+   that. A step runs the optimizer only when the gradients are finite and the loss is no outlier. *)
+let mp_run_steps prog detector (progress : Checkpoint.progress) ~until =
+  let ctx = ref prog.mp_ctx and steps = ref [] in
+  for step = progress.step to until - 1 do
+    prog.mp_batch := step % n_batches;
+    ctx := prog.mp_set_lr !ctx ~step;
+    ctx := Context.run !ctx prog.grad_routine;
+    let finite = Float.is_finite (Context.get_values !ctx prog.checksum.Tensor.value).(0) in
+    let loss = (Context.get_values !ctx prog.mp_loss.Tensor.value).(0) in
+    let z = Outliers.update detector loss in
+    let outlier = Float.(z > mp_outlier_threshold) in
+    if finite && not outlier then ctx := Context.run !ctx prog.sgd_routine;
+    ctx := MP.Loss_scaler.update prog.scaler !ctx ~grads_finite:finite;
+    steps :=
+      (step, { loss; z; finite; outlier; scale = MP.Loss_scaler.scale_value prog.scaler }) :: !steps
+  done;
+  let progress =
+    {
+      Checkpoint.step = until;
+      epoch = 0;
+      position = 0;
+      host_rng = None;
+      extra =
+        [
+          (scaler_key, MP.Loss_scaler.save_state prog.scaler);
+          (detector_key, Outliers.save_state detector);
+        ];
+    }
+  in
+  (!ctx, progress, List.rev !steps)
+
+let mp_fingerprint ctx prog steps =
+  List.map prog.mp_params ~f:(fun tn ->
+      "param " ^ Int.to_string tn.Tn.id ^ " "
+      ^ String.concat_array ~sep:"," (Array.map (Context.get_values ctx tn) ~f:bits))
+  @ List.map steps ~f:(fun (i, s) -> show_step i s)
+
+let extra_exn (progress : Checkpoint.progress) key =
+  Option.value_exn ~here:[%here] (List.Assoc.find progress.extra key ~equal:String.equal)
+
+(* The resumed half: rebuild, restore the device state, then the scaler's and the detector's. *)
+let mp_resume ?(restore_scaler = true) ?(restore_detector = true) path =
+  let prog = build_mp () in
+  let ctx, progress = Checkpoint.restore ~ctx:prog.mp_ctx prog.mp_state path in
+  let ctx =
+    if restore_scaler then
+      MP.Loss_scaler.restore_state prog.scaler ctx (extra_exn progress scaler_key)
+    else ctx
+  in
+  let detector = Outliers.create ~window_size:mp_window () in
+  if restore_detector then Outliers.restore_state detector (extra_exn progress detector_key);
+  let ctx, _, steps =
+    mp_run_steps { prog with mp_ctx = ctx } detector progress ~until:mp_total_steps
+  in
+  mp_fingerprint ctx prog steps
+
+let mp_child path = List.iter (mp_resume path) ~f:print_endline
+
+let mp_parent () =
+  let open Verdict.Claims in
+  let path = Stdlib.Filename.temp_file "ocannl-resume-mp-" ".ckpt" in
+  Exn.protect
+    ~finally:(fun () -> try Stdlib.Sys.remove path with Sys_error _ -> ())
+    ~f:(fun () ->
+      let prog = build_mp () in
+      let detector = Outliers.create ~window_size:mp_window () in
+      let ctx, _, steps = mp_run_steps prog detector (start ()) ~until:mp_total_steps in
+      let uninterrupted = mp_fingerprint ctx prog steps in
+      List.iter steps ~f:(fun (i, s) ->
+          eprintf "(not part of the golden) mixed-precision %s (z %g, loss %g)\n" (show_step i s)
+            s.z s.loss);
+      let n_params = List.length prog.mp_params in
+      let resumed_part = List.filter steps ~f:(fun (i, _) -> i >= mp_stop_step) in
+      (* Non-vacuity: the state the resume must carry decides something after it. *)
+      p_exists "the mixed-precision run backs the scale off after the stop step" resumed_part
+        ~f:(fun (_, s) -> not s.finite);
+      p_exists "the mixed-precision run skips an outlier step after the stop step" resumed_part
+        ~f:(fun (_, s) -> s.outlier);
+      p_exists "the mixed-precision run takes an optimizer step after the stop step" resumed_part
+        ~f:(fun (_, s) -> s.finite && not s.outlier);
+      p_all "the mixed-precision run's losses are finite" steps ~f:(fun (_, s) ->
+          Float.is_finite s.loss);
+      p_all "the mixed-precision masters stay single" prog.mp_params ~f:(fun tn ->
+          Ir.Ops.equal_prec (Lazy.force tn.Tn.storage_prec) Ir.Ops.single);
+      (* The interrupted run. *)
+      let prog = build_mp () in
+      let detector = Outliers.create ~window_size:mp_window () in
+      let ctx, progress, _ = mp_run_steps prog detector (start ()) ~until:mp_stop_step in
+      Checkpoint.save ~ctx ~progress prog.mp_state path;
+      let ((status, out, _) as result) = Fresh_process.run [ "resume-mp"; path ] in
+      let child_ok = Poly.equal status (Unix.WEXITED 0) in
+      if not child_ok then Fresh_process.report ~label:"mixed-precision resume child" result;
+      let resumed = String.split_lines out in
+      let expected =
+        List.take uninterrupted n_params @ List.drop uninterrupted (n_params + mp_stop_step)
+      in
+      let same_run = child_ok && List.equal String.equal resumed expected in
+      p
+        "the resumed mixed-precision run's losses, z-scores, skips and scales equal the \
+         uninterrupted run's, bit for bit"
+        same_run;
+      p
+        "the resumed mixed-precision run's final master weights equal the uninterrupted run's, bit \
+         for bit"
+        (child_ok && List.equal String.equal (params_only resumed) (params_only uninterrupted));
+      if child_ok && not same_run then (
+        List.iter resumed ~f:(eprintf "resumed (fresh process): %s\n");
+        List.iter expected ~f:(eprintf "uninterrupted: %s\n"));
+      (* Controls: each helper's host state matters to the bit-for-bit claim. *)
+      p "a resume re-creating the loss scaler ends on other master weights"
+        (not
+           (List.equal String.equal
+              (params_only (mp_resume ~restore_scaler:false path))
+              (params_only uninterrupted)));
+      p "a resume re-creating the outlier detector ends on other master weights"
+        (not
+           (List.equal String.equal
+              (params_only (mp_resume ~restore_detector:false path))
+              (params_only uninterrupted)));
+      (* Refusals: the schedule belongs to the program. *)
+      let _, saved = Checkpoint.restore ~ctx:prog.mp_ctx prog.mp_state path in
+      let prog = build_mp () in
+      let other_scaler =
+        MP.Loss_scaler.create ~init_scale:mp_init_scale ~growth_interval:(mp_growth_interval + 1) ()
+      in
+      p "restoring the scaler's state into one with another growth interval is refused, naming both"
+        (raises_failure
+           ~substring:("saved under growth_interval " ^ Int.to_string mp_growth_interval)
+           ~also:("created with " ^ Int.to_string (mp_growth_interval + 1))
+           (fun () ->
+             MP.Loss_scaler.restore_state other_scaler prog.mp_ctx (extra_exn saved scaler_key)));
+      let other_detector = Outliers.create ~window_size:(mp_window + 1) () in
+      p "restoring the detector's state into one over another window is refused, naming both"
+        (raises_failure
+           ~substring:("window of " ^ Int.to_string mp_window ^ " samples")
+           ~also:("window holds " ^ Int.to_string (mp_window + 1))
+           (fun () -> Outliers.restore_state other_detector (extra_exn saved detector_key))))
+
+let () =
+  match Stdlib.Sys.argv with
+  | [| _; "resume"; path |] -> child path
+  | [| _; "resume-mp"; path |] -> mp_child path
+  | _ ->
+      parent ();
+      mp_parent ()

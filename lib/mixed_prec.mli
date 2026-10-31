@@ -100,6 +100,23 @@ module Loss_scaler : sig
       from the credited count and keeps the remainder (growing once per full interval contained in
       it), so the average growth cadence matches the per-step schedule even when the sampling
       interval does not divide [growth_interval]. *)
+
+  val save_state : t -> string
+  (** The scaler's host state -- the current scale, the good-step count toward the next growth, and
+      the schedule's parameters, floats in exact hexadecimal -- as one line, for a resumable
+      checkpoint to carry in [Checkpoint.progress]'s [extra] under a key of the loop's choosing
+      (gh-ocannl-1726). The device copies of the scale are inputs the routines only read, so
+      [Checkpoint.training_state] does not hold them, and a scaler re-created at a resume would
+      restart from [init_scale] with no good steps: the resumed run would skip and grow on other
+      steps than the saved one. *)
+
+  val restore_state : t -> Context.t -> string -> Context.t
+  (** [restore_state t ctx s] puts the state {!save_state} encoded in [s] back into [t], a scaler
+      created afresh by the resumed program, and writes the restored scale (and its reciprocal) to
+      the device tensors, as {!set_scale} does. Raises [Failure] when [s] is not such an encoding,
+      or was saved under other [growth_factor], [backoff_factor] or [growth_interval] values than
+      [t]'s (naming both): the schedule belongs to the program, and adopting or overriding it
+      silently would not continue the saved run. *)
 end
 
 val scaled_grad_update :
