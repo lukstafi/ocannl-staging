@@ -22,7 +22,18 @@
    single compiles to the plan's segment count, a single swapped alone differs from the plan in at
    most its key's segments, and the singles over the search's own segmentation are not seeded. Then
    the sweep: the 9 ms single joins the running seeded composite, every single of a later key
-   carries it as its staff, and the search crowns it. Elsewhere those claims are skipped. *)
+   carries it as its staff, and the search crowns it. Elsewhere those claims are skipped.
+
+   gh-ocannl-1697 adds the split singles and the hopeless cut. Structurally, on every backend: a
+   site's other choice ({!Autotune.seeded_resplit}: another block count, unsplit, or split where the
+   plan leaves it whole) re-derives a plan other than the plan, deciding every segment code the plan
+   decides as the plan does, and the plan's own split re-derives the plan. On CUDA/HIP, two more
+   scripted searches -- the split singles timed as [F_resplit] before the segment singles and none
+   around presets; a faster one joining, after which every seeded single names the plan it
+   re-derived -- and two on a scripted clock: with the cut at its default (off), every seeded single
+   takes its whole window; with {!Autotune.seeded_hopeless_cut} on, a seeded single over
+   {!Autotune.seeded_hopeless_ratio} times the plan is cut after three samples and one under it
+   takes its whole window. *)
 
 open Base
 open Ocannl
@@ -179,7 +190,86 @@ let () =
           String.is_prefix label ~prefix:"F_swap["
           && String.is_substring label
                ~substring:("; plan " ^ String.prefix (Autotune.seeded_plan_digest plan) 8 ^ "]")
-          && not (String.is_prefix label ~prefix:"F_seeded"))
+          && not (String.is_prefix label ~prefix:"F_seeded"));
+      (* gh-ocannl-1697: the seeded split singles -- the plan re-derived by its own rule over a
+         split with one site's choice changed. *)
+      let plan_digest = Autotune.seeded_plan_digest plan in
+      let resplit ?memo split = Autotune.seeded_resplit ?memo plan split (scratch opt) in
+      let digest_of = Option.map ~f:Autotune.seeded_plan_digest in
+      p "re-deriving the plan with its own split reproduces it"
+        (Option.equal String.equal (digest_of (resplit plan.sp_split)) (Some plan_digest));
+      let same = Autotune.same_split_site in
+      let sites = Autotune.split_reduce_sites ~static_indices (scratch opt) in
+      p_exists "the plan splits a site of the fixture" plan.sp_split ~f:(fun (t, _) ->
+          List.exists sites ~f:(same t));
+      (* Every site at every other choice of the menu: a block count, or unsplit. *)
+      let alternatives =
+        List.concat_map sites ~f:(fun site ->
+            let current =
+              List.find_map plan.sp_split ~f:(fun (t, b) -> if same t site then Some b else None)
+            in
+            List.filter_map
+              (None :: List.map [ 32; 128; 512 ] ~f:Option.some)
+              ~f:(fun blocks ->
+                if
+                  Option.equal Int.equal blocks current
+                  || Option.exists blocks ~f:(fun b -> 2 * b > site.Autotune.sr_red)
+                then None
+                else
+                  let split =
+                    List.filter_map plan.sp_split ~f:(fun ((t, _) as entry) ->
+                        if same t site then Option.map blocks ~f:(fun b -> (t, b)) else Some entry)
+                    @
+                    match (current, blocks) with
+                    | None, Some b -> [ (site, b) ]
+                    | Some _, _ | None, None -> []
+                  in
+                  Some (site, blocks, split, resplit split)))
+      in
+      p_exists "some site's other choice unsplits a site the plan splits" alternatives
+        ~f:(fun (site, blocks, _, _) ->
+          Option.is_none blocks && List.exists plan.sp_split ~f:(fun (t, _) -> same t site));
+      p_all "every other choice of a site re-derives a plan other than the plan" alternatives
+        ~f:(fun (_, _, _, derived) ->
+          Option.exists (digest_of derived) ~f:(fun d -> not (String.equal d plan_digest)));
+      (* The decisions a plan records on segment codes, by digest. *)
+      let recorded (pl : Autotune.seeded_plan) =
+        match pl.sp_segments with
+        | None -> []
+        | Some (_, ds) ->
+            List.filter_map ds ~f:(fun d -> Option.map (decision_digest d) ~f:(fun g -> (g, d)))
+      in
+      let shared derived =
+        List.filter (recorded derived) ~f:(fun (g, _) ->
+            List.exists (recorded plan) ~f:(fun (g', _) -> String.equal g g'))
+      in
+      p_all "a re-derived plan decides every segment code the plan decides as the plan does"
+        alternatives ~f:(fun (_, _, _, derived) ->
+          match derived with
+          | None -> false
+          | Some derived ->
+              List.for_all (shared derived) ~f:(fun (g, d) ->
+                  List.for_all (recorded plan) ~f:(fun (g', d') ->
+                      (not (String.equal g g')) || Poly.equal d d')));
+      p_exists "... and some re-derived plan shares a decided segment code with the plan"
+        alternatives ~f:(fun (_, _, _, derived) ->
+          Option.exists derived ~f:(fun d -> not (List.is_empty (shared d))));
+      let memo = Autotune.seeded_memo () in
+      let memoized =
+        Autotune.seeded_plan ~memo ~min_reduction:1 ~facts:Ir.Backend_intf.cuda_facts ~limits
+          ~accum_prec:Fn.id ~static_indices opt
+      in
+      p "a memo shared with the plan's derivation changes no derivation of the plan"
+        (Option.equal String.equal (digest_of memoized) (Some plan_digest));
+      p_all "... nor of a split single" alternatives ~f:(fun (_, _, split, derived) ->
+          Option.equal String.equal (digest_of (resplit ~memo split)) (digest_of derived));
+      p_all "a seeded split single's label names the plan, and reads as no plan or segment single"
+        alternatives ~f:(fun (site, blocks, _, _) ->
+          let label = Autotune.seeded_resplit_label ~from:plan_digest site blocks in
+          String.is_prefix label ~prefix:"F_resplit["
+          && String.is_substring label ~substring:("; plan " ^ String.prefix plan_digest 8 ^ "]")
+          && (not (String.is_prefix label ~prefix:"F_seeded"))
+          && not (String.is_prefix label ~prefix:"F_swap["))
   | Some { sp_segments = None; _ } | None ->
       p "a plan derived for cuda has a segmentation of its own" false
 
@@ -317,3 +407,226 @@ let () =
       (* The fixture keys at least two segments, so some key is swept after the join. *)
       p_all "every later key's single carries the joined single as its staff" later
         ~f:(fun (label, _, _) -> Option.equal String.equal (snd (focus_and_staff label)) joined))
+
+(* === gh-ocannl-1697: the seeded split singles, and the seeded singles' hopeless cut. === *)
+
+let is_resplit label = String.is_prefix label ~prefix:"F_resplit["
+let is_seeded_single label = is_resplit label || is_swap label
+
+(* The plan prefix a label names: [...; plan <prefix>]] for a seeded single, [..., plan <prefix>]]
+   for the plan itself. *)
+let plan_named label =
+  Option.map
+    (List.last (String.substr_index_all label ~may_overlap:false ~pattern:" plan "))
+    ~f:(fun i ->
+      String.chop_suffix_if_exists ~suffix:"]"
+        (String.drop_prefix label (i + String.length " plan ")))
+
+(* A scripted search of the fixture as the first one, under [measure], with its report, its record
+   and the labels of the timing calls that returned, in order. *)
+let scripted_search measure =
+  let latest = ref None and timed = ref [] in
+  let report = ref None in
+  let _routine, record =
+    Autotune.Seam.with_value Autotune.on_candidate_attempt (fun label -> latest := Some label)
+    @@ fun () ->
+    Autotune.with_timing_call_observer (fun (_ : Autotune.timing_call) ->
+        Option.iter !latest ~f:(fun label -> timed := label :: !timed))
+    @@ fun () ->
+    Scripted_search.scripted
+      ~settings:[ ("autotune_finals_margin", "0") ]
+      ~measure
+      (fun () ->
+        Autotune.tune ~search:true ~beam_width:2 ~rounds:0 ~repeats:1 ~seed_block_sizes:[]
+          ~cache_dir:"" ~log:false
+          ~report:(fun r -> report := Some r)
+          (Context.auto ()) comp Ir.Indexing.Empty)
+  in
+  (Option.value_exn ~here:[%here] !report, record, List.rev !timed)
+
+(* The searches' leg: open where the untuned compile seeds. One claim per label, written once
+   (gh-ocannl-1703): evaluated there over the search, skipped elsewhere. *)
+let seeded_leg = Verdict.leg ~when_:seeds_here ~on:backend_name ()
+
+let claim searched label f =
+  in_leg ~leg:seeded_leg label (fun label ->
+      match searched with None -> p label false | Some s -> f label s)
+
+let seeded_plan_named (record : Scripted_search.record) =
+  List.find_map record.attempts ~f:(fun l -> if is_seeded l then plan_named l else None)
+
+(* Every split single slower than the plan: none joins, and the segment singles swap into the plan
+   itself. *)
+let () =
+  let measure (w : Scripted_search.window) =
+    if is_seeded w.label then 10.
+    else if is_seeded_single w.label then 11. +. (Float.of_int w.ordinal /. 1000.)
+    else 50. +. (Float.of_int w.ordinal /. 1000.)
+  in
+  let searched = if seeds_here then Some (scripted_search measure) else None in
+  Option.iter searched ~f:(fun ((r : Autotune.report), _, _) ->
+      Stdio.eprintf
+        "split search (not part of the golden): %d seeded split singles proposed, %d timed, %d \
+         joined; %d split-reduce singles\n\
+         %!"
+        r.seeded_split_candidates r.seeded_split_timed r.seeded_split_joins
+        r.split_reduce_candidates);
+  let claim = claim searched in
+  claim "the search seeds seeded split singles, and no split single around presets"
+    (fun label (r, _, _) ->
+      p label (r.Autotune.seeded_split_candidates > 0 && r.split_reduce_candidates = 0));
+  claim "no window is a split single around presets" (fun label (_, record, _) ->
+      p_none label record.Scripted_search.windows ~f:(fun (w, _) ->
+          String.is_prefix w.label ~prefix:"F_split["));
+  claim "the report counts every seeded split single's window" (fun label (r, record, timed) ->
+      let windows =
+        List.count record.Scripted_search.windows ~f:(fun (w, _) -> is_resplit w.label)
+      in
+      let calls = List.count timed ~f:is_resplit in
+      p label (r.Autotune.seeded_split_timed = calls && calls >= windows && windows > 0));
+  claim "every seeded split single is attempted before every seeded segment single"
+    (fun label (_, record, _) ->
+      let seeded = List.filter record.Scripted_search.attempts ~f:is_seeded_single in
+      let first_swap = List.findi seeded ~f:(fun _ l -> is_swap l) in
+      p_alli label (List.filter seeded ~f:is_resplit) ~f:(fun i _ ->
+          Option.exists first_swap ~f:(fun (j, _) -> i < j)));
+  claim "with no split joined, every seeded single names the plan" (fun label (_, record, _) ->
+      let plan = seeded_plan_named record in
+      p_all label (List.filter record.Scripted_search.attempts ~f:is_seeded_single) ~f:(fun l ->
+          Option.is_some plan && Option.equal String.equal (plan_named l) plan));
+  claim "with no split joined, the search crowns the plan" (fun label (r, _, _) ->
+      p label
+        (r.Autotune.seeded_split_joins = 0 && is_seeded r.best_label && Float.equal r.best_ms 10.))
+
+(* The first split single faster than the plan: it joins, and every later seeded single changes the
+   plan it re-derived. *)
+let () =
+  let first = ref None in
+  let measure (w : Scripted_search.window) =
+    if is_seeded w.label then 10.
+    else if is_resplit w.label && Option.is_none !first then (
+      first := Some w.label;
+      9.)
+    else if is_seeded_single w.label then 11. +. (Float.of_int w.ordinal /. 1000.)
+    else 50. +. (Float.of_int w.ordinal /. 1000.)
+  in
+  let searched = if seeds_here then Some (scripted_search measure) else None in
+  let claim = claim searched in
+  (* What a split single's label names as its site: the target and the split loop, the first two
+     words after the bracket. *)
+  let site_of label =
+    String.chop_prefix label ~prefix:"F_resplit["
+    |> Option.map ~f:(fun body -> List.take (String.split body ~on:' ') 2)
+  in
+  (* The seeded singles after the joined site's sweep: the later sites' split singles and every
+     segment single. The joined site's other choices were timed against the plan it changed. *)
+  let after_join (record : Scripted_search.record) =
+    let joined = Option.bind !first ~f:site_of in
+    List.drop_while record.attempts ~f:(fun l -> not (Option.exists !first ~f:(String.equal l)))
+    |> List.filter ~f:(fun l ->
+        is_swap l
+        || (is_resplit l && not (Option.equal (List.equal String.equal) (site_of l) joined)))
+  in
+  claim "the faster split single joined the running seeded plan and was crowned"
+    (fun label (r, _, _) ->
+      p label
+        (r.Autotune.seeded_split_joins = 1
+        && Option.exists !first ~f:(String.equal r.best_label)
+        && Float.equal r.best_ms 9.));
+  claim "every seeded single after the join names a plan other than the seeded plan"
+    (fun label (_, record, _) ->
+      let plan = seeded_plan_named record in
+      p_all label (after_join record) ~f:(fun l ->
+          Option.is_some (plan_named l) && not (Option.equal String.equal (plan_named l) plan)));
+  claim "a segment single is attempted after the join" (fun label (_, record, _) ->
+      p_exists label (after_join record) ~f:is_swap)
+
+(* The hopeless cut ([Autotune.seeded_hopeless_cut] on), on a scripted clock: every window physical,
+   so the cut is live. The plan reads 10 ms; the seeded singles alternate between 12 ms, over 1.05
+   times the plan (the running composite, and with the finals off the beam's head: the reference),
+   and 10.4 ms, under it; every other candidate reads 50 ms. Nothing beats the plan, so the
+   reference stays 10 ms. *)
+let () =
+  let cut_ms = 12. and near_ms = 10.4 in
+  (* Each attempt, newest first: its label, and once a batch is timed, its reading and batches. *)
+  let attempts = ref [] and cycled = ref 0 in
+  let clock ~depth ~ordinal:_ _wall =
+    match !attempts with
+    | (label, reads) :: rest ->
+        let ms =
+          match reads with
+          | Some (ms, _) -> ms
+          | None ->
+              if is_seeded label then 10.
+              else if is_seeded_single label then (
+                Int.incr cycled;
+                if !cycled % 2 = 1 then cut_ms else near_ms)
+              else 50.
+        in
+        attempts :=
+          (label, Some (ms, Option.value_map reads ~default:1 ~f:(fun (_, n) -> n + 1))) :: rest;
+        ms *. Float.of_int depth
+    | [] -> 10. *. Float.of_int depth
+  in
+  let search ~cut =
+    attempts := [];
+    cycled := 0;
+    let report = ref None in
+    let _ctx, _routine =
+      Autotune.Seam.with_value Autotune.seeded_hopeless_cut cut @@ fun () ->
+      Autotune.Seam.with_value Autotune.on_candidate_attempt (fun label ->
+          attempts := (label, None) :: !attempts)
+      @@ fun () ->
+      Autotune.Seam.with_value Autotune.on_batch_wall clock @@ fun () ->
+      Scripted_search.with_settings [ ("autotune_finals_margin", "0") ] @@ fun () ->
+      Autotune.tune ~search:true ~beam_width:2 ~rounds:0 ~repeats:1 ~seed_block_sizes:[]
+        ~timing:Autotune.Isolated ~cache_dir:"" ~log:false
+        ~report:(fun r -> report := Some r)
+        (Context.auto ()) comp Ir.Indexing.Empty
+    in
+    let windows =
+      List.rev !attempts
+      |> List.filter_map ~f:(fun (label, reads) ->
+          match reads with
+          | Some (ms, batches) when is_seeded_single label -> Some (label, ms, batches)
+          | Some _ | None -> None)
+    in
+    (Option.value_exn ~here:[%here] !report, windows)
+  in
+  (* The cut is off by default (gh-ocannl-1697: its ratio lost tuned step p50 on gpt2_mini/HIP): the
+     same clock with the seam at its default cuts nothing. *)
+  let uncut = if seeds_here then Some (search ~cut:false) else None in
+  claim uncut "with the seeded cut at its default, every seeded single takes its whole window"
+    (fun label (r, windows) ->
+      p_all label windows ~f:(fun (_, _, batches) ->
+          batches >= 16 && r.Autotune.seeded_hopeless = 0));
+  let searched = if seeds_here then Some (search ~cut:true) else None in
+  Option.iter searched ~f:(fun ((r : Autotune.report), windows) ->
+      List.iter windows ~f:(fun (label, ms, batches) ->
+          Stdio.eprintf "hopeless search (not part of the golden): %s reads %g ms, %d batches\n%!"
+            label ms batches);
+      Stdio.eprintf
+        "hopeless search (not part of the golden): %d seeded windows cut, %d cut in all, best %g ms\n\
+         %!"
+        r.seeded_hopeless r.timings_hopeless r.best_ms);
+  let claim = claim searched in
+  let reading ms windows = List.filter windows ~f:(fun (_, m, _) -> Float.equal m ms) in
+  claim "a seeded single over 1.05 times the plan is cut after three samples"
+    (fun label (_, windows) ->
+      p_all label (reading cut_ms windows) ~f:(fun (_, _, batches) ->
+          batches = Autotune.hopeless_min_samples));
+  claim "a split single is among the cut" (fun label (_, windows) ->
+      p_exists label (reading cut_ms windows) ~f:(fun (l, _, _) -> is_resplit l));
+  claim "a segment single is among the cut" (fun label (_, windows) ->
+      p_exists label (reading cut_ms windows) ~f:(fun (l, _, _) -> is_swap l));
+  claim "a seeded single under 1.05 times the plan takes its whole window"
+    (fun label (_, windows) ->
+      p_all label (reading near_ms windows) ~f:(fun (_, _, batches) -> batches >= 16));
+  claim "a segment single takes its whole window" (fun label (_, windows) ->
+      p_exists label (reading near_ms windows) ~f:(fun (l, _, _) -> is_swap l));
+  claim "the report counts the cut seeded windows, and the search crowns the plan"
+    (fun label (r, windows) ->
+      let cut = List.count windows ~f:(fun (_, _, batches) -> batches < 16) in
+      p label
+        (r.Autotune.seeded_hopeless = cut && r.timings_hopeless >= cut && is_seeded r.best_label
+       && Float.equal r.best_ms 10.))

@@ -1119,7 +1119,9 @@ files.
   its head with `rounds = 0`, its slowest entry once full otherwise) and round candidates (against
   the round's slowest once full) are cut; singles, composites, playoff alternates and floors never.
   On that probe the sound cut reaches the ~9 slow `F_preset` seeds (~3 s each of 556 s timing), not
-  the 166 singles: their cost is the 16-sample floor plus the depth-2 probe, a different lever.
+  the 166 singles: their cost is the 16-sample floor plus the depth-2 probe, a different lever. The
+  seeded singles that replaced them read on the plan's basis; a cut at a ratio of their own exists,
+  off (gh-ocannl-1697, the seeded-singles bullet under placement flips and search depth).
   Nothing is cut under a scripted `on_candidate_measured` (the physical window says nothing about
   a scripted rank). `autotune_hopeless_window` drives it with `on_batch_wall`.
 - **CUDA/HIP singles at twice the batch target or more take no depth-2 probe** (gh-ocannl-1627,
@@ -1943,8 +1945,26 @@ files.
   running composite whole. The plan's refused window is retried BEFORE the sweep, since the sweep's
   incumbent is its reading. With it on, the coarse and fine singles (bare or staffed), the coarse
   and fine recombination composites and the playoff do not run: `fiss_sketch_candidates = 0`, and
-  the report's `seeded_single_*` fields count the sweep. The split-reduce singles are unchanged
-  (still around presets). `test/operations/autotune_seeded_singles` pins the menu and the swap
+  the report's `seeded_single_*` fields count the sweep. The split-reduce singles are the plan's own
+  too (gh-ocannl-1697): `F_resplit`, the running plan re-derived by its own rule over the split with
+  one site's choice changed (`Autotune.seeded_resplit`: another block count, unsplit, or split where
+  the plan leaves it whole), swept site by site BEFORE the segment sweep, since a joined split re-cuts
+  the segments that sweep's keys address (its menu is enumerated on the plan the split sweep leaves).
+  Re-derivation, not a replay of the plan's segmentation with one prelude changed: the replay cannot
+  take a new or removed site (the unit count changes) and would leave the site's own segments on
+  presets; one `seeded_memo` shared with the plan's derivation keeps it to the segmentations and the
+  changed segments. `seeded_split_*` count it. Measured on minix (gfx1151, **unified**,
+  gpt2_mini_train b8, 600 s call budget, cold, 4 rounds of `bin_cells.py --arm-exe`): the split
+  sweep alone held the tuned step p50 (paired ratio 0.988, faster than base in 3 of 4) at about 25
+  fewer singles per budget (443-447 against 469-472), each split single costing ~1.3-1.6 s with
+  its re-derivation. A hopeless cut for seeded singles exists behind `Autotune.seeded_hopeless_cut`,
+  a test seam, OFF: at `seeded_hopeless_ratio` (1.05, against the running composite or the beam's
+  bar where higher; rounds 0: the head over `autotune_finals_margin`, capped by a full beam's
+  slowest) it ended ~23% of windows and bought 477-499 singles per budget, but its arm lost to base
+  in 5 of 6 pairs (median ratio 1.009 over 4). gh-ocannl-1527's 4x would cut none of them: the
+  median single reads 1.035x the running best, the slowest 1.6x. The 1.05 ratio is the suspect; a
+  looser one needs its own A/B before the seam becomes a default.
+  `test/operations/autotune_seeded_singles` pins the menu and the swap
   structurally on every backend (a plan derived for "cuda" on synthetic limits) and the timing
   basis on CUDA/HIP from the windows' digests (segment counts equal to the plan's, a bare single
   differing in at most its key's units).

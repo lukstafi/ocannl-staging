@@ -419,6 +419,10 @@ type report = {
   seeded_single_timed : int;
   seeded_single_joins : int;
   seeded_single_fallbacks : int;
+  seeded_split_candidates : int;
+  seeded_split_timed : int;
+  seeded_split_joins : int;
+  seeded_hopeless : int;
   split_reduce_candidates : int;
   split_reduce_timed : int;
   split_reduce_composite_eligible : bool;
@@ -557,6 +561,10 @@ let no_search_report ~timing =
     seeded_single_timed = 0;
     seeded_single_joins = 0;
     seeded_single_fallbacks = 0;
+    seeded_split_candidates = 0;
+    seeded_split_timed = 0;
+    seeded_split_joins = 0;
+    seeded_hopeless = 0;
     split_reduce_candidates = 0;
     split_reduce_timed = 0;
     split_reduce_composite_eligible = false;
@@ -970,14 +978,27 @@ let sample_min ~repeats ~sample = window_result (sample_window ~repeats ~sample 
 let hopeless_ratio = 4.
 let hopeless_min_samples = 3
 
-let hopeless_window ?(at_least_ms = 0.) ~reference_ms samples =
+(* gh-ocannl-1697: the ratio a seeded single's window is cut at. A seeded single is the seeded plan
+   with one choice swapped, so its reading is the running composite's give or take one segment's
+   difference, and the reference it is cut against is the composite itself (or the beam's bar): at
+   {!hopeless_ratio} no window of the gh-ocannl-1664 measurement would have been cut (the slowest of
+   its 605 seeded singles read 1.6x the running best; the median, 1.035x). What rules the cut here
+   is the window's own noise rather than a stall: noise only adds time, and every one of those
+   windows read its median within 2% of its minimum ([spread] at most 1.02), so a full window under
+   the reference needs every one of its first samples more than 5% over a later one -- all of them
+   in a tail the windows' medians never reached. The stated boundary is the one {!hopeless_window}
+   states, at this ratio: a uniform delay of more than 5% over the first samples (a co-tenant, a
+   clock still ramping up) that then leaves. *)
+let seeded_hopeless_ratio = 1.05
+
+let hopeless_window ?(ratio = hopeless_ratio) ?(at_least_ms = 0.) ~reference_ms samples =
   if
     List.length samples < hopeless_min_samples
     || (not (Float.is_finite reference_ms))
     || Float.(reference_ms <= 0.)
   then None
   else
-    let threshold_ms = hopeless_ratio *. reference_ms in
+    let threshold_ms = ratio *. reference_ms in
     let r = window_result samples in
     if
       (not r.dispersed) && Float.is_finite r.ms
@@ -1661,12 +1682,14 @@ let install_compile_observer f =
    returns the wall in milliseconds. Separated from [time_routine] so a test can drive the whole
    policy -- which depth a call settles on, which window it times, how many launches each costs --
    on an injected clock, with no device and no machine-dependent routine (gh-ocannl-1074). *)
-let calibrate_and_time_from ~window_bound_ms ~hopeless_against ~started ~tagged ~on_retry ~on_call
-    ~phase ~retry_contended ~dispersion ~timing ~repeats ~queue_depth_cap ~batch =
-  (* gh-ocannl-1527: the cut of a hopeless window, against the reading the caller ranks it by. *)
+let calibrate_and_time_from ~window_bound_ms ~hopeless_against ~hopeless_ratio:ratio ~started
+    ~tagged ~on_retry ~on_call ~phase ~retry_contended ~dispersion ~timing ~repeats ~queue_depth_cap
+    ~batch =
+  (* gh-ocannl-1527: the cut of a hopeless window, against the reading the caller ranks it by, at
+     the caller's ratio (gh-ocannl-1697). *)
   let hopeless ?at_least_ms () =
     Option.map hopeless_against ~f:(fun reference_ms samples ->
-        hopeless_window ?at_least_ms ~reference_ms samples)
+        hopeless_window ~ratio ?at_least_ms ~reference_ms samples)
   in
   (* gh-ocannl-1666: the admitted early end of a bounded window ({!window_bounded}). *)
   let bounded ?at_least_ms () =
@@ -2244,9 +2267,9 @@ let calibrate_and_time_from ~window_bound_ms ~hopeless_against ~started ~tagged 
    timed from this call's own start, and the dispersion policy it picks by backend. *)
 let calibrate_and_time_with_retry_observer ~hopeless_against ~on_retry ~on_call ~phase
     ~retry_contended ~dispersion ~timing ~repeats ~queue_depth_cap ~batch =
-  calibrate_and_time_from ~window_bound_ms:None ~hopeless_against ~started:(Mtime_clock.counter ())
-    ~tagged:false ~on_retry ~on_call ~phase ~retry_contended ~dispersion ~timing ~repeats
-    ~queue_depth_cap ~batch
+  calibrate_and_time_from ~window_bound_ms:None ~hopeless_against ~hopeless_ratio
+    ~started:(Mtime_clock.counter ()) ~tagged:false ~on_retry ~on_call ~phase ~retry_contended
+    ~dispersion ~timing ~repeats ~queue_depth_cap ~batch
 
 (* Preserve the original all-labelled helper's source interface: an optional observer would not
    erase without adding a positional argument. *)
@@ -2265,7 +2288,8 @@ exception Timing_stopped
 (* [routine.bindings] exposes the routine's live binding refs — restore them after timing (Codex P2
    on PR #103), or the returned winner would stay bound to the tuner's midpoint test values. *)
 let time_routine ?(on_retry = fun () -> ()) ?(on_call = fun _ -> ()) ?(tag_failures = false) ?phase
-    ?(stop = fun () -> false) ?hopeless_against ?window_bound_ms ~timing ~repeats cctx routine =
+    ?(stop = fun () -> false) ?hopeless_against ?(hopeless_ratio = hopeless_ratio) ?window_bound_ms
+    ~timing ~repeats cctx routine =
   let check_stop () = if stop () then raise Timing_stopped in
   (* The call's [setup_ms] runs from here: the pre-dispatch validation, the warmup and the
      calibration. *)
@@ -2314,8 +2338,8 @@ let time_routine ?(on_retry = fun () -> ()) ?(on_call = fun _ -> ()) ?(tag_failu
         Int.incr ordinal;
         wall
       in
-      calibrate_and_time_from ~window_bound_ms ~hopeless_against ~started ~tagged:tag_failures
-        ~on_retry ~on_call ~phase ~timing ~repeats
+      calibrate_and_time_from ~window_bound_ms ~hopeless_against ~hopeless_ratio ~started
+        ~tagged:tag_failures ~on_retry ~on_call ~phase ~timing ~repeats
         ~retry_contended:(retry_contended_window_for_backend (Context.backend_facts cctx))
         ~dispersion:(dispersion_policy_for_backend (Context.backend_facts cctx))
         ~queue_depth_cap:(queue_depth_cap_for_backend (Context.backend_facts cctx))
@@ -2550,6 +2574,17 @@ type sr_site = {
           that interchange is not [Op_legal]. *)
 }
 [@@deriving sexp_of]
+
+(* gh-ocannl-1697: whether two enumerations' sites are one site. By the split loop where it is a
+   loop of the lowering; a coalesced site's [sr_axis] is the merged loop, which each enumeration
+   mints afresh ({!coalesce_reduction_pair}), so it is matched by the pair it merges instead. *)
+let same_split_site a b =
+  Ir.Tnode.equal a.sr_target b.sr_target
+  &&
+  match (a.sr_coalesce, b.sr_coalesce) with
+  | Some (o, i), Some (o', i') -> Idx.equal_symbol o o' && Idx.equal_symbol i i'
+  | None, None -> Idx.equal_symbol a.sr_axis b.sr_axis
+  | Some _, None | None, Some _ -> false
 
 (* Sites with more output cells than this have enough output parallelism that the default presets
    already fill a device; splitting the reduction would only add combine traffic. *)
@@ -3413,13 +3448,30 @@ type seeded_segment =
   | Seeded_sketch of { digest : string; params : sketch_params }
   | Seeded_sunk of { digest : string; swaps : int }
 
+(* gh-ocannl-1697: the per-segment decisions several derivations of one search share -- each
+   distinct segment code's seed and sink, keyed as {!seeded_decisions} keys them. Sound across
+   derivations under one gate, limits and settings, which a search's are: a decision is a function
+   of the segment's code alone. *)
+type seeded_memo = {
+  sm_seed : (string, sketch_params option) Hashtbl.t;
+  sm_sink : (string, int option) Hashtbl.t;
+}
+
+let seeded_memo () =
+  { sm_seed = Hashtbl.create (module String); sm_sink = Hashtbl.create (module String) }
+
 (* gh-ocannl-1138: the plan's per-segment decision rule, for the staffed search's start, which
    applies it to the search's own segments; and a rendering of the gate it reads, which joins the
    search shape when that start is used. Carried in the plan so that the device readings the gate
-   rests on reach [tune] only through it (gh-ocannl-1253's [limits_field_classes]). *)
-type seeded_start = { decide : LL.optimized -> sketch_params option; gate_tag : string }
+   rests on reach [tune] only through it (gh-ocannl-1253's [limits_field_classes]). So is the plan's
+   whole derivation over another split (gh-ocannl-1697, {!seeded_resplit}), for the same reason. *)
+type seeded_start = {
+  decide : LL.optimized -> sketch_params option;
+  gate_tag : string;
+  rederive : seeded_memo -> (sr_site * int) list -> LL.optimized -> seeded_plan option;
+}
 
-type seeded_plan = {
+and seeded_plan = {
   sp_split : (sr_site * int) list;
   sp_segments : (Sched.segmentation * seeded_segment list) option;
   sp_refined : int;
@@ -3504,6 +3556,13 @@ type fiss_flavor =
           candidate is the seeded plan with one segment code's choice changed and its reading is
           directly comparable with the plan's. [entries] is the focus, as an [F_sketch]'s; [staff],
           the other keys' choices the running seeded composite has changed. *)
+  | F_resplit of { from : string; site : sr_site; blocks : int option; plan : seeded_plan }
+      (** A seeded split single (gh-ocannl-1697, with [autotune_seeded_singles]): the running seeded
+          plan, of digest [from], with the split-reduce site [site] at [blocks] blocks ([None]:
+          unsplit), re-derived over the resulting split routine by the plan's own rule
+          ({!seeded_resplit}): [plan]. Compiled as an [F_swap] of [plan] that swaps nothing -- its
+          prelude, then its segments without the fallback -- so it times on the plan's basis, where
+          an [F_split] single timed every segment on its preset. *)
 
 type spec = Whole of whole_flavor | Fiss of fiss_flavor
 
@@ -4055,6 +4114,15 @@ let seeded_swap_label ?(staff = []) (plan : seeded_plan) entries =
     (match staff with [] -> "" | _ -> " | staff " ^ render staff)
     (String.prefix (seeded_plan_digest plan) 8)
 
+(* A seeded split single's label: the site at its new block count ([b0 unsplit] for none), then the
+   plan it changes, by the digest prefix its [F_seeded] label carries. *)
+let seeded_resplit_label ~from site blocks =
+  Printf.sprintf "F_resplit[%s; plan %s]"
+    (match blocks with
+    | Some b -> split_site_label (site, b)
+    | None -> split_site_label (site, 0) ^ " unsplit")
+    (String.prefix from 8)
+
 let spec_label = function
   | Whole (W_saved (s, move)) ->
       let from, extension = move_label move in
@@ -4072,6 +4140,7 @@ let spec_label = function
   | Fiss (F_split { sites; staff }) -> split_sites_label ~staff sites
   | Fiss (F_seeded plan) -> seeded_plan_label plan
   | Fiss (F_swap { plan; entries; staff }) -> seeded_swap_label ~staff plan entries
+  | Fiss (F_resplit { from; site; blocks; _ }) -> seeded_resplit_label ~from site blocks
   | Fiss (F_split_saved (prelude, segs, move)) ->
       let from, extension = move_label move in
       Printf.sprintf "F_split_saved[%d prelude ops, %d segs%s]%s" (List.length prelude)
@@ -4444,6 +4513,11 @@ let compile_candidate_gated ?name ?label ?seen ?(on_privatize_drops = fun _ -> (
                 let saved, _ = SC.to_saved (SC.base_registry canon) sched in
                 (sched, saved)
             | F_swap { plan = { sp_split = []; _ }; _ } -> ([], [])
+            | F_resplit { plan = { sp_split = _ :: _ as sites; _ }; _ } ->
+                let sched = split_reduce_prelude sites in
+                let saved, _ = SC.to_saved (SC.base_registry canon) sched in
+                (sched, saved)
+            | F_resplit { plan = { sp_split = []; _ }; _ } -> ([], [])
             | F_split_saved (psaved, _, _) ->
                 let sched, _ = SC.of_saved canon psaved in
                 (sched, psaved)
@@ -4454,7 +4528,7 @@ let compile_candidate_gated ?name ?label ?seen ?(on_privatize_drops = fun _ -> (
              ({!sketch_replay}). *)
           let replay =
             match flavor with
-            | F_preset _ | F_split _ | F_seeded _ | F_swap _ -> None
+            | F_preset _ | F_split _ | F_seeded _ | F_swap _ | F_resplit _ -> None
             | F_sketch { plan; entries; staff; _ } ->
                 Some
                   (sketch_replay ~static_indices
@@ -4473,7 +4547,7 @@ let compile_candidate_gated ?name ?label ?seen ?(on_privatize_drops = fun _ -> (
                   on_privatize_drops drops;
                   sched)
                 else sched
-            | F_saved _ | F_split_saved _ | F_seeded _ | F_swap _ ->
+            | F_saved _ | F_split_saved _ | F_seeded _ | F_swap _ | F_resplit _ ->
                 [] (* Never consulted: a replay brings its own. *)
             | F_sketch _ | F_split _ -> preset_sched seg
           in
@@ -4501,6 +4575,11 @@ let compile_candidate_gated ?name ?label ?seen ?(on_privatize_drops = fun _ -> (
                   (seeded_replay ~fallback:false ~limits ~accum_prec
                      ~admit_narrow:plan.sp_admit_narrow ~static_indices
                      (seeded_swap plan (entries @ staff)).sp_segments opt)
+            | F_resplit { plan; _ } ->
+                (* gh-ocannl-1697: the re-derived plan's replay, likewise without the fallback. *)
+                fst
+                  (seeded_replay ~fallback:false ~limits ~accum_prec
+                     ~admit_narrow:plan.sp_admit_narrow ~static_indices plan.sp_segments opt)
             | F_preset _ | F_saved _ | F_sketch _ | F_split _ | F_split_saved _ ->
                 (* Match the default pipeline's placements (statement-crossing [Local]s promoted on
                    GPU), so fissioned candidates and the untuned baseline schedule the same code. *)
@@ -6093,8 +6172,8 @@ let seeded_segment_params ~capabilities ~limits ~accum_prec ~admit_narrow ~stati
     (seeded_segment_judgment ~capabilities ~limits ~accum_prec ~admit_narrow ~static_indices ~gate
        ~ranked_below pre)
 
-let seeded_decisions ~capabilities ~limits ~accum_prec ~admit_narrow ~static_indices ~gate
-    ~ranked_below ~sink_enabled (opt : LL.optimized) =
+let seeded_decisions ?memo ?(census = true) ~capabilities ~limits ~accum_prec ~admit_narrow
+    ~static_indices ~gate ~ranked_below ~sink_enabled (opt : LL.optimized) =
   let preset = seeded_preset ~limits in
   let zero_sched tns = Sched.zero_expansion ~limits tns in
   let keep_mapping = Sched.fission_keep_mapping ~is_gpu:true ~limits in
@@ -6103,17 +6182,20 @@ let seeded_decisions ~capabilities ~limits ~accum_prec ~admit_narrow ~static_ind
   in
   (* One decision per distinct segment code — a model's repeated layers decide once. Probed on the
      segment alone: a sketch that does not apply or validate there leaves the segment to the default
-     preset rather than costing the routine its other seeds. *)
-  let decided = Hashtbl.create (module String) in
+     preset rather than costing the routine its other seeds. A search's derivations share its [memo]
+     (gh-ocannl-1697), and only the plan's own prints the census ([census]): a seeded split single's
+     derivation is not the untuned plan. *)
+  let decided = match memo with Some m -> m.sm_seed | None -> Hashtbl.create (module String) in
+  let census_on () = census && log_seeding_enabled () in
   (* Each segment code's census verdict, every kind of segment included (gh-ocannl-1407). Recorded
      as decided and printed once the plan's segmentation is chosen ([census_plan]), so a segment of
      the segmentation the refinement discards prints nothing. *)
   let census_verdicts = Hashtbl.create (module String) in
-  let census ~key verdict =
-    if log_seeding_enabled () then Hashtbl.set census_verdicts ~key:(Lazy.force key) ~data:verdict
+  let census_verdict ~key verdict =
+    if census_on () then Hashtbl.set census_verdicts ~key:(Lazy.force key) ~data:verdict
   in
   let census_plan segments =
-    if log_seeding_enabled () then
+    if census_on () then
       print_seeding_lines
         (List.map segments ~f:(fun (at, _, _, _, pre) ->
              Printf.sprintf "%s where=\"seeded_default segment u%d\" %s" seeding_census_prefix at
@@ -6125,13 +6207,13 @@ let seeded_decisions ~capabilities ~limits ~accum_prec ~admit_narrow ~static_ind
     let key = lazy (digest ~with_placements:false pre ^ "|" ^ digest ~with_placements:true pre) in
     match (kind, gate) with
     | `Zeros, _ ->
-        census ~key "refused: a zero-fill segment, which no sketch seeds";
+        census_verdict ~key "refused: a zero-fill segment, which no sketch seeds";
         None
     | `Solo, _ ->
-        census ~key "refused: a solo segment, which no sketch seeds";
+        census_verdict ~key "refused: a solo segment, which no sketch seeds";
         None
     | `Normal, Min_reduction n when n <= 0 ->
-        census ~key "refused: sketch seeding is off (gpu_default_sketch_min_reduction=0)";
+        census_verdict ~key "refused: sketch seeding is off (gpu_default_sketch_min_reduction=0)";
         None
     | `Normal, _ ->
         Hashtbl.find_or_add decided (Lazy.force key) ~default:(fun () ->
@@ -6139,7 +6221,7 @@ let seeded_decisions ~capabilities ~limits ~accum_prec ~admit_narrow ~static_ind
               seeded_segment_judgment ~capabilities ~limits ~accum_prec ~admit_narrow
                 ~static_indices ~gate ~ranked_below pre
             in
-            census ~key
+            census_verdict ~key
               (match judged with
               | Ok p -> "seeded: " ^ sketch_params_label p
               | Error why -> "refused: " ^ why);
@@ -6201,7 +6283,9 @@ let seeded_decisions ~capabilities ~limits ~accum_prec ~admit_narrow ~static_ind
       in
       census_plan hybrid;
       (* The segments no sketch takes, one decision per distinct segment code like the seeds. *)
-      let sink_decided = Hashtbl.create (module String) in
+      let sink_decided =
+        match memo with Some m -> m.sm_sink | None -> Hashtbl.create (module String)
+      in
       let segments =
         List.map hybrid ~f:(fun (_, k, _, s, pre) ->
             match s with
@@ -6240,11 +6324,11 @@ let seeded_plan_choice (plan : seeded_plan) =
       }
 
 (* The plan on [opt], the routine [split] was applied to. *)
-let seeded_plan_on ~capabilities ~limits ~accum_prec ~admit_narrow ~static_indices ~gate
-    ~ranked_below ~sink_enabled ~split opt =
+let seeded_plan_on ?memo ?census ~capabilities ~limits ~accum_prec ~admit_narrow ~static_indices
+    ~gate ~ranked_below ~sink_enabled ~split opt =
   match
-    seeded_decisions ~capabilities ~limits ~accum_prec ~admit_narrow ~static_indices ~gate
-      ~ranked_below ~sink_enabled opt
+    seeded_decisions ?memo ?census ~capabilities ~limits ~accum_prec ~admit_narrow ~static_indices
+      ~gate ~ranked_below ~sink_enabled opt
   with
   | None ->
       {
@@ -6263,7 +6347,7 @@ let seeded_plan_on ~capabilities ~limits ~accum_prec ~admit_narrow ~static_indic
         sp_admit_narrow = admit_narrow;
       }
 
-let seeded_plan ?min_reduction ?seed_gate ?min_serial ?reduction_sink ?seed_narrow
+let seeded_plan ?min_reduction ?seed_gate ?min_serial ?reduction_sink ?seed_narrow ?memo
     ?(capabilities = Ir.Backend_intf.no_codegen_capabilities) ~facts ~limits ~accum_prec
     ~static_indices (opt : LL.optimized) =
   match
@@ -6278,7 +6362,7 @@ let seeded_plan ?min_reduction ?seed_gate ?min_serial ?reduction_sink ?seed_narr
       let opt, split = seeded_split ~facts ~min_serial ~static_indices (scratch_of opt) in
       let ranked_below = seeded_ranker ~capabilities ~limits ~accum_prec ~static_indices in
       match
-        seeded_plan_on ~capabilities ~limits ~accum_prec ~admit_narrow ~static_indices ~gate
+        seeded_plan_on ?memo ~capabilities ~limits ~accum_prec ~admit_narrow ~static_indices ~gate
           ~ranked_below ~sink_enabled ~split opt
       with
       | { sp_split = []; sp_segments = None; _ } -> None
@@ -6287,18 +6371,45 @@ let seeded_plan ?min_reduction ?seed_gate ?min_serial ?reduction_sink ?seed_narr
              staffed start re-decides on the search's own segments, which the plan digest does not
              cover. *)
           let gate_tag = seed_gate_tag gate in
-          Some
+          (* gh-ocannl-1697: the derivation over another split, under this one's settings, its
+             decisions shared through the search's [memo]; it prints no census (the census is the
+             untuned plan's). *)
+          let rec start =
             {
-              plan with
-              sp_start =
-                Some
-                  {
-                    decide =
-                      seeded_segment_params ~capabilities ~limits ~accum_prec ~admit_narrow
-                        ~static_indices ~gate ~ranked_below;
-                    gate_tag;
-                  };
-            })
+              decide =
+                seeded_segment_params ~capabilities ~limits ~accum_prec ~admit_narrow
+                  ~static_indices ~gate ~ranked_below;
+              gate_tag;
+              rederive =
+                (fun memo split opt ->
+                  match
+                    apply_before_fission ~static_indices (split_reduce_prelude split)
+                      (scratch_of opt)
+                  with
+                  | exception Outcome.Cause_at _ -> None
+                  | split_opt ->
+                      Some
+                        {
+                          (seeded_plan_on ~memo ~census:false ~capabilities ~limits ~accum_prec
+                             ~admit_narrow ~static_indices ~gate ~ranked_below ~sink_enabled ~split
+                             split_opt)
+                          with
+                          sp_start = Some start;
+                        });
+            }
+          in
+          Some { plan with sp_start = Some start })
+
+(* gh-ocannl-1697: [plan] re-derived with [split] for its split prelude: the prelude applied to a
+   hermetic copy of [opt] (the lowering [plan] was derived on), then the plan's own decision rule
+   over the split routine, as {!seeded_plan} derived it -- its rule is the plan's [sp_start] -- so a
+   seeded split single is the plan with one site's choice changed, every segment the change leaves
+   alone decided as the plan decided it (by the same rule on the same code, which [memo] shares
+   rather than probing again). [None] for a plan without a rule, or where the prelude does not
+   apply. *)
+let seeded_resplit ?memo (plan : seeded_plan) split (opt : LL.optimized) =
+  Option.bind plan.sp_start ~f:(fun start ->
+      start.rederive (Option.value_or_thunk memo ~default:seeded_memo) split opt)
 
 (* The seeded pipeline on [opt] (mutated as a compile's transform input is): the splits, the plan
    decided on the split routine, its replay. Shared by the untuned compile's transform and by
@@ -7389,6 +7500,12 @@ let on_staffed_start :
    readings its [auto] gate consults are fixed per process. Not a production seam: default the
    identity, and no config key selects it. *)
 let on_seeded_plan : (seeded_plan option -> seeded_plan option) Seam.t = Seam.make Fn.id
+
+(* gh-ocannl-1697: whether a seeded single's window is cut as hopeless ({!seeded_hopeless_ratio}).
+   Off: on gpt2_mini_train/HIP the cut bought 7-12% more seeded singles per budget, but its arm's
+   tuned step p50 lost to the base in 5 of 6 pairs while the split sweep alone lost in none, and the
+   1.05 ratio is the suspect. A seam, not a key, until a measured ratio earns a default. *)
+let seeded_hopeless_cut : bool Seam.t = Seam.make false
 let search_setting () = Utils.registered_flag ~arg_name:"autotune_search"
 
 (* The schedule cache directory a tuning call uses, or [""] for none. Whether the directory was
@@ -8221,13 +8338,17 @@ let tune_in_stream_scope ~timing_state ~defer ~substituted ?name ?search ?beam_w
        trajectory recorded before the seed joined the identity -- one whose first step may have been
        a seed -- matches a search without one. Lazy: a warm hit whose entry carries no record never
        derives it. *)
+    (* gh-ocannl-1697: the per-segment decisions every derivation of the search's seeded plans shares
+       -- the plan's own, then each seeded split single's ({!seeded_resplit}). *)
+    let seeded_memo_v = seeded_memo () in
     let seeded_plan_value =
       lazy
         (Seam.get on_seeded_plan
            (Option.bind !base_pristine ~f:(fun opt ->
                 let t0 = Unix.gettimeofday () in
                 let plan =
-                  seeded_plan ~capabilities ~facts ~limits ~accum_prec ~static_indices opt
+                  seeded_plan ~memo:seeded_memo_v ~capabilities ~facts ~limits ~accum_prec
+                    ~static_indices opt
                 in
                 logf "seeded untuned plan derived in %.3f s: %s"
                   (Unix.gettimeofday () -. t0)
@@ -8740,6 +8861,10 @@ let tune_in_stream_scope ~timing_state ~defer ~substituted ?name ?search ?beam_w
                     seeded_single_timed = 0;
                     seeded_single_joins = 0;
                     seeded_single_fallbacks = 0;
+                    seeded_split_candidates = 0;
+                    seeded_split_timed = 0;
+                    seeded_split_joins = 0;
+                    seeded_hopeless = 0;
                     split_reduce_candidates = 0;
                     split_reduce_timed = 0;
                     split_reduce_composite_eligible = false;
@@ -9227,6 +9352,10 @@ let tune_in_stream_scope ~timing_state ~defer ~substituted ?name ?search ?beam_w
         and n_seeded_single_timed = ref 0
         and n_seeded_single_joins = ref 0
         and n_seeded_single_fallbacks = ref 0
+        and n_seeded_split_candidates = ref 0
+        and n_seeded_split_timed = ref 0
+        and n_seeded_split_joins = ref 0
+        and n_seeded_hopeless = ref 0
         and n_sr_backdrop_fallbacks = ref 0
         and n_sr_timed = ref 0
         and sr_composite_eligible = ref false
@@ -9408,6 +9537,10 @@ let tune_in_stream_scope ~timing_state ~defer ~substituted ?name ?search ?beam_w
             seeded_single_timed = !n_seeded_single_timed;
             seeded_single_joins = !n_seeded_single_joins;
             seeded_single_fallbacks = !n_seeded_single_fallbacks;
+            seeded_split_candidates = !n_seeded_split_candidates;
+            seeded_split_timed = !n_seeded_split_timed;
+            seeded_split_joins = !n_seeded_split_joins;
+            seeded_hopeless = !n_seeded_hopeless;
             split_reduce_candidates = !n_split_reduce_candidates;
             split_reduce_timed = !n_sr_timed;
             split_reduce_composite_eligible = !sr_composite_eligible;
@@ -9616,7 +9749,7 @@ let tune_in_stream_scope ~timing_state ~defer ~substituted ?name ?search ?beam_w
              classifier (gh-ocannl-564). Tagged [Launch] it was fatal on every C backend, so a
              scratch context missing one of the caller's initializations condemned the search
              instead of declining a candidate. *)
-          let timing_window ~label ~stop ?hopeless_against c =
+          let timing_window ~label ~stop ?hopeless_against ?hopeless_ratio c =
             (* The lineage-wide validation is OUTSIDE the boundary (gh-ocannl-569): a poisoned
                lineage, an uninitialized input and an unexecuted dependency are properties of the
                context and the computation, so a genuine one fails every candidate of every arm at
@@ -9642,7 +9775,7 @@ let tune_in_stream_scope ~timing_state ~defer ~substituted ?name ?search ?beam_w
                        failure of the candidate, so caught inside the boundary. *)
                     match
                       time_routine ~on_retry ~on_call ~tag_failures:true ~phase:!progress_phase
-                        ~stop ?hopeless_against ~timing ~repeats c.cctx c.routine
+                        ~stop ?hopeless_against ?hopeless_ratio ~timing ~repeats c.cctx c.routine
                     with
                     | timing_result -> `Timed timing_result
                     | exception Timing_stopped -> `Stopped
@@ -9653,7 +9786,7 @@ let tune_in_stream_scope ~timing_state ~defer ~substituted ?name ?search ?beam_w
                   `Timed (apply_measurement_seam ~label ~digest:c.digest_after timing_result)
               | (`Stopped | `Hopeless _) as other -> other)
           in
-          let try_spec ?(hopeless_against = fun () -> None) spec =
+          let try_spec ?(hopeless_against = fun () -> None) ?hopeless_ratio:ratio spec =
             last_attempt := `Other;
             Seam.get on_candidate_attempt (spec_label spec);
             let pruned_by_bound =
@@ -9675,7 +9808,9 @@ let tune_in_stream_scope ~timing_state ~defer ~substituted ?name ?search ?beam_w
                 Int.incr n_mma_proposed;
                 match spec with
                 | Fiss (F_sketch _ | F_swap _) -> Int.incr n_fiss_mma_proposed
-                | Whole _ | Fiss (F_preset _ | F_saved _ | F_split _ | F_split_saved _ | F_seeded _)
+                | Whole _
+                | Fiss
+                    (F_preset _ | F_saved _ | F_split _ | F_split_saved _ | F_seeded _ | F_resplit _)
                   ->
                     ()
               end;
@@ -9754,7 +9889,7 @@ let tune_in_stream_scope ~timing_state ~defer ~substituted ?name ?search ?beam_w
                       timing_window ~label:(spec_label spec) ~stop:(budget_stop spec)
                         ?hopeless_against:
                           (if measurement_is_physical () then hopeless_against () else None)
-                        c
+                        ?hopeless_ratio:ratio c
                     with
                     | Ok (`Hopeless h) ->
                         (* gh-ocannl-1527: not ranked, and not a refusal -- the window proved the
@@ -9763,6 +9898,16 @@ let tune_in_stream_scope ~timing_state ~defer ~substituted ?name ?search ?beam_w
                            the reference can move, so an equivalent later proposal is timed against
                            its own. *)
                         Int.incr n_timings_hopeless;
+                        (* gh-ocannl-1697: a seeded single reached its window, as a refused one
+                           does. *)
+                        (match spec with
+                        | Fiss (F_swap _) ->
+                            Int.incr n_seeded_single_timed;
+                            Int.incr n_seeded_hopeless
+                        | Fiss (F_resplit _) ->
+                            Int.incr n_seeded_split_timed;
+                            Int.incr n_seeded_hopeless
+                        | _ -> ());
                         if spec_expects_mma spec then Int.incr n_mma_timed;
                         depart c.digest_after;
                         logf
@@ -9770,7 +9915,8 @@ let tune_in_stream_scope ~timing_state ~defer ~substituted ?name ?search ?beam_w
                            the                            %.4f ms (%gx what it would have to beat) \
                            that ends the window (digest                            %s)"
                           (spec_label spec) h.hopeless_samples h.hopeless_ms h.hopeless_threshold_ms
-                          hopeless_ratio (dshort c.digest_after);
+                          (Option.value ratio ~default:hopeless_ratio)
+                          (dshort c.digest_after);
                         release_candidate c;
                         None
                     | Ok `Stopped ->
@@ -9790,6 +9936,7 @@ let tune_in_stream_scope ~timing_state ~defer ~substituted ?name ?search ?beam_w
                            [timings_contended] counter covers every unusable timing result. *)
                         (match spec with
                         | Fiss (F_swap _) -> Int.incr n_seeded_single_timed
+                        | Fiss (F_resplit _) -> Int.incr n_seeded_split_timed
                         | Fiss (F_sketch _) when !in_playoff -> Int.incr n_playoff_timed
                         | Fiss (F_sketch { entries; staff; fine; _ }) -> (
                             Int.incr n_fiss_sketch_timed;
@@ -9829,6 +9976,7 @@ let tune_in_stream_scope ~timing_state ~defer ~substituted ?name ?search ?beam_w
                            can raise, and the partial report still owns this completed window. *)
                         (match spec with
                         | Fiss (F_swap _) -> Int.incr n_seeded_single_timed
+                        | Fiss (F_resplit _) -> Int.incr n_seeded_split_timed
                         | Fiss (F_sketch _) when !in_playoff -> Int.incr n_playoff_timed
                         | Fiss (F_sketch { entries; staff; fine; _ }) -> (
                             Int.incr n_fiss_sketch_timed;
@@ -9979,8 +10127,8 @@ let tune_in_stream_scope ~timing_state ~defer ~substituted ?name ?search ?beam_w
              accounting, which the census does not replace: it covers pools the shared seam does not
              allocate (the merge buffer) and, on [cc], counts host allocations whose GC finalizer
              has not yet run. *)
-          let try_spec ?hopeless_against spec =
-            let result = try_spec ?hopeless_against spec in
+          let try_spec ?hopeless_against ?hopeless_ratio spec =
+            let result = try_spec ?hopeless_against ?hopeless_ratio spec in
             (* Gated explicitly, not just by [logf]: [logf]'s arguments are evaluated whether or not
                the flag is on, and both readings here fold a hashtable. *)
             if log_enabled () then
@@ -10036,7 +10184,7 @@ let tune_in_stream_scope ~timing_state ~defer ~substituted ?name ?search ?beam_w
              leaves the candidate it was in, and the costs of everything before it. Counted before
              the attempt too, so a fatal candidate -- which writes [search_done] from inside itself
              and raises -- is in the closing record's [attempts]. *)
-          let try_spec ?hopeless_against spec =
+          let try_spec ?hopeless_against ?hopeless_ratio spec =
             check_abandon ();
             if not (budget_allows ~what:(spec_label spec) ~floor:(budget_floor spec)) then (
               last_attempt := `Other;
@@ -10049,7 +10197,7 @@ let tune_in_stream_scope ~timing_state ~defer ~substituted ?name ?search ?beam_w
               if progress_enabled () then
                 progress_line "candidate"
                   (Printf.sprintf "%s attempt=%S" (progress_where ()) (spec_label spec));
-              try_spec ?hopeless_against spec)
+              try_spec ?hopeless_against ?hopeless_ratio spec)
           in
           (* The search's seeds for each lowering it seeds ({!search_seeding}, gh-ocannl-1490): the
              family seeds, then the coalesced layout's branch beside them (gh-ocannl-1165) —
@@ -10136,20 +10284,18 @@ let tune_in_stream_scope ~timing_state ~defer ~substituted ?name ?search ?beam_w
               | Some ({ sp_segments = Some _; _ } as plan) -> Some plan
               | Some { sp_segments = None; _ } | None -> None
           in
-          let seeded_single_entries, seeded_single_pre =
-            match seeded_singles_plan with
-            | None -> ([], [])
-            | Some plan ->
-                let seeds =
-                  seeded_single_seeds ~capabilities ~is_gpu ~is_cpu ~limits ~static_indices plan
-                    (Option.value !base_pristine ~default:base_opt)
-                in
-                ( prefilter_entries ~tag:"seeded segment " seeds,
-                  List.map seeds ~f:(fun (key, pre, _) -> (key, pre)) )
+          (* The seeded singles' menu on [plan] -- the running seeded plan once the split sweep
+             below has run (gh-ocannl-1697), whose segmentation a split it joined can have
+             changed. *)
+          let seeded_menu plan =
+            let seeds =
+              seeded_single_seeds ~capabilities ~is_gpu ~is_cpu ~limits ~static_indices plan
+                (Option.value !base_pristine ~default:base_opt)
+            in
+            ( prefilter_entries ~tag:"seeded segment " seeds,
+              List.map seeds ~f:(fun (key, pre, _) -> (key, pre)) )
           in
           let seeded_sweep = Option.is_some seeded_singles_plan in
-          n_seeded_single_candidates :=
-            List.sum (module Int) seeded_single_entries ~f:(fun (_, ps) -> List.length ps);
           let coarse_plan, coarse_entries =
             if seeded_sweep then (seeding.ss_coarse_plan, [])
             else (seeding.ss_coarse_plan, seeding.ss_coarse)
@@ -10232,12 +10378,16 @@ let tune_in_stream_scope ~timing_state ~defer ~substituted ?name ?search ?beam_w
                   execution_effect = Outcome.No_device_writes;
                 });
           let sr_num_blocks = if is_gpu then [ 32; 128; 512 ] else [ 8; 32; 128 ] in
+          (* gh-ocannl-1697: with the seeded sweep, the split singles are the seeded plan's own
+             ([F_resplit], the seeded split sweep below), so none is timed around presets. *)
           let sr_specs =
-            List.concat_map sr_sites ~f:(fun s ->
-                List.filter_map sr_num_blocks ~f:(fun b ->
-                    if 2 * b <= s.sr_red then
-                      Some (Fiss (F_split { sites = [ (s, b) ]; staff = [] }))
-                    else None))
+            if seeded_sweep then []
+            else
+              List.concat_map sr_sites ~f:(fun s ->
+                  List.filter_map sr_num_blocks ~f:(fun b ->
+                      if 2 * b <= s.sr_red then
+                        Some (Fiss (F_split { sites = [ (s, b) ]; staff = [] }))
+                      else None))
           in
           n_split_reduce_candidates := List.length sr_specs;
           (* gh-ocannl-1388: the seeded untuned plan, the step the recipes' untuned compile ships on
@@ -10299,7 +10449,7 @@ let tune_in_stream_scope ~timing_state ~defer ~substituted ?name ?search ?beam_w
             | Whole (W_preset _ | W_sketch _ | W_saved _)
             | Fiss
                 ( F_preset _ | F_saved _ | F_sketch _ | F_split _ | F_split_saved _ | F_seeded _
-                | F_swap _ ) ->
+                | F_swap _ | F_resplit _ ) ->
                 None
           in
           let run_seed spec =
@@ -10334,8 +10484,18 @@ let tune_in_stream_scope ~timing_state ~defer ~substituted ?name ?search ?beam_w
              ran against (for the playoff), and the sweep of one key, which returns that key's
              results in its own backdrop. [single key staff choice] is the candidate; [describe]
              names a choice for the log. Keys compare by [equal_key] and choices structurally. *)
-          let sweeper ~equal_key ~keys ~single ~describe ~fallbacks =
+          let sweeper ?seeded_cut ~equal_key ~keys ~single ~describe ~fallbacks () =
             let running = ref [] and running_ms = ref None and swept_against = ref [] in
+            (* gh-ocannl-1697: a seeded sweep's singles are whole seeded routines, each cut as
+               hopeless against [seeded_cut] of the running composite's reading. *)
+            let try_single spec =
+              match seeded_cut with
+              | None -> try_spec spec
+              | Some reference ->
+                  try_spec
+                    ~hopeless_against:(fun () -> reference !running_ms)
+                    ~hopeless_ratio:seeded_hopeless_ratio spec
+            in
             let without key choices =
               List.filter choices ~f:(fun (k, _) -> not (equal_key k key))
             in
@@ -10368,7 +10528,7 @@ let tune_in_stream_scope ~timing_state ~defer ~substituted ?name ?search ?beam_w
                         staff_admitted := true;
                         Some (p, ms)
                     | _ -> (
-                        match try_spec (single key staff p) with
+                        match try_single (single key staff p) with
                         | Some ((_, ms) as r) ->
                             admit r;
                             staff_admitted := true;
@@ -10382,7 +10542,7 @@ let tune_in_stream_scope ~timing_state ~defer ~substituted ?name ?search ?beam_w
                                 Int.incr fallbacks;
                                 logf "%s: refused with its staff; retrying it bare"
                                   (spec_label (single key staff p));
-                                (match try_spec (single key [] p) with
+                                (match try_single (single key [] p) with
                                 | Some ((_, ms) as r) ->
                                     admit r;
                                     bare := (p, ms) :: !bare
@@ -10478,6 +10638,7 @@ let tune_in_stream_scope ~timing_state ~defer ~substituted ?name ?search ?beam_w
                   Printf.sprintf "%ssegment %s: %s"
                     (if fine then "fine " else "")
                     (seg_key_tag key) (spec_label (Whole (W_sketch p))))
+                ()
             in
             let sweep ~pre_of ~start:choices entries =
               start choices;
@@ -10501,25 +10662,142 @@ let tune_in_stream_scope ~timing_state ~defer ~substituted ?name ?search ?beam_w
              its timed reading, and a key's incumbent is the running composite whole. Its readings
              feed no per-key ranking: every one is a whole seeded routine, ranked by the beam with
              the rest. *)
-          let seeded_sweep_run plan entries =
-            progress_phase_begin "seeded" None;
+          (* gh-ocannl-1697: what a seeded single's reading must undercut to matter, given the
+             running seeded composite's reading [running_ms] -- the window's hopeless reference. A
+             single joins only by reading faster than the running composite, and otherwise it
+             feeds only the beam: with rounds to run, a full beam's slowest entry is the bar (a
+             reading over it enters nothing, as for a whole-routine seed); with none, the beam
+             finals' too -- a reading within [finals_margin] of the head and among the beam's
+             [beam_width] fastest is re-timed beside it ({!finals_contenders}), so the bar is the
+             head over that margin, or the full beam's slowest entry where that is lower. The
+             reference is the larger of the two bars, and [None] -- a window timed in full -- while
+             either is unknown. *)
+          let seeded_cut_on = Seam.get seeded_hopeless_cut in
+          let seeded_cut_reference running_ms =
+            if not seeded_cut_on then None
+            else
+              Option.bind running_ms ~f:(fun running ->
+                  let full = List.length !beam >= beam_width in
+                  let slowest () = Option.map (List.last !beam) ~f:snd in
+                  let beam_bar =
+                    if rounds = 0 then
+                      Option.map (List.hd !beam) ~f:(fun (_, head) ->
+                          let finals =
+                            if Float.(finals_margin > 0.) then head *. (1. +. finals_margin)
+                            else head
+                          in
+                          match slowest () with
+                          | Some last when full -> Float.min finals last
+                          | Some _ | None -> finals)
+                    else if full then slowest ()
+                    else None
+                  in
+                  Option.map beam_bar ~f:(Float.max running))
+          in
+          let seeded_sweep_run ~start_ms plan entries pre =
             let running, running_ms, _, _, sweep_key =
-              sweeper ~equal_key:equal_seg_key ~keys:(List.map entries ~f:fst)
-                ~fallbacks:n_seeded_single_fallbacks
+              sweeper ~seeded_cut:seeded_cut_reference ~equal_key:equal_seg_key
+                ~keys:(List.map entries ~f:fst) ~fallbacks:n_seeded_single_fallbacks
                 ~single:(fun key staff p -> Fiss (F_swap { plan; entries = [ (key, p) ]; staff }))
                 ~describe:(fun key p ->
                   Printf.sprintf "seeded segment %s: %s" (seg_key_tag key)
                     (spec_label (Whole (W_sketch p))))
+                ()
             in
-            running_ms := seeded_ms ();
+            running_ms := start_ms;
             logf "seeded singles: %d candidate(s) over %d segment key(s) of %s"
               !n_seeded_single_candidates (List.length entries) (seeded_plan_label plan);
-            List.iter (heaviest_first ~pre_of:seeded_single_pre ~what:"seeded segment" entries)
+            List.iter (heaviest_first ~pre_of:pre ~what:"seeded segment" entries)
               ~f:(fun ((key, _) as entry) ->
                 let before = List.Assoc.find !running ~equal:equal_seg_key key in
                 ignore (sweep_key entry : (sketch_params * float) list);
                 let after = List.Assoc.find !running ~equal:equal_seg_key key in
                 if not (Option.equal Poly.equal before after) then Int.incr n_seeded_single_joins)
+          in
+          (* gh-ocannl-1697: the seeded split sweep, before the segment sweep. Each split single is
+             the running seeded plan with one split-reduce site's choice changed -- another block
+             count of the search's menu, or unsplit, or split where the plan leaves it whole -- and
+             the plan re-derived over that split routine by its own rule ([F_resplit],
+             {!seeded_resplit}), so it reads on the plan's basis rather than around the presets an
+             [F_split] single timed every segment on. The sites are the search's own
+             ([max_split_reduce_sites] of {!split_reduce_sites}, heaviest first), detected on the
+             lowering the plan was derived on, whose split sites are the plan's own. A site's
+             fastest single joins the running plan only by reading faster than it, and the later
+             sites change the joined plan. Before the segment sweep, because a split it joins
+             re-cuts the segments the segment sweep's keys address: that sweep enumerates its menu
+             on the plan this one leaves. Returns that plan and its reading. *)
+          let seeded_split_sweep (plan : seeded_plan) =
+            let pristine = Option.value !base_pristine ~default:base_opt in
+            let sites =
+              List.take (split_reduce_sites ~static_indices pristine) max_split_reduce_sites
+            in
+            let same = same_split_site in
+            let running = ref plan and running_ms = ref (seeded_ms ()) in
+            List.iter sites ~f:(fun site ->
+                let current =
+                  List.find_map !running.sp_split ~f:(fun (t, b) ->
+                      if same t site then Some b else None)
+                in
+                let choices =
+                  None
+                  :: List.filter_map sr_num_blocks ~f:(fun b ->
+                      if 2 * b <= site.sr_red then Some (Some b) else None)
+                  |> List.filter ~f:(fun c -> not (Option.equal Int.equal c current))
+                in
+                let from = seeded_plan_digest !running in
+                let results =
+                  List.filter_map choices ~f:(fun blocks ->
+                      let split =
+                        List.filter_map !running.sp_split ~f:(fun ((t, _) as entry) ->
+                            if same t site then Option.map blocks ~f:(fun b -> (t, b))
+                            else Some entry)
+                        @
+                        match (current, blocks) with
+                        | None, Some b -> [ (site, b) ]
+                        | Some _, _ | None, None -> []
+                      in
+                      let label = seeded_resplit_label ~from site blocks in
+                      let t0 = Unix.gettimeofday () in
+                      (* No derivation once the budget is spent: the attempt would not start. *)
+                      if not (budget_allows ~what:label ~floor:false) then None
+                      else
+                        match seeded_resplit ~memo:seeded_memo_v !running split pristine with
+                        | None ->
+                            logf "seeded split: %s: the plan does not re-derive; not seeded" label;
+                            None
+                        | Some derived when String.equal (seeded_plan_digest derived) from ->
+                            logf "seeded split: %s: re-derives the running plan; not seeded" label;
+                            None
+                        | Some derived -> (
+                            logf "seeded split: %s: re-derived in %.3f s as %s" label
+                              (Unix.gettimeofday () -. t0)
+                              (seeded_plan_label derived);
+                            Int.incr n_seeded_split_candidates;
+                            let spec = Fiss (F_resplit { from; site; blocks; plan = derived }) in
+                            match
+                              try_spec
+                                ~hopeless_against:(fun () -> seeded_cut_reference !running_ms)
+                                ~hopeless_ratio:seeded_hopeless_ratio spec
+                            with
+                            | Some ((_, ms) as r) ->
+                                admit r;
+                                Some (derived, ms)
+                            | None -> (
+                                match !last_attempt with
+                                | `Dedup (Some ms) -> Some (derived, ms)
+                                | _ -> None)))
+                in
+                match List.min_elt results ~compare:(fun (_, a) (_, b) -> Float.compare a b) with
+                | Some (derived, ms)
+                  when Option.for_all !running_ms ~f:(fun running -> Float.(ms < running)) ->
+                    logf "seeded split: %s joins the running seeded plan (%.4f ms%s)"
+                      (seeded_plan_label derived) ms
+                      (Option.value_map !running_ms ~default:"" ~f:(Printf.sprintf " < %.4f ms"));
+                    Int.incr n_seeded_split_joins;
+                    running := derived;
+                    running_ms := Some ms
+                | Some _ | None -> ());
+            (!running, !running_ms)
           in
           (* The seeded plan's choice for a key: its decision rule ({!seeded_params}, probed and
              validated as {!seeded_decisions} does) applied to the key's own segment. The plan's
@@ -10553,6 +10831,7 @@ let tune_in_stream_scope ~timing_state ~defer ~substituted ?name ?search ?beam_w
             sweeper ~equal_key:same_site ~keys:sr_sites ~fallbacks:n_sr_backdrop_fallbacks
               ~single:(fun s staff b -> Fiss (F_split { sites = [ (s, b) ]; staff }))
               ~describe:(fun s b -> "split site " ^ split_site_label (s, b))
+              ()
           in
           (* gh-ocannl-1388: a refused window drops its digest from [seen] so that an equivalent
              later seed can measure it, but no later seed reproduces the seeded plan, so its floor
@@ -10577,7 +10856,12 @@ let tune_in_stream_scope ~timing_state ~defer ~substituted ?name ?search ?beam_w
           (match seeded_singles_plan with
           | Some plan ->
               retry_seeded ();
-              seeded_sweep_run plan seeded_single_entries
+              progress_phase_begin "seeded" None;
+              let plan, start_ms = seeded_split_sweep plan in
+              let entries, pre = seeded_menu plan in
+              n_seeded_single_candidates :=
+                List.sum (module Int) entries ~f:(fun (_, ps) -> List.length ps);
+              seeded_sweep_run ~start_ms plan entries pre
           | None when staffed ->
               progress_phase_begin "staffed" None;
               sweep ~pre_of:coarse_pre
@@ -11369,6 +11653,10 @@ let tune_in_stream_scope ~timing_state ~defer ~substituted ?name ?search ?beam_w
               seeded_single_timed = !n_seeded_single_timed;
               seeded_single_joins = !n_seeded_single_joins;
               seeded_single_fallbacks = !n_seeded_single_fallbacks;
+              seeded_split_candidates = !n_seeded_split_candidates;
+              seeded_split_timed = !n_seeded_split_timed;
+              seeded_split_joins = !n_seeded_split_joins;
+              seeded_hopeless = !n_seeded_hopeless;
               split_reduce_candidates = List.length sr_specs;
               split_reduce_timed = !n_sr_timed;
               split_reduce_composite_eligible = !sr_composite_eligible;

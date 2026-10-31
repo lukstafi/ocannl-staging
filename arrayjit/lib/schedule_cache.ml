@@ -809,8 +809,9 @@ type entry = {
    20: gh-ocannl-1459 -- the contraction-coalesced menu grows a 64x64 block, tensorized and fused leaves
    21: gh-ocannl-1664 -- per-segment singles timed inside the seeded plan, where one is seeded
    22: gh-ocannl-1725 -- the storing search's beam finals record, so every replay explains its times
+   23: gh-ocannl-1697 -- split singles re-derived inside the seeded plan, unsplit and new sites too
 *)
-let entry_version = 22
+let entry_version = 23
 
 let sanitize name =
   String.map name ~f:(fun c ->

@@ -8,6 +8,10 @@ a dispersed window is not cut, however slow its minimum: true
 one stall among clean samples moves neither the minimum nor the verdict: true
 the gate keeps a minimum under it from cutting, and admits one at it: true
 no finite positive reference, no cut: true
+a seeded single's ratio is 1.05: true
+at the seeded ratio, a steady window 1.06 times the reference is cut once it has three samples: true
+at the seeded ratio, a window 1.04 times the reference is never cut: true
+the window the seeded ratio cuts is never cut at the default ratio: true
 == one timing call ==
 isolated: five times the reference is cut after three single launches: true
 isolated: with no reference the same routine takes its whole window: true

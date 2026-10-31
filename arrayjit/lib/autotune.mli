@@ -1011,6 +1011,11 @@ val split_reduce_sites :
     keeps that split. [static_indices] only reaches the interchange and coalescing probes'
     [Sched.apply]. Exposed for tests. *)
 
+val same_split_site : sr_site -> sr_site -> bool
+(** Whether two {!split_reduce_sites} enumerations' sites are one site (gh-ocannl-1697): the same
+    target, and the same split loop -- or, for a coalesced site, whose merged loop each enumeration
+    mints afresh, the same pair of loops merged. *)
+
 val split_reduce_prelude : (sr_site * int) list -> Ir.Schedule.schedule
 (** The whole-routine prelude splitting each [(site, num_blocks)]: per site its interchange
     ([sr_swaps]), its coalescing ([sr_coalesce], minting the merged loop under the symbol [sr_axis]
@@ -1711,7 +1716,8 @@ type report = {
       (** The seeded singles proposed (gh-ocannl-1664, config [autotune_seeded_singles], default
           on): where the search seeds a seeded plan ({!seeded_plan}) with a segmentation of its own,
           its per-segment singles are timed inside that plan instead of over the search's own
-          segmentation around presets: for each keyed segment of the plan's segmentation
+          segmentation around presets: for each keyed segment of the plan's segmentation -- the
+          running plan the seeded split sweep leaves ([seeded_split_candidates], gh-ocannl-1697) --
           ({!seeded_single_seeds}), each seed the model pre-filter keeps, as the plan with that
           segment code's choice swapped for the seed ({!seeded_swap}, labelled [F_swap[...]]). The
           keys are swept one at a time, heaviest first; a key's single joins the running seeded
@@ -1720,14 +1726,38 @@ type report = {
           seeded. [0] where no such plan is seeded (cc, Metal, the setting off). *)
   seeded_single_timed : int;
       (** Of the seeded singles, those that reached a timing window (refused windows included, as
-          for [fiss_sketch_timed]). The running composite's own choice for a key is never re-timed:
-          it is the plan's window, or the window that last changed it. *)
+          for [fiss_sketch_timed], and those cut as hopeless, [seeded_hopeless]). The running
+          composite's own choice for a key is never re-timed: it is the plan's window, or the window
+          that last changed it. *)
   seeded_single_joins : int;
       (** Keys whose choice the seeded sweep changed: each a single that read faster than the
           running seeded composite and became it. *)
   seeded_single_fallbacks : int;
       (** Seeded singles refused with a non-empty staff and retried with the key swapped alone,
           under [fiss_sketch_backdrop_fallbacks]' rule. *)
+  seeded_split_candidates : int;
+      (** The seeded split singles proposed (gh-ocannl-1697): where the seeded singles run, each
+          {!split_reduce_sites} site within [max_split_reduce_sites] at each other choice of the
+          split menu's -- a block count of [split_reduce_candidates]' menu, or unsplit -- as the
+          running seeded plan re-derived over that split ({!seeded_resplit}, labelled
+          [F_resplit[...]]), swept site by site, heaviest first, before the segment singles; a
+          site's fastest joins the running plan only by reading faster than it. A choice whose
+          derivation fails or reproduces the running plan is not counted. [split_reduce_candidates]
+          is then [0]: no split single is timed around presets. *)
+  seeded_split_timed : int;
+      (** Of the seeded split singles, those that reached a timing window (refused and hopeless
+          windows included, as for [seeded_single_timed]). *)
+  seeded_split_joins : int;
+      (** Sites whose choice the seeded split sweep changed: each a split single that read faster
+          than the running seeded plan and became it. *)
+  seeded_hopeless : int;
+      (** Of [seeded_single_timed] and [seeded_split_timed], the windows cut as hopeless
+          (gh-ocannl-1697, also in [timings_hopeless]): {!hopeless_window} at
+          {!seeded_hopeless_ratio} against what the reading had to undercut to matter -- the running
+          seeded composite, or the beam's bar where that is higher (with rounds to run, a full
+          beam's slowest entry; with none, the head over [autotune_finals_margin], or the full
+          beam's slowest entry where lower). [0] unless {!seeded_hopeless_cut} is on, which by
+          default it is not. *)
   split_reduce_candidates : int;
       (** Split-reduce seeds (gh-ocannl-484 task 3): one candidate per {!split_reduce_sites} site
           within the [max_split_reduce_sites] cap and eligible [num_blocks] value — the two-pass
@@ -2838,11 +2868,21 @@ type seeded_segment =
   | Seeded_sunk of { digest : string; swaps : int }
       (** {!reduction_sink}'s [swaps] interchanges, then the default preset, likewise matched. *)
 
+type seeded_memo
+(** The per-segment decisions several derivations of one search share (gh-ocannl-1697): each
+    distinct segment code's seed and sink, as one derivation decides them. Sound across derivations
+    under one gate, limits and settings: a decision is a function of the segment's code. *)
+
+val seeded_memo : unit -> seeded_memo
+(** An empty {!seeded_memo}. *)
+
 type seeded_start = {
   decide : Ir.Low_level.optimized -> sketch_params option;
       (** The plan's per-segment decision: the sketch its gate admits on a segment, probed and
           validated there, or [None] for the preset. *)
   gate_tag : string;  (** The gate it reads, rendered for the search shape. *)
+  rederive : seeded_memo -> (sr_site * int) list -> Ir.Low_level.optimized -> seeded_plan option;
+      (** The plan's whole derivation over another split (gh-ocannl-1697): {!seeded_resplit}. *)
 }
 (** The seeded plan's decision rule, for {!tune}'s staffed start (gh-ocannl-1138, config
     [autotune_staffed_singles]), which applies it to the search's own segments: the plan's recorded
@@ -2850,7 +2890,7 @@ type seeded_start = {
     Carried in the plan so that the device readings the gate rests on reach {!tune} only through
     {!seeded_plan}. *)
 
-type seeded_plan = {
+and seeded_plan = {
   sp_split : (sr_site * int) list;
       (** The reductions split whole-routine before segmenting ({!seeded_split_sites}). *)
   sp_segments : (Ir.Schedule.segmentation * seeded_segment list) option;
@@ -2879,6 +2919,7 @@ val seeded_plan :
   ?min_serial:int ->
   ?reduction_sink:bool ->
   ?seed_narrow:bool ->
+  ?memo:seeded_memo ->
   ?capabilities:Ir.Backend_intf.codegen_capabilities ->
   facts:Ir.Backend_intf.backend_facts ->
   limits:Ir.Backend_intf.hardware_limits ->
@@ -2893,7 +2934,30 @@ val seeded_plan :
     the search trajectory's identity, so a gate steered by the device description's [Untimed]
     capacity reaches the search only as the plan it resolved to (gh-ocannl-1253). [capabilities] are
     the compiling context's, which {!seeded_params} prices workgroup memory by — in the plan's
-    segments and in its decision rule; {!tune} passes its context's, as the untuned compile does. *)
+    segments and in its decision rule; {!tune} passes its context's, as the untuned compile does.
+    [memo] (default: a fresh one) takes and records the derivation's per-segment decisions; {!tune}
+    shares one with its {!seeded_resplit}s. *)
+
+val seeded_resplit :
+  ?memo:seeded_memo ->
+  seeded_plan ->
+  (sr_site * int) list ->
+  Ir.Low_level.optimized ->
+  seeded_plan option
+(** [seeded_resplit plan split opt] (gh-ocannl-1697): [plan] re-derived with [split] for its split
+    prelude -- the prelude applied to a hermetic copy of [opt], the lowering [plan] was derived on,
+    then the plan's decision rule over the split routine, exactly as {!seeded_plan} derived [plan]
+    (the rule is [plan]'s [sp_start], so the gate's device readings reach {!tune} only through the
+    plan). A seeded split single is this with one site's choice changed: every segment the change
+    leaves alone is decided as [plan] decided it, by the same rule on the same code, which [memo]
+    (default: a fresh one) shares instead of probing again; it prints no seeding census. [None] for
+    a plan without a rule (one the untuned compile builds for itself) or where the prelude does not
+    apply. With [plan]'s own split it is [plan] again. *)
+
+val seeded_resplit_label : from:string -> sr_site -> int option -> string
+(** A seeded split single's label: [F_resplit[<site at its block count>; plan <prefix of from>]],
+    the site rendered as a split-reduce label renders it, [b0 unsplit] for [None]; [from] is the
+    {!seeded_plan_digest} of the plan the single changes. Never prefixed [F_seeded] or [F_swap]. *)
 
 val seeded_plan_digest : seeded_plan -> string
 (** The plan's identity from its content (split sites by target name, extents and block count; the
@@ -3337,6 +3401,18 @@ val hopeless_ratio : float
 val hopeless_min_samples : int
 (** 3: the fewest samples {!hopeless_window} cuts on. *)
 
+val seeded_hopeless_ratio : float
+(** 1.05: the ratio {!tune} cuts a seeded single's window at (gh-ocannl-1697), where
+    {!seeded_hopeless_cut} is on (it is off by default), against what that reading must undercut to
+    matter -- the running seeded composite, or the beam's bar where that is higher. A seeded single
+    is the seeded plan with one choice changed, so it reads within a few percent of its reference
+    (on the gh-ocannl-1664 measurement of [gpt2_mini_train] on HIP, a median 1.035x the running
+    best, the slowest 1.6x), and {!hopeless_ratio} would cut none of them. What bounds this cut is
+    the window's own noise rather than a stall: noise only adds time, and those windows' medians sat
+    within 2% of their minima, so a full window reading under the reference needs every one of its
+    first samples more than 5% over a later one. The stated boundary is {!hopeless_window}'s at this
+    ratio: a uniform delay of more than 5% over the first samples that then leaves. *)
+
 val baseline_window_ms : float
 (** 3000: the sampled time at which the serial baseline's timing window may end ({!window_bounded},
     gh-ocannl-1666). *)
@@ -3355,13 +3431,14 @@ val window_bounded : ?at_least_ms:float -> bound_ms:float -> timing_sample list 
     {!hopeless_window}'s does. *)
 
 val hopeless_window :
-  ?at_least_ms:float -> reference_ms:float -> timing_sample list -> hopeless option
+  ?ratio:float -> ?at_least_ms:float -> reference_ms:float -> timing_sample list -> hopeless option
 (** Whether a timing window, oldest sample first, may end before its sample floor because its
     candidate is out of the running against [reference_ms] -- the reading its caller ranks it by
     (gh-ocannl-1527): at least {!hopeless_min_samples} samples, whose minimum [per_launch_ms] is
-    finite, over {!hopeless_ratio} times the reference and at least [at_least_ms] (default 0), and
-    which {!window_result} does not find dispersed. [None] for a reference that is not finite and
-    positive.
+    finite, over [ratio] (default {!hopeless_ratio}) times the reference and at least [at_least_ms]
+    (default 0), and which {!window_result} does not find dispersed. [None] for a reference that is
+    not finite and positive. {!tune} passes {!seeded_hopeless_ratio} for a seeded single's window,
+    whose argument is that constant's.
 
     Why it cannot flip a ranking within the noise the timing rules bound: noise only adds time, so a
     window's minimum only falls; the full window could read under the reference only if every sample
@@ -3610,6 +3687,7 @@ val time_routine :
   ?phase:string ->
   ?stop:(unit -> bool) ->
   ?hopeless_against:float ->
+  ?hopeless_ratio:float ->
   ?window_bound_ms:float ->
   timing:timing_mode ->
   repeats:int ->
@@ -3711,7 +3789,8 @@ val time_routine :
     (gh-ocannl-1527): the calibration's synchronized singles, gated at {!queued_batch_ms}, and every
     timed window (a Metal retry's included) end as soon as {!hopeless_window} cuts them, and the
     call raises {!Timing_hopeless} with every batch it dispatched synchronized and the bindings
-    restored. Neither [on_call] nor the domain's observers see a cut call. *)
+    restored. Neither [on_call] nor the domain's observers see a cut call. [hopeless_ratio] (default
+    {!hopeless_ratio}) is the cut's [ratio] (gh-ocannl-1697). *)
 
 val calibrate_and_time :
   retry_contended:bool ->
@@ -3807,6 +3886,14 @@ val on_seeded_plan : (seeded_plan option -> seeded_plan option) Seam.t
     identity what it returns. It is how a test runs two seeds against one trajectory, which no
     setting does alone: the keys that steer the plan render in the trajectory's settings themselves.
     The default is the identity and no configuration selects it. *)
+
+val seeded_hopeless_cut : bool Seam.t
+(** Whether {!tune} cuts a seeded single's window as hopeless, at {!seeded_hopeless_ratio}
+    (gh-ocannl-1697). Default [false], and no configuration selects it: on [gpt2_mini_train]/HIP
+    (unified memory, minix) the cut bought 7-12% more seeded singles per 600 s budget, but its arm's
+    tuned step p50 lost to the base in 5 of 6 pairs (median ratio 1.009 over 4 pairs) where the
+    split singles alone lost in none, and the 1.05 ratio is the suspect. Kept, and exercised by its
+    tests, for the follow-up that measures another ratio. *)
 
 val on_privatize_proposal : (target:Ir.Tnode.t -> over:Ir.Indexing.symbol -> unit) Seam.t
 (** Fault-injection seam (gh-ocannl-1438): called with each proposal just before

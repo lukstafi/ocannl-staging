@@ -6,6 +6,15 @@ a swap keeps the plan's split prelude, segmentation and admission: true
 a swap decides exactly its key's segments, on the key's digest, and no other: true
 an empty swap is the plan itself: true
 a seeded single's label names the plan and does not read as the plan's: true
+re-deriving the plan with its own split reproduces it: true
+the plan splits a site of the fixture: true
+some site's other choice unsplits a site the plan splits: true
+every other choice of a site re-derives a plan other than the plan: true
+a re-derived plan decides every segment code the plan decides as the plan does: true
+... and some re-derived plan shares a decided segment code with the plan: true
+a memo shared with the plan's derivation changes no derivation of the plan: true
+... nor of a split single: true
+a seeded split single's label names the plan, and reads as no plan or segment single: true
 the search seeds seeded singles, and no single over its own segmentation: true
 no window is a single over the search's own segmentation: true
 the report counts every seeded single's window: true
@@ -13,3 +22,19 @@ every seeded single compiles to the plan's segment count: true
 a single swapped alone differs from the plan in at most its key's segments: true
 the faster single joined the running seeded composite and was crowned: true
 every later key's single carries the joined single as its staff: true
+the search seeds seeded split singles, and no split single around presets: true
+no window is a split single around presets: true
+the report counts every seeded split single's window: true
+every seeded split single is attempted before every seeded segment single: true
+with no split joined, every seeded single names the plan: true
+with no split joined, the search crowns the plan: true
+the faster split single joined the running seeded plan and was crowned: true
+every seeded single after the join names a plan other than the seeded plan: true
+a segment single is attempted after the join: true
+with the seeded cut at its default, every seeded single takes its whole window: true
+a seeded single over 1.05 times the plan is cut after three samples: true
+a split single is among the cut: true
+a segment single is among the cut: true
+a seeded single under 1.05 times the plan takes its whole window: true
+a segment single takes its whole window: true
+the report counts the cut seeded windows, and the search crowns the plan: true
