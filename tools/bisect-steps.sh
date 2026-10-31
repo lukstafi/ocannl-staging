@@ -146,7 +146,7 @@ bisect_main() {
       --cap | --cap=*) opt_value "a value" "$@"; cap=$opt_value; shift "$opt_shift" ;;
       --test-cap | --test-cap=*) opt_value "a value" "$@"; test_cap=$opt_value; shift "$opt_shift" ;;
       --build | --build=*) opt_value "a target" "$@"; builds+=("$opt_value"); shift "$opt_shift" ;;
-      --no-first-parent) first_parent=; shift ;;
+      --no-first-parent | --no-first-parent=*) opt_flag "$1"; first_parent=; shift ;;
       --cpu | --cpu=* | --gpu | --gpu=*) refuse_slot_option "$1" ;;
       --) shift; break ;;
       -*) die "bisect: unknown option $1
@@ -165,7 +165,7 @@ bisect_main() {
   for arg in "$@"; do
     case $arg in
       --) break ;;
-      --build | --build=* | --no-first-parent)
+      --build | --build=* | --no-first-parent | --no-first-parent=*)
         die "$arg belongs before GOOD and BAD:
   tools/test-run.sh $bisect_usage" ;;
     esac

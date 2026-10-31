@@ -249,6 +249,8 @@ args=()
 while [ $# -gt 0 ]; do
   case $1 in
     --referenced-only) referenced_only=1; shift ;;
+    # A flag: with a value it is refused by name, never read as a path.
+    --referenced-only=*) die "--referenced-only is a flag and takes no value: $1 ($usage)" ;;
     --why)
       [ $# -ge 2 ] && [ -n "$2" ] || die "--why needs an alias, or all ($usage)"
       printf '%s\n' "$2" >>"$tmp/why"; shift 2 ;;

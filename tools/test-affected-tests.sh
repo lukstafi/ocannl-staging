@@ -621,6 +621,23 @@ if harness_leg 'option order'; then
   if [ "$rc" = 0 ] && [ ! -s "$out" ]; then report 0 'after --, --referenced-only is a pathspec (matching nothing here)'
   else report 1 'after --, --referenced-only is a pathspec (matching nothing here)' "exit $rc; got [$(tr '\n' ' ' <"$out")]; $(tr '\n' '|' <"$err")"; fi
   git_q checkout -q -- lib/helper.ml || exit 2
+  # A flag takes no value: after the `--files` paths `--referenced-only=1` was read as one more
+  # path, the flag silently dropped. The mutant without the refusal must answer the call.
+  flag_label='--referenced-only=1 is refused by name, never read as a path'
+  affected --files lib/helper.ml --referenced-only=1
+  if [ "$rc" = 2 ] && [ ! -s "$out" ] && grep -qF -- '--referenced-only is a flag and takes no value: --referenced-only=1' "$err"; then
+    report 0 "$flag_label"
+  else report 1 "$flag_label" "exit $rc (want 2); got [$(tr '\n' ' ' <"$out")]; $(tr '\n' '|' <"$err")"; fi
+  mutant=$repo/tools/affected-mutant.sh
+  if FROM='    --referenced-only=*) die' TO='    --referenced-only-cut=*) die' \
+      perl -0pe 'BEGIN { $n = 0 } $n += s/\Q$ENV{FROM}\E/$ENV{TO}/g; END { exit($n == 1 ? 0 : 1) }' \
+      "$repo/tools/affected-tests.sh" >"$mutant"; then
+    rc=0
+    (cd "$TMP" && bash "$mutant" --files lib/helper.ml --referenced-only=1) >"$out" 2>"$err" || rc=$?
+    if [ "$rc" != 2 ] || ! grep -qF -- '--referenced-only is a flag' "$err"; then report 0 "negative control: $flag_label"
+    else report 1 "negative control: $flag_label" "the mutant refused it too: exit $rc; $(tr '\n' '|' <"$err")"; fi
+  else report 1 "negative control: $flag_label" "the mutation anchor does not occur exactly once"; fi
+  rm -f "$mutant"
 fi
 
 # A private helper library and four tests linking it or core, committed as t8 (the
