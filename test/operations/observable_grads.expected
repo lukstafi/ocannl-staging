@@ -9,3 +9,8 @@ param after one split step (expect q - 0.1*yin = 1.6 2.5): 1.60 2.50
 split(to_routine) grad placement: On-dev/28:set-materialized; in context: true; observable intent: true
 grad values (= zin): 4.00 5.00
 param after one split step (expect r - 0.1*zin = 1.6 2.5): 1.60 2.50
+=== 4. Saliency: a Require_grad input's gradient, host-read (raw Context.compile) ===
+sal is not a parameter: true
+saliency grad placement: Virt/151:cleanup-dropped-zero-out; in context: false; observable intent: true
+saliency grad (expect 6*sal = 24 30): 24.00 30.00
+saliency grad equals 6*sal: true

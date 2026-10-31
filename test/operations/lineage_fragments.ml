@@ -70,17 +70,21 @@ let () =
       exact "A: w.grad = 6 w" (Context.get_values ctx (grad_of w)) [| 6.; 12.; 18. |]);
   (* B: [forward_once t], then a loss built on [t]. [forward_once] no longer drops [t]'s backprop
      (the once-contract retired, gh-ocannl-1724): the loss embeds it. Before, the gradient code for
-     [w] was silently never compiled. That backprop reads [w] (d t / d w = 2 w), which the once-run
-     computed as routine-local scratch: refused, naming [w] and the fix. With [w] materialized, it
-     trains [w] exactly as the fresh graph does. *)
+     [w] was silently never compiled. That backprop reads [w] (d t / d w = 2 w). A differentiable
+     leaf's value carries observation intent (gh-ocannl-1743), so the once-run cannot compute it as
+     routine-local scratch -- which used to refuse this read -- and the loss trains [w] exactly as
+     the fresh graph does, with or without [w] materialized. *)
   case "B: forward_once, then a loss over it" (fun () ->
       let w, t = probe "lf_b" in
       let ctx = Train.forward_once (Context.auto ()) t in
       let%op loss = t *. 3. in
-      let msg = refusal "B" (fun () -> Train.update_once ctx loss) in
-      p "B: the backprop's read of the once-run's scratch leaf is refused, naming it and the fix"
-        (has msg (Ir.Tnode.label_name w.value)
-        && has msg "routine-local scratch" && has msg "Train.set_materialized"));
+      Option.iter
+        (accepted "B: the loss compiles and runs in the once-run's lineage, w not materialized"
+           (fun () -> Train.update_once ctx loss))
+        ~f:(fun ctx ->
+          exact "B: w.grad equals the fresh graph's, w not materialized"
+            (Context.get_values ctx (grad_of w))
+            [| 6.; 12.; 18. |]));
   case "B, w materialized" (fun () ->
       let w, t = probe "lf_bm" in
       Train.set_materialized w.value;

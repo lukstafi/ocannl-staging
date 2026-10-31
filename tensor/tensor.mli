@@ -220,7 +220,16 @@ val term :
     its element count, [Reshape] (the default) if the data is not padded and both the tensor's shape
     and padding are inferred, [Keep_shape_no_padding] if the tensor should not be padded and the
     shape is as given by the ndarray, and [Padded] if the data is already padded as given, and the
-    shape is as given by the ndarray. *)
+    shape is as given by the ndarray.
+
+    With [~grad_spec:Require_grad] the term is a differentiable leaf that is not a parameter: it
+    stays out of {!field:params} (nothing initializes it; its value is its data or its forward
+    code), and its gradient carries observation intent ({!Ir.Tnode.set_observable}), as a
+    parameter's does -- the host and later routines are its only readers, so it can be read with
+    [Context.get_values] or stepped through the optimizers' [?params] without a materialization
+    hint. Its value carries the intent too, since a recomputed gradient reads it. A leaf whose value
+    comes from [fetch_op] is re-established by every forward run, so an optimized input should be
+    data-backed ([init_data]) or a parameter. *)
 
 val number : ?label:string list -> ?axis_basis:string -> ?grad_spec:grad_spec -> float -> t
 (** A number: a tensor with a single axis of one dimension, initialized to the given value.
