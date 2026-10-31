@@ -1910,9 +1910,20 @@ files.
   until a staffed single of the key is admitted (the staff is then known compatible, so later
   refusals are the seeds' own). A key's incumbent is its own choice as timed in the sweep, or the
   running composite whole (for a key with no choice, the key on its preset): a single joins only by
-  beating it. A key whose staffed singles ALL decline cannot join that
-  staff (the composite holding both is the refused code), so its fastest bare single, the composite
-  of that key alone, replaces the running composite when faster as a whole routine. The last key's
+  beating it. The incumbent's reading comes from another window, usually an earlier key's sweep, so
+  (gh-ocannl-1698) a key's fastest single within `autotune_finals_margin` of it is settled by a
+  finals of the two, the playoff's own `finals_settle` over `finals_readings` (the incumbent
+  recompiled from the spec whose window took its reading, kept as `running_src`); outside the
+  margin, margin off, budget spent or finals inconclusive, the readings decide; the winner keeps
+  its search reading; the bare replacement below is settled the same way; counted in
+  `report.staffed_finals{,_timed,_admitted}`. The seeded sweep (gh-ocannl-1664) shares the
+  `sweeper` with `~finals:false`: its joins, and the seeded split sweep's, still compare readings
+  across windows (default on, so a finals per key there is a measured trade, not yet taken). A test
+  scripting near-tie staffed joins with the finals on sees these finals before the beam's
+  (`autotune_staffed_singles`' `contended` searches). A key whose staffed singles ALL decline
+  cannot join that staff (the composite holding both is the refused code), so its fastest bare
+  single, the composite of that key alone, replaces the running composite when faster as a whole
+  routine. The last key's
   winning window IS the coarse composite, so `fs_composite` is set from it at admission (and stays
   `Timed` if a bare replacement later shrinks the composite; the split flags likewise), and the
   playoff skips a key whose sweep ran inside the incumbent.

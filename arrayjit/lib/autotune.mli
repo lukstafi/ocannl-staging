@@ -1363,7 +1363,8 @@ val finals_contenders : margin:float -> width:int -> ('a * float) list -> ('a * 
     crowns by {!finals_crown}. The composite playoff decides its near ties the same way
     (gh-ocannl-1665): its pool is the incumbent composite and one alternate, in that order, at width
     2, so an alternate replaces the incumbent by winning a finals of the two when both qualify, and
-    by reading faster otherwise ([fiss_sketch_playoff_finals]).
+    by reading faster otherwise ([fiss_sketch_playoff_finals]). So do the staffed sweeps' joins
+    (gh-ocannl-1698): the pool is the incumbent and the key's fastest single ([staffed_finals]).
 
     The width is the beam's so that every entry outside the finals that the beam ranked read no
     faster than every contender: each such entry was evicted from a beam (or a round's accumulator)
@@ -1372,7 +1373,8 @@ val finals_contenders : margin:float -> width:int -> ('a * float) list -> ('a * 
     ranked behind the crown ({!finals_outranked}). A beam of one holds no finals. The composite
     playoff's windows are such entries, ranked by their search readings like any candidate's: its
     swaps choose which composites are built and timed next, never the crown, so the same holds for a
-    fissioned crown, and a playoff swap needs no record of its own (gh-ocannl-1725). *)
+    fissioned crown, and a playoff swap needs no record of its own (gh-ocannl-1725). A staffed join
+    likewise chooses only the staff the later keys' singles are timed with (gh-ocannl-1698). *)
 
 val finals_order : 'a list -> 'a list
 (** The finals' windows, in order: the contenders, then the same in reverse, so each is timed twice
@@ -1712,6 +1714,21 @@ type report = {
           until a staffed single of that key is admitted (or the composite's own choice for it is
           reused), which shows the staff compatible: later refusals are the seeds' own and are not
           retried. *)
+  staffed_finals : int;
+      (** The staffed sweeps' joins (gh-ocannl-1698: the coarse, fine and split-reduce sweeps of
+          config [autotune_staffed_singles], not the seeded sweep) whose near tie a finals of the
+          two decided, or tried to. A key's fastest single and its incumbent -- the running
+          composite, or the composite's own choice for the key -- were read in different windows, so
+          a pair within config [autotune_finals_margin] of each other is re-timed in adjacent
+          windows ({!finals_order}) and the join decided by {!finals_crown}, the incumbent keeping
+          ties; outside the margin, with the margin [0] or less, under a spent budget or after an
+          inconclusive finals, the challenger joins by reading faster. Either way the composite
+          keeps the winner's search reading. *)
+  staffed_finals_timed : int;
+      (** Those finals' windows that ran, admitted or not: four per finals unless a recompile failed
+          or the budget stopped one. Counted here and NOT in [fiss_sketch_timed],
+          [fiss_sketch_staffed_timed], [candidates_timed], [timings_contended] or [finals_timed]. *)
+  staffed_finals_admitted : int;  (** Of [staffed_finals_timed], the admitted windows. *)
   seeded_single_candidates : int;
       (** The seeded singles proposed (gh-ocannl-1664, config [autotune_seeded_singles], default
           on): where the search seeds a seeded plan ({!seeded_plan}) with a segmentation of its own,
