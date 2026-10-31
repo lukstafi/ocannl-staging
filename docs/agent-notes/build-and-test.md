@@ -2454,12 +2454,19 @@ in the `tools/*.sh` scripts (gh-ocannl-1111) and in the string literals of the O
   snapshot unchecked (staging#1326). `Test_utils.Rerun_aliases` derives them: a golden from the
   rule whose `(diff …)` names it as the EXPECTED side, matching each `%{…}` against a substituted
   file name and printing the substitution (`when %{read:../config/ocannl_backend_extension.txt} is
-  cu` — that snapshot is checked only by a CUDA run), or from the `(test)` stanza beside it; a
+  cu (cuda)` — that snapshot is checked only by a CUDA run), or from the `(test)` stanza beside it; a
   source from the stanza owning its module (`(modules …)` listed, else `:standard`, a `(select)`
   arm by its target), then the test's alias, the alias of each rule running its executable — or,
   for a rule that only writes targets, of the rules reading them — or an inline-test module's
   runner rule. A member none of that reaches fails the run rather than leaving the list short:
-  give it a per-test alias. The derivation reads the rule shapes this repository spells; it is a
+  give it a per-test alias. The backend a condition's value means is named by RUNNING the code
+  the configuration reader writes the file with (`test/config/config_reads.ml`, gh-ocannl-1581)
+  over every backend, never by a table beside the scan: the golden then splits the conditional
+  aliases per backend, the list to run on that backend's box, and a value no build writes (a
+  snapshot under an extension no backend emits, a log golden named after a deprecated alias) is
+  refused as a golden no run compares; `marker_backend_vocabulary` holds the reader's extensions
+  and alias resolution to `Backends`. Both lists stay apart from the kernel-text section's GPU list
+  below. The derivation reads the rule shapes this repository spells; it is a
   point-in-time reading of the dune files, not of `dune rules`, and `tools/test-run.sh affected`
   stays the reach-by-linking answer.
 - **The same golden then lists the tests that build their own kernel text** (gh-ocannl-1685): they

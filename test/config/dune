@@ -16,7 +16,19 @@
  (package neural_nets_lib)
  (public_name ocannl_read_config)
  (modules ocannl_read_config)
- (libraries base arrayjit.utils))
+ (libraries base arrayjit.utils config_reads))
+
+; What the reader writes for the keys the backend setting decides, as a library of its own
+; (gh-ocannl-1581): `codegen_text_inventory` reads `%{read:../config/ocannl_backend_extension.txt}`
+; back out of the dune files and names the backend each value means by running this same code over
+; every backend, so `cu` is CUDA because the reader writes `cu` for CUDA, not because a table in
+; the scan says so. `base` alone, so neither the reader nor the scans linking it pay for it.
+
+(library
+ (name config_reads)
+ (package neural_nets_lib)
+ (modules config_reads)
+ (libraries base))
 
 ; The reachability half of a batch's backends (gh-ocannl-1004, gh-ocannl-1066): which backends the
 ; stanzas a dune argv can run NAME, which no configuration value shows. tools/batch-backends.sh

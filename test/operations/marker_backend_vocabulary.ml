@@ -19,7 +19,8 @@
    constant.
 
    It has since become the place for every relationship that needs the closure, for the same reason:
-   the second one below relates the backends to [Ir.Schedule]'s CPU/GPU predicates. *)
+   the second one below relates the backends to [Ir.Schedule]'s CPU/GPU predicates, the third to
+   what the configuration reader writes for each of them. *)
 
 open Base
 module Backends = Context.Backends
@@ -75,3 +76,26 @@ let () =
   Verdict.p "a name neither predicate knows is undecided" (undecided "vulkan");
   Verdict.p "a name both predicates claim is undecided too" (undecided "cc_metal");
   Verdict.p "and a backend name proper is decided" (not (undecided "metal"))
+
+(* The third relationship, gh-ocannl-1581. [Config_reads] is what [ocannl_read_config] writes for a
+   backend setting -- the canonical name a per-backend golden is named after, the extension an
+   emitted-code artifact carries -- and [codegen_text_inventory] names the backend a golden's
+   condition means by running it over every backend. Two drifts would be silent. A backend the
+   reader was never taught an extension for writes C's, so its kernel snapshots are diffed against
+   the C ones and the inventory files a CUDA-shaped condition under [cc]. And a deprecated alias
+   resolving otherwise than [Backends.get_backend] resolves it names a log golden after a backend
+   the run did not use. *)
+let () =
+  let names = List.map Backends.all_of_backend ~f:Backends.backend_name in
+  Verdict.p_none "every backend OCANNL has has an emitted-code extension the reader writes for it"
+    names ~f:(fun name -> Option.is_none (Config_reads.code_extension name));
+  Verdict.p_all "the reader writes every backend OCANNL has under its own name" names
+    ~f:(fun name ->
+      Option.equal String.equal (Config_reads.written ~key:"backend" name) (Some name));
+  Verdict.p_all "every deprecated alias the reader resolves names the backend get_backend selects"
+    Config_reads.deprecated_aliases ~f:(fun (alias, canonical) ->
+      String.equal canonical (Backends.backend_name (Backends.get_backend ~backend_name:alias ())));
+  (* The control: a name no backend has is one the reader has no extension for, so the claim above
+     is not passing on a function that answers everything. *)
+  Verdict.p "a name that is no backend has no extension"
+    (Option.is_none (Config_reads.code_extension "vulkan"))

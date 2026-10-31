@@ -4112,6 +4112,7 @@
   arrayjit.ir
   arrayjit.context
   test_utils
+  config_reads
   arrayjit.verdict))
 
 (executable

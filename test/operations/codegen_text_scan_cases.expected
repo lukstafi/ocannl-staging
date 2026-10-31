@@ -222,6 +222,10 @@ ok: executing -- a comment or a string naming the routes is not
 ok: rerun -- a test stanza's own golden
 ok: rerun -- a pform in the golden path is a substitution, reported
 ok: rerun -- the shortest backend extension substitutes as well
+ok: rerun -- an extension no backend emits means no backend
+ok: rerun -- the backend file's value is the backend itself
+ok: rerun -- the reader writes a backend under its canonical name, never a deprecated alias
+ok: rerun -- a pform reading a file the reader does not write names nothing
 ok: rerun -- a pform substitutes a file name, never a path
 ok: rerun -- the produced side of a diff is not re-run by it
 ok: rerun -- a golden of the same name in another directory is not
@@ -235,6 +239,11 @@ ok: rerun -- a module only :standard takes runs under the stanza taking it
 ok: rerun -- a module another stanza lists is not :standard's
 ok: rerun -- a module an exclusion names is not :standard's
 ok: rerun -- a module in a directory of rules alone is run by nothing
+ok: selection -- no substitution is every backend
+ok: selection -- a CUDA snapshot is CUDA's alone
+ok: selection -- a C snapshot is both CPU backends'
+ok: selection -- a value no build writes is no backend's
+ok: selection -- a pform the reader does not write is unnamed
 ok: attempt -- a syntax error is the file's, with where the parser stopped
 ok: attempt -- a lexical error is the file's, with where the lexer stopped
 ok: attempt -- a source that parses is scanned

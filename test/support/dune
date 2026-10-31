@@ -93,6 +93,7 @@
   stdio
   unix
   fresh_process
+  config_reads
   arrayjit.utils
   arrayjit.ir
   arrayjit.verdict
