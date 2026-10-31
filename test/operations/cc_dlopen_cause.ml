@@ -30,7 +30,12 @@
    fourth mode, [code_signing]: the stub runs the real compiler, then strips the library's code
    signature, so arm64 macOS's loader refuses it at [dlopen] as it refused the transient
    [schedule_conv_gemm] library (a host that enforces no signatures loads it, and the claims skip).
-   [cc_load_refusal_classes] pins the classes over canned loader texts. *)
+   [cc_load_refusal_classes] pins the classes over canned loader texts.
+
+   gh-ocannl-1728: the [codesign] mode's failing signing step is the opt-in setting's fault, so it
+   is a [Configuration] rejection, rendered as [Utils.User_error] naming
+   [cc_backend_verify_codesign]; and the [code_signing] mode's refusal is reported only after the
+   one retry, which the stripped library fails too. *)
 
 open Base
 open Ocannl
@@ -72,7 +77,11 @@ let expected_stage, detail_substring, expected_severity, applicable, skip_reason
         not Sys.win32,
         unix_fixture )
   | "codesign" ->
-      (Outcome.codesign_stage, "exit code 42", Outcome.Compiler_bug, not Sys.win32, unix_fixture)
+      ( Outcome.codesign_stage,
+        "cc_backend_verify_codesign=false",
+        Outcome.Configuration,
+        not Sys.win32,
+        unix_fixture )
   | "code_signing" ->
       ( Outcome.dlopen_stage,
         "code signature",
@@ -95,7 +104,9 @@ let exception_name severity =
 
 let raised_expected severity exn =
   match (exception_name severity, exn) with
-  | "Invalid_argument", Invalid_argument msg | "Failure", Failure msg ->
+  | "Invalid_argument", Invalid_argument msg
+  | "Failure", Failure msg
+  | "User_error", Utils.User_error msg ->
       String.is_substring msg ~substring:detail_substring
   | _ -> false
 
@@ -214,6 +225,12 @@ let run () =
     (rejection_has (fun (_, _, severity, _) -> Outcome.equal_severity severity expected_severity));
   claim "the detail carries the injected failure diagnostic"
     (rejection_has (fun (_, _, _, detail) -> String.is_substring detail ~substring:detail_substring));
+  (* gh-ocannl-1728: a signing refusal is retried once before it is reported, and the report says
+     so; the stripped library stays unsigned, so the retry is refused too. *)
+  if String.equal mode "code_signing" then
+    claim "the detail says the load was retried once after a code-signing refusal"
+      (rejection_has (fun (_, _, _, detail) ->
+           String.is_substring detail ~substring:"The load was retried once"));
   claim "the detail carries the compile/link command"
     (rejection_has (fun (_, _, _, detail) -> String.is_substring detail ~substring:compiler_command));
   claim

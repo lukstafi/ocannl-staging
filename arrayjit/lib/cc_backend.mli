@@ -139,3 +139,26 @@ val classify_load_refusal : library_present:bool -> string -> load_refusal
 val load_refusal_severity : load_refusal -> Ir.Schedule_outcome.severity
 (** The severity of the [dlopen]-stage rejection each class raises: [Compiler_bug] for
     [Load_defect], [Environment] for the other two. *)
+
+val signing_retry_pause : float
+(** Seconds {!load_retrying_signing_refusal}'s caller in the backend pauses before its one retry. *)
+
+type 'lib load_outcome =
+  | Loaded of 'lib
+  | Loaded_on_retry of { lib : 'lib; first_dlerror : string }
+      (** The first load was a {!Code_signing_refusal}; the retry loaded. *)
+  | Refused of { refusal : load_refusal; dlerror : string; first_dlerror : string option }
+      (** [refusal] classifies the last attempt's [dlerror]; [first_dlerror] is set when that
+          attempt was the retry. *)
+
+val load_retrying_signing_refusal :
+  load:(unit -> ('lib, string) Result.t) ->
+  pause:(unit -> unit) ->
+  library_present:(unit -> bool) ->
+  'lib load_outcome
+(** [load_retrying_signing_refusal ~load ~pause ~library_present] runs [load] (a [dlopen], its
+    [Error] the [dlerror()]) and, when {!classify_load_refusal} reads the refusal as a
+    {!Code_signing_refusal}, calls [pause] and [load] exactly once more (gh-ocannl-1728). Measured
+    on arm64 macOS before adding it: dyld keeps no verdict on a refused path, so a reload after the
+    cause clears succeeds, while a library the policy keeps refusing is refused again. The other
+    classes are not retried. Exposed for [test/operations/cc_load_refusal_classes]. *)

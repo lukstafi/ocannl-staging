@@ -76,9 +76,10 @@ let () =
      become candidate declines under any provenance or strictness; their fatal records keep the
      cause and render it into the public exception. *)
   (* gh-ocannl-1717: an [Environment] refusal at the same stages (code signing, a missing library)
-     is just as fatal, and renders as [Failure] rather than [Invalid_argument]. *)
+     is just as fatal, and renders as [Failure] rather than [Invalid_argument]. gh-ocannl-1728: so
+     is a [Configuration] one (the opt-in signing step failing), rendered as [Utils.User_error]. *)
   List.iter [ dlopen_stage; artifact_missing_stage; codesign_stage ] ~f:(fun stage ->
-      List.iter [ Compiler_bug; Environment ] ~f:(fun severity ->
+      List.iter [ Compiler_bug; Configuration; Environment ] ~f:(fun severity ->
           let detail = "post-compile diagnostic: " ^ stage in
           let rejection = backend_rejection ~stage ~severity detail in
           List.iter [ Candidate; Cache_replay; Advisory; User_schedule ] ~f:(fun provenance ->
@@ -92,7 +93,9 @@ let () =
                   assert (Option.equal equal_cause fatal.cause (Some rejection));
                   assert (
                     match (severity, fatal.exn) with
-                    | Compiler_bug, Invalid_argument msg | Environment, Failure msg ->
+                    | Compiler_bug, Invalid_argument msg
+                    | Configuration, Utils.User_error msg
+                    | Environment, Failure msg ->
                         String.equal msg detail
                     | _ -> false);
                   (* The same stage at another phase remains an ordinary decline. *)
