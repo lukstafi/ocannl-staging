@@ -51,9 +51,10 @@
 #   tools/test-run.sh lock-status [RUN|last]          # idle/held; exits 0/3 (2 error)
 #   tools/test-run.sh idle                             # 0 idle, 3 locked, 2 unreadable
 #                                                     # snapshot, not a reservation
-#   tools/test-run.sh affected [--referenced-only] --since BASE|REV|REV..REV|--files PATH...
+#   tools/test-run.sh affected [--referenced-only] [--why ALIAS|all] --since BASE|REV|REV..REV|--files PATH...
 #                                                      # the per-test aliases a change reaches,
-#                                                      # link-only ones last; runs none
+#                                                      # link-only ones last; runs none;
+#                                                      # --why explains one on stderr
 #                                                      # (tools/affected-tests.sh)
 #   tools/test-run.sh aliases PATH...                 # a test's per-test aliases, by family;
 #                                                      # runs none

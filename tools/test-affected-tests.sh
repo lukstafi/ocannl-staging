@@ -546,7 +546,7 @@ if harness_leg 'link-only'; then
   ordered '... and t_core names `used`' \
     @t1/runtest-t_core @t2/runtest-needs_pkg @t2/runtest-orphan @t2/runtest-pkg @t2/runtest-scan @t5/slow-usesh @t1/runtest-t_mid @t1/runtest-t_mid-blind @t2/runtest-gen-v1 @t2/runtest-scenario_x @t2/slow-gen
   mutant=$repo/tools/affected-mutant.sh
-  if FROM='return 0 if !$defs || grep { $tok->{$_} } keys %$defs;' TO='return 0;' \
+  if FROM='my @d = sort grep { $tok->{$_} } keys %$defs;' TO='my @d = sort keys %$defs;' \
       perl -0pe '$n += s/\Q$ENV{FROM}\E/$ENV{TO}/g; END { exit($n == 1 ? 0 : 1) }' \
       "$repo/tools/affected-tests.sh" >"$mutant"; then
     printf 'let used = 1\nlet unused = 3\n' >"$repo/lib/helper.ml"
@@ -623,9 +623,9 @@ if harness_leg 'option order'; then
   git_q checkout -q -- lib/helper.ml || exit 2
 fi
 
-if harness_leg 'helper definitions'; then
-  # A private helper library counts by the definitions a test names (gh-ocannl-1651), its
-  # comments left out; a re-export counts only beside the module making it.
+# A private helper library and four tests linking it or core, committed as t8 (the
+# 'helper definitions' and 'explain' legs; each removes it with `git_q reset -q --hard HEAD~1`).
+helper_fixture() {
   mkdir -p "$repo/t8" || exit 2
   cat >"$repo/t8/dune" <<'DUNE'
 (library (name hlp) (modules hlp) (libraries core))
@@ -651,6 +651,12 @@ ML
   # `H` with no `Core` beside it is some other H: a local module, or Stdlib's.
   printf 'module H = struct let used = 0 end\nlet () = ignore H.used\n' >"$repo/t8/t_hbare.ml"
   git_q add -A t8 && git_q commit -qm helper-library || exit 2
+}
+
+if harness_leg 'helper definitions'; then
+  # A private helper library counts by the definitions a test names (gh-ocannl-1651), its
+  # comments left out; a re-export counts only beside the module making it.
+  helper_fixture
   affected --referenced-only --files lib/helper.ml
   expect 'a helper library names a module through the definitions a test names, never its comments; a bare re-export name is no mention' 0 \
     @t1/runtest-t_core @t2/runtest-gen-v1 @t2/runtest-needs_pkg @t2/runtest-orphan @t2/runtest-pkg @t2/runtest-scan @t2/runtest-scenario_x @t2/slow-gen \
@@ -670,12 +676,72 @@ ML
     rm -f "$mutant"
   }
   hctl 'the definitions named are what leave an unnamed one out' \
-    'next if $done{"$f\0$k"} || ($c->{names} && !grep { $tok{$_} } @{$c->{names}});' 'next if $done{"$f\0$k"};' @t8/runtest-t_hplain
+    'next if $done{"$f\0$k"} || ($c->{names} && !(@by = grep { $tok{$_} } @{$c->{names}}));' 'next if $done{"$f\0$k"};' @t8/runtest-t_hplain
   hctl 'blanking comments is what keeps a doc comment from naming a module' \
     '    for my $l (split /\n/, code_of($s)) {' '    for my $l (split /\n/, $s) {' @t8/runtest-t_hplain
   hctl 'naming the re-exporting module is what a re-exported name needs' \
-    'next if $via && !grep { $tok->{$_} } keys %$via;' '' @t8/runtest-t_hbare
+    'next if $via && !@beside;' '' @t8/runtest-t_hbare
   git_q reset -q --hard HEAD~1 && rm -rf "${repo:?}/t8" || exit 2
+fi
+
+if harness_leg 'explain'; then
+  # `--why ALIAS` (gh-ocannl-1711) names why an alias is listed: the changed path, the chain of
+  # libraries to it, and the token that made it referenced -- through a helper definition, a
+  # re-export, or none (link-only). Each line is pinned whole, so an explanation that loses its
+  # chain, its token or its file fails.
+  helper_fixture
+  why_has() { # LABEL LINE... : each line occurs whole on stderr
+    local label=$1 l miss=
+    shift
+    for l in "$@"; do grep -qxF -- "$l" "$err" || miss="$miss [$l]"; done
+    if [ "$rc" = 0 ] && [ -z "$miss" ]; then report 0 "$label"
+    else report 1 "$label" "exit $rc; missing:$miss; stderr: $(grep '^affected: why ' "$err" | tr '\n' '|')"; fi
+  }
+  printf 'let used = 2\nlet unused = 2\n' >"$repo/lib/helper.ml"
+  affected HEAD --why @t8/runtest-t_hindirect --why t8/runtest-t_hplain --why @t2/runtest-gen-v1 \
+    --why @t2/runtest-scan --why @t3/runtest-neg --why @t9/runtest-none
+  cp "$out" "$TMP/why-out" || exit 2
+  why_has 'helper: the changed definition is named through the helper definitions a test names, back to its own source' \
+    'affected: why @t8/runtest-t_hindirect: REFERENCED: printed first' \
+    'affected: why @t8/runtest-t_hindirect: its owner tests t_hindirect (t8) -> library hlp (t8) -> library core (lib), which lib/helper.ml (its module Helper) reached' \
+    'affected: why @t8/runtest-t_hindirect:   referenced: it names Helper: `H` at t8/hlp.ml (definition `names_core`) <- `names_core` at t8/hlp.ml (definition `indirect`) <- `indirect` at t8/t_hindirect.ml (its own source), re-exporting Helper from Core, with `Core` at t8/hlp.ml (definition `names_core`) <- `names_core` at t8/hlp.ml (definition `indirect`) <- `indirect` at t8/t_hindirect.ml (its own source); and its changed definition(s): `used` at t8/hlp.ml (definition `names_core`) <- `names_core` at t8/hlp.ml (definition `indirect`) <- `indirect` at t8/t_hindirect.ml (its own source)'
+  why_has 'link-only: what names neither the module nor a re-export of it says so (the leading @ optional)' \
+    'affected: why @t8/runtest-t_hplain: LINK-ONLY: printed last; --referenced-only leaves it off' \
+    'affected: why @t8/runtest-t_hplain: its owner tests t_hplain (t8) -> library hlp (t8) -> library core (lib), which lib/helper.ml (its module Helper) reached' \
+    'affected: why @t8/runtest-t_hplain:   link-only on its account: its code (its sources, its project ppx'"'"'s, the helper definitions it names) names neither Helper nor a re-export of it beside the module making it (H beside Core)'
+  why_has 're-export: a test naming the module through a re-export, but no changed definition, is link-only and told so' \
+    'affected: why @t2/runtest-gen-v1: LINK-ONLY: printed last; --referenced-only leaves it off' \
+    'affected: why @t2/runtest-gen-v1:   link-only on its account: its code (its sources, its project ppx'"'"'s, the helper definitions it names) names Helper (`H` at t2/gen.ml (its own source), re-exporting Helper from Core, with `Core` at t2/gen.ml (its own source)) but none of its changed definitions (used)'
+  why_has 'a scan: its own rule reads the changed path; an alias nothing reaches, and a name dune does not list, say so' \
+    'affected: why @t2/runtest-scan: REFERENCED: printed first' \
+    'affected: why @t2/runtest-scan: the rule of its own target t2/scan.actual reads lib/helper.ml' \
+    'affected: why @t3/runtest-neg: NOT LISTED: no changed path reaches it' \
+    'affected: why @t9/runtest-none: no per-test alias dune lists has this name (`dune show aliases DIR` lists them)'
+  affected HEAD
+  if [ "$rc" = 0 ] && cmp -s "$out" "$TMP/why-out" && ! grep -q '^affected: why ' "$err"; then
+    report 0 '--why changes nothing on stdout, and without it nothing is explained'
+  else report 1 '--why changes nothing on stdout, and without it nothing is explained' "exit $rc; $(diff "$TMP/why-out" "$out")"; fi
+  # The whole module changed: the re-export alone now names the changed part.
+  affected --files lib/helper.ml --why @t2/runtest-gen-v1
+  why_has 're-export: with the whole module changed, the re-export beside its module is the reference' \
+    'affected: why @t2/runtest-gen-v1: REFERENCED: printed first' \
+    'affected: why @t2/runtest-gen-v1:   referenced: it names Helper: `H` at t2/gen.ml (its own source), re-exporting Helper from Core, with `Core` at t2/gen.ml (its own source); and Helper changed as a whole'
+  # `--why all` explains every listed alias, and its verdicts are the tiers the list was ranked
+  # by: REFERENCED or BLIND for each alias printed first, LINK-ONLY for each one printed last.
+  affected HEAD --why all
+  sed -n 's/^affected: link-only: //p' "$err" | sort >"$TMP/why-link"
+  grep -vxF -f "$TMP/why-link" "$out" | sort >"$TMP/why-first"
+  sed -n 's/^affected: why \(@[^:]*\): LINK-ONLY: .*/\1/p' "$err" | sort >"$TMP/why-v-link"
+  sed -nE 's/^affected: why (@[^:]*): (REFERENCED|BLIND): .*/\1/p' "$err" | sort >"$TMP/why-v-first"
+  if [ "$rc" = 0 ] && [ -s "$TMP/why-link" ] && [ -s "$TMP/why-first" ] &&
+     cmp -s "$TMP/why-link" "$TMP/why-v-link" && cmp -s "$TMP/why-first" "$TMP/why-v-first"; then
+    report 0 '--why all: one verdict per listed alias, agreeing with its rank'
+  else report 1 '--why all: one verdict per listed alias, agreeing with its rank' \
+    "exit $rc; link [$(tr '\n' ' ' <"$TMP/why-link")] vs [$(tr '\n' ' ' <"$TMP/why-v-link")]; first [$(tr '\n' ' ' <"$TMP/why-first")] vs [$(tr '\n' ' ' <"$TMP/why-v-first")]"; fi
+  affected HEAD --why
+  if [ "$rc" = 2 ] && grep -q -- '--why needs an alias, or all' "$err"; then report 0 '--why with no alias is refused'
+  else report 1 '--why with no alias is refused' "exit $rc; $(cat "$err")"; fi
+  git_q checkout -q -- lib/helper.ml && git_q reset -q --hard HEAD~1 && rm -rf "${repo:?}/t8" || exit 2
 fi
 
 if harness_leg 'dune fragment'; then
@@ -1234,7 +1300,7 @@ if harness_leg 'probe controls'; then
   probe_restore
   probe_edit 's/\(echo m\)/(echo n)/' &&
     control 'a stanza'"'"'s link rule is what reaches a link_deps consumer' \
-      '$hit{$_} = $whole_hit{$_} = 1 for @{$stanza_rule{$t}};' '' \
+      'for (@{$stanza_rule{$t}}) { $hit{$_} = $whole_hit{$_} = 1; $hit_why{$_} //= $why }' '' \
       HEAD -- @p3/runtest-reads3 @p3/runtest-lk $p3_scan
   probe_restore
   probe_edit 's/\(test \(name pa\) \(modules pa\)\)/(test (name pa) (modules pa) (flags (:standard -w -a)))/' &&
