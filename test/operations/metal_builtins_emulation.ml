@@ -65,6 +65,12 @@ let metal_only =
     ( "ocannl_cos",
       "a domain guard over Metal's fast cos, executed on Metal by unary_math_special_values" );
     ("ocannl_shfl_xor", "a simdgroup shuffle, with no host meaning");
+    ( "ocannl_max",
+      "integer-precision Max/Relu in the operands' common type (C's fmax needs no helper), \
+       executed on Metal by op_table_compile" );
+    ( "ocannl_min",
+      "integer-precision Min in the operands' common type (C's fmin needs no helper), executed on \
+       Metal by op_table_compile" );
   ]
 
 (* The parameter type of the C table's [<prec>_to_uint4x32]; the Metal one's is read off its

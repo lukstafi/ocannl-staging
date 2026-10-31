@@ -552,6 +552,32 @@ using namespace metal;|}, []);
     ( "ocannl_cos",
       {|inline float ocannl_cos(float x) { return fabs(x) < 0x1p22f ? cos(x) : precise::cos(x); }|},
       [] );
+    (* Integer-precision [Max] / [Min] / [Relu] (gh-ocannl-1731). MSL's [fmax]/[fmin] are float-only
+       and its integer [max]/[min] need both operands of one type, while an operand at an integer
+       precision is a [uchar] read, an integer-promoted [int] sum, or a float an inlined math
+       operator left -- [Metal_backend]'s [int_via_f32]. These take C's usual arithmetic conversions
+       instead: the comparison happens in the operands' common type, so an [int] sum is not narrowed
+       and a float is not truncated before the store. A floating common type goes to [fmax]/[fmin]
+       themselves, the float [Max]/[Min] arms' own calls, NaN handling included ([fmin(1, NaN)] is
+       1); an integer one to the exact comparison. *)
+    ( "ocannl_max",
+      {|template <typename T> inline T ocannl_max_in(T a, T b) { return a > b ? a : b; }
+inline float ocannl_max_in(float a, float b) { return fmax(a, b); }
+inline half ocannl_max_in(half a, half b) { return fmax(a, b); }
+template <typename A, typename B> inline decltype(A() + B()) ocannl_max(A a, B b) {
+  typedef decltype(A() + B()) C;
+  return ocannl_max_in((C)a, (C)b);
+}|},
+      [] );
+    ( "ocannl_min",
+      {|template <typename T> inline T ocannl_min_in(T a, T b) { return a < b ? a : b; }
+inline float ocannl_min_in(float a, float b) { return fmin(a, b); }
+inline half ocannl_min_in(half a, half b) { return fmin(a, b); }
+template <typename A, typename B> inline decltype(A() + B()) ocannl_min(A a, B b) {
+  typedef decltype(A() + B()) C;
+  return ocannl_min_in((C)a, (C)b);
+}|},
+      [] );
     (* The e5m2 software codec. MSL has no fp8 type, so an fp8 tensor is stored as a byte and its
        arithmetic runs in f32 ([Metal_backend.C_syntax_config.compute_prec]): these two are the
        whole storage/compute seam for fp8 on Metal, called at every load and every store.

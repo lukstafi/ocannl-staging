@@ -1242,9 +1242,29 @@ module Impl = struct
       | Ops.Single_prec _ -> "f"
       | Ops.Double_prec _ ->
           raise @@ Utils.User_error "Metal backend does not support double precision"
-      | Ops.Int64_prec _ -> "l"
-      | Ops.Uint64_prec _ -> "ul"
+      (* A suffix on a FLOAT literal: [l] and [ul] are integer suffixes, and [1.0l] reads as a [long
+         double] literal, which MSL lacks -- the 64-bit integer [Recip] and [Satur01_gate] arms
+         crashed the Metal compiler service (gh-ocannl-1731). An unsuffixed literal converts like
+         the other integer precisions' do. *)
+      | Ops.Int64_prec _ -> ""
+      | Ops.Uint64_prec _ -> ""
       | Ops.Void_prec -> ""
+
+    (* MSL's math library has [float] and [half] overloads only, so a math builtin called on an
+       integer operand is an ambiguous call (gh-ocannl-1731). An integer precision's math operators
+       therefore call the f32 overload: the precision the CUDA and HIP tables already compute
+       integer math at ([expf], [sqrtf], ...). cc's C reference calls the double functions, which
+       MSL lacks, so a large integer operand can round differently here (and on CUDA/HIP) than on
+       cc. The result stays a float, as it does in C: an inlined [2 * sin(a)] keeps its fraction
+       until the store narrows it, rather than truncating the sine first. *)
+    let int_via_f32 fn v = group (string (fn ^ "((float)") ^^ parens v ^^ rparen)
+
+    (* The integer arms the C reference ({!Ops.binop_c_syntax} / {!Ops.unop_c_syntax}) refuses,
+       refused here with the same reason rather than rendered into an ambiguous call. *)
+    let int_refusal prec what =
+      invalid_arg
+        (Printf.sprintf "Metal C_syntax_config: %s not supported for integer precisions (got %s)"
+           what (Ops.prec_string prec))
 
     (* MSL's math library has [float] and [half] overloads but no [bfloat] ones, so a builtin called
        on bfloat operands promotes them and returns [float] -- and unlike C, MSL rejects the
@@ -1308,6 +1328,11 @@ module Impl = struct
               (string "(half)precise::fmod(" ^^ string "(float)" ^^ parens v1 ^^ comma ^^ space
              ^^ string "(float)" ^^ parens v2 ^^ rparen)
       | Mod, _ -> math "precise::fmod"
+      (* [fmax]/[fmin] are float-only and the integer [max]/[min] want one operand type; the
+         [Builtins_metal] templates compare in the operands' common type instead (an inlined [uchar]
+         sum stays an [int], an inlined float stays a float). *)
+      | Max, p when Ops.is_integer p -> func "ocannl_max"
+      | Min, p when Ops.is_integer p -> func "ocannl_min"
       | Max, _ -> math "fmax"
       | Min, _ -> math "fmin"
       (* Comparisons and logical connectives are precision-independent and spelled the same in MSL
@@ -1357,6 +1382,7 @@ module Impl = struct
               (string "(half)pow("
               ^^ separate comma_sep [ string "(float)" ^^ parens v1; string "(float)" ^^ parens v2 ]
               ^^ rparen)
+      | ToPowOf, p when Ops.is_integer p -> int_refusal p "ToPowOf"
       | ToPowOf, _ -> math "pow"
       (* The RNG ops call the same builtins under the same precision contract on every C-family
          backend, so they render through the shared helper. *)
@@ -1381,6 +1407,7 @@ module Impl = struct
         match prec with
         | Ops.Half_prec _ ->
             fun v -> group (string ("(half)" ^ fn ^ "((float)") ^^ parens v ^^ rparen)
+        | p when Ops.is_integer p -> int_via_f32 fn
         | _ -> math_doc fn
       in
       match (op, prec) with
@@ -1403,12 +1430,19 @@ module Impl = struct
           fun v -> group (string "(bfloat)max(0.0f, (float)" ^^ parens v ^^ rparen)
       | Relu, Ops.Double_prec _ ->
           raise @@ Utils.User_error "Metal backend does not support double precision"
-      | Relu, _ (* Byte_prec, Void_prec *) ->
+      (* Through [Builtins_metal]'s [ocannl_max], for [Max]'s reasons: an [int] literal against a
+         [uchar], [ushort], [uint] or 64-bit operand makes the integer [max] ambiguous, and casting
+         the operand would narrow an integer-promoted sum or truncate an inlined float. *)
+      | Relu, p when Ops.is_integer p ->
+          fun v -> func_doc "ocannl_max" (separate comma_sep [ string "0"; v ])
+      | Relu, _ (* Uint4x32_prec, Void_prec *) ->
           fun v -> func_doc "max" (separate comma_sep [ string "0"; v ])
       | Satur01, Ops.Bfloat16_prec _ ->
           (* Like [Relu], spelled out rather than bridged: [clamp(bfloat, 0.0bf, 1.0bf)] — the
              suffixed form the generic arm below would emit — is itself ambiguous in MSL. *)
           fun v -> group (string "(bfloat)clamp((float)" ^^ parens v ^^ string ", 0.0f, 1.0f)")
+      | Satur01, p when Ops.is_integer p ->
+          fun v -> group (string "clamp((float)" ^^ parens v ^^ string ", 0.0f, 1.0f)")
       | Satur01, p ->
           let s = metal_prec_suffix_float p in
           fun v ->
@@ -1416,7 +1450,12 @@ module Impl = struct
       | Recip, p ->
           let s = metal_prec_suffix_float p in
           fun v -> infix_binop "/" (string @@ "1.0" ^ s) v
+      | Recip_sqrt, p when Ops.is_integer p -> int_refusal p "Recip_sqrt"
       | Recip_sqrt, _ -> math_doc "rsqrt"
+      (* Not the identity: an operand at an integer precision can still be float-valued -- the
+         integer [Recip] arm above divides in floating point, and [int_via_f32] results stay float.
+         [truncf] on the widened operand is also what cc's C reference renders. *)
+      | Trunc, p when Ops.is_integer p -> int_via_f32 "trunc"
       | Trunc, _ -> math_doc "trunc"
       | Tanh_approx, Ops.Half_prec _ -> math_doc "tanh"
       (* gh-ocannl-1435: the fast f32 [tanh] the production policy selects returns 0 for x from
