@@ -146,18 +146,21 @@ let same_outcome prec v =
 
 (* Heap words [set_flat_values] allocates over [numel] interior cells: on stderr, as the cost of a
    host write is a property of this build, not of the golden. Measured on a buffer of 512 runs of
-   128 cells (padded) and on one unpadded run of the same size. *)
+   128 cells (padded) and on one unpadded run of the same size, in a window the finalisers of
+   earlier garbage are drained ahead of ([Gc_witness.drained_finalisers]). *)
 let allocated_words ~dims ~pads prec =
   let numel = Array.fold (interior ~dims ~pads) ~init:1 ~f:( * ) in
   let values = make_values numel in
   let nd = fresh prec ~dims ~pads in
-  let before = Stdlib.Gc.allocated_bytes () in
-  Nd.set_flat_values ?padding:pads nd values;
-  let words = (Stdlib.Gc.allocated_bytes () -. before) /. Float.of_int (Stdlib.Sys.word_size / 8) in
-  Stdio.eprintf "allocation witness %s %s: %.0f words for %d cells (not part of the golden)\n"
+  let (), { Gc_witness.words; drained } =
+    Gc_witness.drained_finalisers (fun () -> Nd.set_flat_values ?padding:pads nd values)
+  in
+  Stdio.eprintf
+    "allocation witness %s %s: %.0f words for %d cells, after draining %.0f words of finalisers \
+     (not part of the golden)\n"
     (Ops.prec_string prec)
     (if Option.is_some pads then "padded" else "unpadded")
-    words numel;
+    words numel drained;
   words
 
 let witness_padded_dims = [| 514; 130; 1 |]
@@ -183,6 +186,7 @@ let () =
     (List.cartesian_product Ops.storage_precs (Array.to_list edge_values))
     ~f:(fun (prec, v) -> same_outcome prec v);
   (* Both witness shapes, for every precision. *)
+  claim "the allocation window counts a known allocation" (Gc_witness.window_sees_allocation ());
   let writes precs =
     List.concat_map precs ~f:(fun prec ->
         [

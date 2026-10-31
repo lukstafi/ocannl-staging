@@ -460,15 +460,21 @@ let () =
     (Option.is_some (K.find c "shared1") && Option.is_none (K.find c "raised"))
 
 (* The registry [with_cold_caches] reads holds its caches weakly: a cache its owner dropped is
-   collected, with the code it retained. *)
+   collected, with the code it retained. The control is a cache its owner still holds, whose code
+   the same witness reports alive. *)
+let[@inline never] published label =
+  let c : string ref K.t = K.create ~capacity_bytes:(fun () -> 1000) in
+  let v = ref label in
+  K.publish c ~entries:[ (label, v) ] ~bytes:1;
+  (c, Gc_witness.witness v)
+
+(* Returns the witness alone, so no slot of the caller holds the dropped cache. *)
+let[@inline never] dropped_code () = snd (published "dropped program")
+
 let () =
-  let w = Stdlib.Weak.create 1 in
-  let[@inline never] make () =
-    let c : string ref K.t = K.create ~capacity_bytes:(fun () -> 1000) in
-    let v = ref "dropped program" in
-    K.publish c ~entries:[ ("dropped", v) ] ~bytes:1;
-    Stdlib.Weak.set w 0 (Some v)
-  in
-  make ();
-  Stdlib.Gc.full_major ();
-  p "cold scope: the registry keeps no dropped cache's code alive" (not (Stdlib.Weak.check w 0))
+  let held, held_code = published "held program" in
+  let dropped_code = dropped_code () in
+  p "cold scope: the registry keeps no dropped cache's code alive"
+    (Gc_witness.reclaimed dropped_code);
+  claim "cold scope: a cache its owner holds keeps its code alive" (Gc_witness.kept held_code);
+  ignore (Stdlib.Sys.opaque_identity held : string ref K.t)
