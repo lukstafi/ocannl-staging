@@ -873,13 +873,36 @@ single-threaded segments that sum to the serial step
   committed first: `gh1343_ab.sh` writes its "HEAD with BASE's scheduler sources" as a commit with
   git plumbing, touching no branch, and hands ab.py the two commits; `gh1180_tie_ab.sh` runs one
   bin_cells run per case (two geometries of one build) and keeps only its census and header checks.
-  The drivers that still hand-roll their cells, and why: `gh1051_bf16_ab.sh` (its drift control
-  diffs the generated `.hip` between arms, HIP-only), `gh1051_boundary_split.sh` (two checkouts
-  each running from its own tree, with cross-revision source proofs), `gh1253_cells.sh` (a
-  calibration pipeline whose fits feed later cells), `gh1253_flip_cells.sh` (bench_gpt's untuned
-  step under two gates: a record-reader conversion, not yet made), `gh1557_cells.sh` (search, then
-  two replays sharing one cache: sequential by design), `gh1529_nvrtc_cost.sh` (a C probe and
-  per-cell caches), `gh1279_cells.sh` and `gh740_cells.sh` (the interleaving is inside the bench).
+  Every driver runs its cells on this machinery (gh-ocannl-1607). Those whose cells are a design of
+  arms are bin_cells runs: `gh1051_bf16_ab.sh` (per size, four arms -- the two bf16_arithmetic
+  arms at bf16 and at the f32 control -- its drift control's source proof run as single cells) and
+  `gh1253_flip_cells.sh` (per fixture, the two seeding gates over `--reader record`, its census read
+  back from each cell's stderr). Those whose cells are a sequence -- a calibration pipeline whose
+  fits feed later cells (`gh1253_cells.sh`), a search then two replays of its cache
+  (`gh1557_cells.sh`), a dump then a search (`gh1529_nvrtc_cost.sh`), legs that are whole
+  searches in an operator-given order (`gh740_cells.sh`), a bench that interleaves its own variants
+  (`gh1279_cells.sh`) -- run each one through `cells.py cell`, below.
+  `gh1002_cells.py` keeps its resumable matrix and reads each cell's records with
+  `cells.treatment_problems`; `gh834_cells.sh` keeps its supervisor and checks its pins with
+  `config_records.py expect`. One driver still hand-rolls its cells, for a reason that holds:
+  `gh1051_boundary_split.sh` measures the two revisions around gh-ocannl-1064, which predate both
+  the configuration stream (gh-ocannl-1566) and the `bench-result:` line, so neither the treatment
+  check nor bin_cells' reader has anything to read there. No driver reads the prose
+  `log_config_sourcing` trace: `test_cells.py` refuses one that does.
+  The tuned cells pin `--ocannl_autotune_cache_dir` (a path of their own, or `autotune_cache`, which
+  resolves inside the cell's own directory): `Autotune.resolve_cache_dir` reads the key under two
+  defaults, so a defaulted key resolves two ways and `config_records.py` refuses the cell.
+- `cells.py cell` — one cell from a shell driver (gh-ocannl-1607): `python3 benchmarks/cells.py
+  cell --backend B --dir DIR [--stdout F] [--stderr F] [--timeout S] [--expect KEY=VALUE]... --
+  [NAME=VALUE]... EXE [ARGS...]` runs EXE with the pins ahead of ARGS from DIR (created, refused
+  unless empty), in the hermetic environment plus the leading stated NAME=VALUE runner modes (an
+  OCANNL_* one is refused), as a supervised group under the cap, and writes DIR/cell.json: argv,
+  stated environment, runtime controls, exit, wall, resolved configuration and problems. Each
+  `--expect` is a setting the cell must have resolved from its command line. Exit 0 clean, the
+  cell's own status when it failed, 3 for a refused measurement, 124 at the cap, 1 when its
+  configuration is not its command line (whatever else held), 125 when its group was not proven
+  gone -- the driver stops there. `config_records.py expect FILE KEY=VALUE...` is the same check
+  over a stderr a driver kept itself.
 - `bench_output.py` — the one reader of what OCANNL's benches print (gh-ocannl-1443): `bench-result:`
   lines, the runners' result line (the last stdout line opening a JSON object, read strictly;
   `strict_json.py field` asks it for one field from a shell driver), `bench: checkpoint` lines and

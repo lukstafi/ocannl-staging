@@ -25,8 +25,12 @@
 # 130 interrupted; 2 usage. A crown or build that hits CAP, or a session capped before its first
 # candidate attempt or after the runner's "search done" marker, is a failure: none of them leaves a
 # partial search measurement.
-# The session steps check their result line with python3 (stdlib only, gh834_session.py); a
-# session step requested where python3 is missing is a usage error before any step runs.
+# The measurement steps check their treatment with python3 (stdlib only): each runs under
+# --ocannl_log_config_json=true, and the resolved-configuration records on its stderr
+# (config_records.py, gh-ocannl-1566) must show the pinned backend -- and a session's timing mode --
+# taken from the command line and nothing from the environment. The session steps also check their
+# result line (gh834_session.py). A measurement step requested where python3 is missing is a usage
+# error before any step runs.
 # The environment is cleared of OCANNL_*, BENCH_* and the OpenMP controls (OMP_*, GOMP_*, KMP_*);
 # device-selection variables (CUDA_*, HIP_*, ROCR_*, HSA_*, ...) are kept and recorded.
 #
@@ -243,13 +247,25 @@ require_complete_session() {
   fi
 }
 
-# A session's completeness is read by Python; finding it missing after a session's search ran would
-# discard the measurement, so it is refused before any step.
+# The resolved-configuration records (--ocannl_log_config_json, gh-ocannl-1566) on a step's
+# stderr state its treatment: [config_holds STEP KEY=VALUE...] holds when each KEY resolved to VALUE
+# from the command line and no setting came from the environment (config_records.py prints why
+# not). A record stream is point-in-time: a capped step's states what it had resolved by then.
+config_holds() { python3 -I "$root/benchmarks/config_records.py" expect "$out/$1.err" "${@:2}"; }
+require_config() {
+  local verdicts
+  verdicts=$(config_holds "$@") && return 0
+  printf '%s\n' "$verdicts" | sed "s/^/== step $1: MISSING EVIDENCE: /"
+  [ -n "$verdicts" ] || echo "== step $1: MISSING EVIDENCE: the configuration check could not run"
+  status=1
+}
+# The records are read by Python, and a session's completeness too; finding it missing after a
+# step ran would discard the measurement, so it is refused before any step.
 for s in "$@"; do
   case $s in
-  session-*)
+  crown-* | session-*)
     command -v python3 >/dev/null 2>&1 ||
-      { echo "gh834: step $s needs python3 to check its result line" >&2; exit 2; } ;;
+      { echo "gh834: step $s needs python3 to check its treatment" >&2; exit 2; } ;;
   esac
 done
 
@@ -293,14 +309,14 @@ for s in "$@"; do
   crown-fwd | crown-rev)
     need_build "$s"
     if step "$s" ../_build/default/bin/projection_shape_bench.exe 200 8 d "${s#crown-}" seeds \
-      --ocannl_backend="$backend" --ocannl_log_config_sourcing=true; then
+      --ocannl_backend="$backend" --ocannl_log_config_json=true; then
       require "$s" out '^== gh-ocannl-755: candidate ranking'
       require "$s" out '^   crown: '
-      require "$s" err "^Found $backend, commandline --ocannl_backend=$backend\$"
+      require_config "$s" backend="$backend"
     else status=1; fi
     # The ranking table and the crown verdicts, which are the gh-ocannl-833 deliverable.
     sed -n '/== gh-ocannl-755/,$p' "$out/$s.out"
-    grep 'Found .*--ocannl_backend=' "$out/$s.err" | sort -u
+    python3 -I "$root/benchmarks/config_records.py" show "$out/$s.err" backend
     ;;
   session-isolated | session-queued)
     need_build "$s"
@@ -318,12 +334,11 @@ for s in "$@"; do
       BENCH_TIMING_TRACE=1 \
       ../_build/default/benchmarks/runners/ocannl/bench_gpt.exe --ocannl_backend="$backend" \
       --ocannl_autotune_timing="$mode" --ocannl_autotune_cache_dir="$out/cache-$mode" \
-      --ocannl_autotune_log=false --ocannl_log_config_sourcing=true; then
+      --ocannl_autotune_log=false --ocannl_log_config_json=true; then
       # A completed session is evidence only with its treatment and its cost record in it.
       # compile_s and searched:true are the result line's fields: gh834_session.py reads them.
       require "$s" err '^timing-trace: summary: '
-      require "$s" err "^Found $backend, commandline --ocannl_backend=$backend\$"
-      require "$s" err "^Found $mode, commandline --ocannl_autotune_timing=$mode\$"
+      require_config "$s" backend="$backend" autotune_timing="$mode"
       require_complete_session "$s"
     else
       rc=$?
@@ -333,8 +348,7 @@ for s in "$@"; do
       # "search done" marker cut off the post-search steps, not the search.
       if [ "$rc" -eq 124 ] && grep -q '^timing-trace: attempt ' "$out/$s.err" &&
         ! grep -q '^timing-trace: search done: ' "$out/$s.err" &&
-        grep -q "^Found $backend, commandline --ocannl_backend=$backend\$" "$out/$s.err" &&
-        grep -q "^Found $mode, commandline --ocannl_autotune_timing=$mode\$" "$out/$s.err"; then
+        config_holds "$s" backend="$backend" autotune_timing="$mode" >/dev/null; then
         capped_any=1
       else
         [ "$rc" -eq 124 ] &&
@@ -352,7 +366,7 @@ for s in "$@"; do
     cat "$out/$s.out"
     grep -c 'timing-trace: attempt' "$out/$s.err" | sed 's/^/candidate attempts /'
     grep 'timing-trace: \(call\|summary\)' "$out/$s.err" | tail -2
-    grep 'Found .*--ocannl_\(backend\|autotune_timing\)=' "$out/$s.err" | sort -u
+    python3 -I "$root/benchmarks/config_records.py" show "$out/$s.err" backend autotune_timing
     ;;
   *) echo "gh834: unknown step $s" >&2; exit 2 ;;
   esac

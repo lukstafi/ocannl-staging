@@ -18,15 +18,20 @@
 #            run). The checkout is the one this script is in; bench_conv.exe must already be built
 #            there (`dune build ./benchmarks/runners/ocannl/bench_conv.exe`): it never builds.
 #   FIXTURE  cifar_resnet.safetensors (the gate checks it against fixtures/DIGESTS.txt).
-#   OUT      results directory, created, refused unless empty: OUT/<weights>-<pass>.out (the result
-#            line) and .err per process (pass: search, a, b), OUT/cache-<weights>/ the schedule
+#   OUT      results directory, created, refused unless empty: per process (pass: search, a, b)
+#            OUT/<weights>-<pass>.out (the result line) and .err, and OUT/<weights>-<pass>/ the
+#            cell's working directory with its cell.json record; OUT/cache-<weights>/ the schedule
 #            caches, OUT/summary.txt.
 #   BUDGET   autotune_budget_seconds for every search (each arm is its own search).
 #   WEIGHTS  init and/or fixture (default: both, init first).
 #
-# Exit: 0 every cell produced a crown/step pair; 1 a cell failed or has none; 2 usage.
-# Hermetic: every OCANNL_* and BENCH_* variable is unset and the backend is on argv
-# (--ocannl_backend=cc), and so is every OpenMP runtime control (OMP_*, GOMP_*, KMP_*).
+# Exit: 0 every cell produced a crown/step pair; 1 a cell failed or has none; 2 usage; 125 a cell's
+# process group outlived its cleanup (the run stops there).
+# Each process is a cell of the shared runner (benchmarks/cells.py `cell`, gh-ocannl-1607): no
+# OCANNL_*, BENCH_* or OpenMP variable (OMP_*, GOMP_*, KMP_*) and no config file reaches it, the
+# backend (cc) and the treatment are on argv and the runner modes stated, and its resolved
+# configuration is read back -- a process whose forced arm, cache or budget did not take fails. The
+# passes stay sequential by design: the replays read the cache the search pass wrote.
 set -u
 . "$(dirname "$0")/box-gate.sh"
 box_gate_args "$@"; shift "$box_gate_shift"
@@ -52,8 +57,6 @@ mkdir -p "$out" || exit 2
 out=$(cd "$out" && pwd -P) || exit 2
 # A fresh directory only: a leftover cache would make a search a replay.
 [ -z "$(ls -A "$out")" ] || { echo "gh1557_cells: $out is not empty" >&2; exit 2; }
-while read -r v; do unset "$v"; done < <(env | sed -nE 's/^((OCANNL|BENCH|OMP|GOMP|KMP)_[A-Za-z0-9_]*)=.*/\1/p')
-cd "$root/benchmarks" || exit 2
 rc=0
 for w in "${weights[@]}"; do
   # The search pass ships arm A (any arm would do: forcing one skips neither arm's search).
@@ -61,9 +64,13 @@ for w in "${weights[@]}"; do
     arm=$pass
     [ "$pass" = search ] && arm=a
     echo "gh1557_cells: weights=$w pass=$pass start $(date +%T)" >&2
-    BENCH_FIXTURE=$fixture BENCH_TUNE=1 BENCH_TUNE_SCRATCH_WEIGHTS=$w "$exe" --ocannl_backend=cc \
+    python3 "$root/benchmarks/cells.py" cell --backend cc --dir "$out/$w-$pass" \
+      --stdout "$out/$w-$pass.out" --stderr "$out/$w-$pass.err" \
+      --expect tune_ship_arm="$arm" --expect autotune_cache_dir="$out/cache-$w" -- \
+      BENCH_FIXTURE="$fixture" BENCH_TUNE=1 BENCH_TUNE_SCRATCH_WEIGHTS="$w" "$exe" \
       --ocannl_tune_ship_arm="$arm" --ocannl_autotune_cache_dir="$out/cache-$w" \
-      --ocannl_autotune_budget_seconds="$budget" >"$out/$w-$pass.out" 2>"$out/$w-$pass.err" || rc=1
+      --ocannl_autotune_budget_seconds="$budget"
+    case $? in 0) ;; 125) echo "gh1557_cells: a process outlived its cleanup; stopping" >&2; exit 125 ;; *) rc=1 ;; esac
   done
 done
 python3 - "$root/benchmarks" "$out" "${weights[@]}" >"$out/summary.txt" <<'EOF' || rc=1

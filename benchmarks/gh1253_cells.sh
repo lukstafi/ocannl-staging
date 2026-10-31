@@ -8,9 +8,10 @@
 # Usage (from the checkout under test): benchmarks/gh1253_cells.sh BACKEND OUT [CAP]
 #
 #   BACKEND  cuda | hip, or metal with RANK_ONLY=1 -- pinned on every command line; no ambient
-#            OCANNL_* variable or config file reaches a cell (see below).
+#            OCANNL_*, BENCH_* or OpenMP variable or config file reaches a cell (see below).
 #   OUT      results directory, created, and refused unless empty: OUT/driver.log records what this
-#            script prints, each cell writes OUT/<cell>.out and OUT/<cell>.err.
+#            script prints, each cell writes OUT/<cell>.out and OUT/<cell>.err, and runs from
+#            OUT/<cell>/, which keeps its cell.json record.
 #   CAP      wall cap in seconds per cell (default 900); a capped cell counts as failed.
 #
 # Cells, all on explicitly initialized standalone inputs (host arrays built in the runner: no
@@ -52,7 +53,7 @@
 # defaults, no model_* flag), beside `ceilings`. With it, SITES may name bench_rank_site's
 # gpt2_mini projection sites (qkv:b,s,h,e,k and outproj:b,s,j,h,e), whose explain lines list the
 # coalesced branch's leaves the tuner times beside the family.
-# BENCH_PICK=1 (inherited by the cells) makes each listing cell also print model_default's actual
+# BENCH_PICK=1 (stated to every cell) makes each listing cell also print model_default's actual
 # pick, which the agreement script joins to its measured row against the seeded plan's
 # (gh-ocannl-1477). PICK_PROFILES (with RANK_ONLY=1, say 'performance approximate') adds, per site,
 # a pick-only cell rank_<site>_pick_<profile> under --ocannl_profile=<profile> with the shipped
@@ -89,6 +90,12 @@
 # site's `joined=` lines, prefixed by site.
 # Both wgrad arms pin BENCH_TUNE=0 and model_default_schedule=false, so an ambient profile or
 # environment cannot swap the measured plans for tuned or model-picked ones.
+# Every cell is one of the shared runner's (benchmarks/cells.py `cell`, gh-ocannl-1607): hermetic
+# (no OCANNL_*, BENCH_* or OpenMP variable inherited, no config file read; a runner mode is stated
+# per cell), supervised under CAP (a capped group is killed whole; one not proven gone stops the
+# driver, exit 125), run from a fresh directory of its own rather than the checkout's root, and
+# configuration-checked: its resolved-configuration records must be its command line, and a cell
+# that ran under anything else failed.
 # The shipped-kernel rows (`bench: kernel ... w: wg_w.grad`) are the measured side of the table.
 
 set -euo pipefail
@@ -159,11 +166,12 @@ mkdir -p "$out"
 out=$(cd "$out" && pwd) # absolute: the cells run from the checkout's root
 exec > >(tee -a "$out/driver.log") 2>&1
 
-# No ambient configuration reaches a cell: every OCANNL_* variable is dropped and the checkout's
-# config file is not read, so each cell runs the defaults plus exactly the flags written below
-# (an inherited OCANNL_SCHEDULE_FISSION=false, say, would make the seeded arm decline silently).
-while IFS= read -r var; do unset "$var"; done < <(compgen -e | grep '^OCANNL_' || true)
-export OCANNL_NO_CONFIG_FILE=true
+# No ambient configuration reaches a cell: the shared runner drops every OCANNL_* variable and pins
+# no config file, so each cell runs the defaults plus exactly the flags written below (an inherited
+# OCANNL_SCHEDULE_FISSION=false, say, would make the seeded arm decline silently). BENCH_PICK, the
+# one runner mode this driver takes from its caller, is stated to every cell, as it was inherited.
+pick_env=()
+if [[ -n "${BENCH_PICK:-}" ]]; then pick_env=("BENCH_PICK=$BENCH_PICK"); fi
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"
@@ -187,15 +195,25 @@ rank_site=$root/_build/default/benchmarks/runners/ocannl/bench_rank_site.exe
 
 failed=0
 last_ok=false
+# [cell NAME [env] [NAME=VALUE]... EXE ARGS...]: one cell of the shared runner, its stated runner
+# modes the leading NAME=VALUE words.
 cell() {
-  local name=$1
+  local name=$1 rc=0
   shift
+  if [[ $1 == env ]]; then shift; fi
   echo "== cell $name: $*"
-  if perl -e 'alarm shift; exec @ARGV' "$cap" "$@" >"$out/$name.out" 2>"$out/$name.err"; then
+  python3 "$root/benchmarks/cells.py" cell --backend "$backend" --dir "$out/$name" \
+    --stdout "$out/$name.out" --stderr "$out/$name.err" --timeout "$cap" -- \
+    ${pick_env[@]+"${pick_env[@]}"} "$@" || rc=$?
+  if [[ $rc -eq 0 ]]; then
     echo "   ok"
     last_ok=true
   else
-    echo "   FAILED (exit $?)"
+    echo "   FAILED (exit $rc)"
+    if [[ $rc -eq 125 ]]; then
+      echo "gh1253_cells: a cell's process group outlived its cleanup; stopping"
+      exit 125
+    fi
     failed=$((failed + 1))
     last_ok=false
   fi
@@ -229,18 +247,18 @@ elif [[ ${RANK_ONLY:-0} == 1 ]]; then
   echo "   RANK_ONLY: agreement cells only, under the shipped constants"
   if [[ ${FIT_FILL:-0} == 1 ]]; then
     fitted_arm=fitted
-    cell issue "$issue" --repeats=10 "--ocannl_backend=$backend" ${mp_flag[@]+"${mp_flag[@]}"}
+    cell issue "$issue" --repeats=10 ${mp_flag[@]+"${mp_flag[@]}"}
     issue_flags
     echo "   FIT_FILL: listing and pick cells under ${model[*]:-the shipped constants}"
   fi
 else
-  cell bandwidth "$bandwidth" "--ocannl_backend=$backend" \
+  cell bandwidth "$bandwidth" \
     "--ocannl_autotune_calibration_file=$out/calibration.tsv"
   model=()
   bw=$(fitted model_peak_memory_bandwidth "$out/bandwidth.out")
   if [[ -n "$bw" ]]; then model+=("--ocannl_model_dram_bandwidth=$bw"); fi
   echo "   model flags after bandwidth: ${model[*]:-none}"
-  cell calibrate "$calibrate" --repeats=10 "--ocannl_backend=$backend" ${model[@]+"${model[@]}"}
+  cell calibrate "$calibrate" --repeats=10 ${model[@]+"${model[@]}"}
   capacity=$(fitted model_cache_capacity "$out/calibrate.out")
   if [[ -n "$capacity" ]]; then
     model+=("--ocannl_model_cache_capacity=$capacity")
@@ -254,7 +272,7 @@ else
   if [[ -n "$cache_bw" ]]; then model+=("--ocannl_model_cache_bandwidth=$cache_bw"); fi
   # The capacity and cache tier as fitted, without the rates: the ceilings arm of the agreement cells.
   tiers=(${model[@]+"${model[@]}"})
-  cell issue "$issue" --repeats=10 "--ocannl_backend=$backend" ${mp_flag[@]+"${mp_flag[@]}"} \
+  cell issue "$issue" --repeats=10 ${mp_flag[@]+"${mp_flag[@]}"} \
     ${model[@]+"${model[@]}"}
   issue_flags
   echo "   model flags for the wgrad cells: ${model[*]:-none}"
@@ -262,12 +280,12 @@ else
     dims="$batch,128,256,1024"
     cell "wgrad_b${batch}_untiled" env BENCH_TUNE=0 BENCH_WGRAD_REQUIRE_SEEDED=0 BENCH_WGRAD_DIMS="$dims" \
       BENCH_REPEATS=20 "$wgrad" \
-      "--ocannl_backend=$backend" --ocannl_model_default_schedule=false \
+      --ocannl_model_default_schedule=false \
       --ocannl_gpu_default_sketch_min_reduction=0 --ocannl_gpu_default_split_reduce_min_serial=0 \
       --ocannl_gpu_default_reduction_sink=false ${model[@]+"${model[@]}"}
     cell "wgrad_b${batch}_seeded" env BENCH_TUNE=0 BENCH_WGRAD_REQUIRE_SEEDED=1 BENCH_WGRAD_DIMS="$dims" \
       BENCH_REPEATS=20 "$wgrad" \
-      "--ocannl_backend=$backend" --ocannl_model_default_schedule=false \
+      --ocannl_model_default_schedule=false \
       --ocannl_gpu_default_sketch_min_reduction=32 --ocannl_gpu_default_split_reduce_min_serial=0 \
       --ocannl_gpu_default_reduction_sink=false ${model[@]+"${model[@]}"}
   done
@@ -289,9 +307,9 @@ for site in $sites; do
   name=$(site_name "$site")
   if [[ -n "$rows_dir" ]]; then
     cell "rank_${name}_${fitted_arm}" env BENCH_TUNE=0 BENCH_SITE="$kind" BENCH_SITE_DIMS="$dims" "$rank_site" \
-      "--ocannl_backend=$backend" --ocannl_gpu_default_sketch_min_reduction=32
+      --ocannl_gpu_default_sketch_min_reduction=32
     cell "rank_${name}_ceilings" env BENCH_TUNE=0 BENCH_SITE="$kind" BENCH_SITE_DIMS="$dims" "$rank_site" \
-      "--ocannl_backend=$backend" --ocannl_gpu_default_sketch_min_reduction=32 "${ceilings[@]}"
+      --ocannl_gpu_default_sketch_min_reduction=32 "${ceilings[@]}"
     fit=()
     if [[ $kind == fp8mm ]]; then fit=(--fit-mma "$out/rank_${name}_${fitted_arm}.out"); fi
     python3 "$root/benchmarks/gh1442_agreement.py" "$rows_dir/rank_${name}.tsv" \
@@ -304,23 +322,23 @@ for site in $sites; do
     suffix=""
     if [[ $rep -gt 1 ]]; then suffix="_r$rep"; fi
     cell "rank_${name}_time$suffix" env BENCH_TUNE=1 BENCH_SITE="$kind" BENCH_SITE_DIMS="$dims" "$rank_site" \
-      "--ocannl_backend=$backend" --ocannl_gpu_default_sketch_min_reduction=32 \
+      --ocannl_gpu_default_sketch_min_reduction=32 \
       --ocannl_autotune_keep_fraction=1 \
       "--ocannl_autotune_calibration_file=$out/rank_${name}.tsv" ${model[@]+"${model[@]}"}
     if ! $last_ok; then timed=false; fi
   done
   cell "rank_${name}_${fitted_arm}" env BENCH_SITE="$kind" BENCH_SITE_DIMS="$dims" "$rank_site" \
-    "--ocannl_backend=$backend" --ocannl_gpu_default_sketch_min_reduction=32 \
+    --ocannl_gpu_default_sketch_min_reduction=32 \
     ${model[@]+"${model[@]}"}
   cell "rank_${name}_ceilings" env BENCH_SITE="$kind" BENCH_SITE_DIMS="$dims" "$rank_site" \
-    "--ocannl_backend=$backend" --ocannl_gpu_default_sketch_min_reduction=32 "${ceilings[@]}"
+    --ocannl_gpu_default_sketch_min_reduction=32 "${ceilings[@]}"
   # The first statement of a key wins, so the fill's own flags are dropped, not overridden.
   nofill=()
   for flag in ${model[@]+"${model[@]}"}; do
     case "$flag" in --ocannl_model_fill_threads=* | --ocannl_model_multiprocessors=*) ;; *) nofill+=("$flag") ;; esac
   done
   cell "rank_${name}_nofill" env BENCH_SITE="$kind" BENCH_SITE_DIMS="$dims" "$rank_site" \
-    "--ocannl_backend=$backend" --ocannl_gpu_default_sketch_min_reduction=32 \
+    --ocannl_gpu_default_sketch_min_reduction=32 \
     ${nofill[@]+"${nofill[@]}"} --ocannl_model_fill_threads=none
   # gh-ocannl-1495: the same constants without its two terms (the score before it) and with the
   # tile-MMA rate alone, so one timing TSV gives the agreement of each step.
@@ -329,18 +347,18 @@ for site in $sites; do
     case "$flag" in --ocannl_model_mma_rate=* | --ocannl_model_device_gather_rate=*) ;; *) nomma+=("$flag") ;; esac
   done
   cell "rank_${name}_nomma" env BENCH_SITE="$kind" BENCH_SITE_DIMS="$dims" "$rank_site" \
-    "--ocannl_backend=$backend" --ocannl_gpu_default_sketch_min_reduction=32 \
+    --ocannl_gpu_default_sketch_min_reduction=32 \
     ${nomma[@]+"${nomma[@]}"} --ocannl_model_mma_rate=none --ocannl_model_device_gather_rate=none
   cell "rank_${name}_mmaonly" env BENCH_SITE="$kind" BENCH_SITE_DIMS="$dims" "$rank_site" \
-    "--ocannl_backend=$backend" --ocannl_gpu_default_sketch_min_reduction=32 \
+    --ocannl_gpu_default_sketch_min_reduction=32 \
     ${nomma[@]+"${nomma[@]}"} --ocannl_model_device_gather_rate=none
   # gh-ocannl-1600: the same constants without the transaction term, and without the occupancy
   # factor (which also leaves the coalesced layouts out of model_default).
   cell "rank_${name}_notxn" env BENCH_SITE="$kind" BENCH_SITE_DIMS="$dims" "$rank_site" \
-    "--ocannl_backend=$backend" --ocannl_gpu_default_sketch_min_reduction=32 \
+    --ocannl_gpu_default_sketch_min_reduction=32 \
     ${model[@]+"${model[@]}"} --ocannl_model_transaction_rate=none
   cell "rank_${name}_noocc" env BENCH_SITE="$kind" BENCH_SITE_DIMS="$dims" "$rank_site" \
-    "--ocannl_backend=$backend" --ocannl_gpu_default_sketch_min_reduction=32 \
+    --ocannl_gpu_default_sketch_min_reduction=32 \
     ${model[@]+"${model[@]}"} --ocannl_model_workgroup_bytes_per_multiprocessor=none
   picks=()
   if [[ ${RANK_ONLY:-0} == 1 ]]; then
@@ -358,7 +376,7 @@ for site in $sites; do
       pflags=(${model[@]+"${model[@]}"})
       if [[ $pname == *nofill ]]; then pflags=(${nofill[@]+"${nofill[@]}"} --ocannl_model_fill_threads=none); fi
       cell "rank_${name}_pick_${pname}" env BENCH_PICK=1 BENCH_SITE="$kind" BENCH_SITE_DIMS="$dims" \
-        "$rank_site" "--ocannl_backend=$backend" "$pflag" ${pflags[@]+"${pflags[@]}"}
+        "$rank_site" "$pflag" ${pflags[@]+"${pflags[@]}"}
       if $last_ok; then
         picks+=(--pick "${pname}=$pout")
         # The plan this configuration seeds, timed here unless the timing cell already did.
@@ -366,7 +384,7 @@ for site in $sites; do
         if $timed && [[ -n "$seeded" && "$seeded" != none ]] &&
           ! grep -qF "$seeded" "$out/rank_${name}.tsv"; then
           cell "rank_${name}_time_${pname}" env BENCH_TUNE=1 BENCH_SITE="$kind" BENCH_SITE_DIMS="$dims" \
-            "$rank_site" "--ocannl_backend=$backend" "$pflag" --ocannl_autotune_keep_fraction=1 \
+            "$rank_site" "$pflag" --ocannl_autotune_keep_fraction=1 \
             "--ocannl_autotune_calibration_file=$out/rank_${name}.tsv" ${pflags[@]+"${pflags[@]}"}
         fi
       fi

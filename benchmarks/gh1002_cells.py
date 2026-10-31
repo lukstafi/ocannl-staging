@@ -21,9 +21,12 @@ flags on ONE tree, untuned default pipeline, f32:
 E and F (the block-tiled forward) are gh-ocannl-1003's and are not run here.
 
 Protocol. Every cell is one bench_gpt process on a training fixture (fixture metadata: 6 parity
-steps, 3 warmup, 10 per-step-synced timed steps, 10 queued), run from benchmarks/ with every
-OCANNL_*, BENCH_* and OMP_* variable cleared and the schedule cache disabled
-(--ocannl_autotune_cache_dir= : the untuned default consults none anyway; this pins it). Repeats are
+steps, 3 warmup, 10 per-step-synced timed steps, 10 queued), run from benchmarks/ with the
+environment `cells.hermetic_env` leaves (every OCANNL_*, BENCH_* and OpenMP variable cleared), under
+the shared runner's pins (the backend, no config file, and the `log_config_json` records, read back:
+a cell whose resolved configuration is not its command line failed, gh-ocannl-1607) and with the
+schedule cache disabled (--ocannl_autotune_cache_dir= : the untuned default consults none anyway;
+this pins it). Repeats are
 order-balanced: repeat r runs the treatments forward for even r and reversed for odd r, so an order
 effect splits the repeats of one cell -- three repeats on Metal, two on cc. Peak memory is the
 result line's peak_memory_bytes: Alloc_census.reset_peak after the warmup, peak_pool_bytes after the
@@ -66,6 +69,8 @@ from pathlib import Path
 import bench_output
 import box_gate
 import cell_group
+import cells
+import config_records
 from display_safe import code_span, display_value, log_line, table_lines
 
 HERE = Path(__file__).resolve().parent
@@ -124,10 +129,22 @@ def host_snapshot(out, tag):
 
 
 def clean_env(extra):
-    env = {k: v for k, v in os.environ.items()
-           if not (k.startswith("OCANNL_") or k.startswith("BENCH_") or k.startswith("OMP_"))}
+    """The shared runner's hermetic environment (`cells.hermetic_env`) plus `extra`."""
+    env, _ = cells.hermetic_env(os.environ)
     env.update(extra)
     return env
+
+
+def treatment_problems(base, backend, argv):
+    """Why the cell's resolved configuration (the `log_config_json` records on its .err) is not the
+    treatment `argv` states (`cells.treatment_problems`)."""
+    try:
+        text = Path(str(base) + ".err").read_text(encoding="utf-8", errors="replace")
+        return cells.treatment_problems(config_records.parse_config_records(text), backend, argv)
+    except OSError as e:
+        return [f"no stderr to read the configuration records from: {e}"]
+    except config_records.ConfigRecordError as e:
+        return [f"unreadable configuration records: {e}"]
 
 
 def order(r):
@@ -166,8 +183,7 @@ def run_cell(out, backend, fixture, treatment, r, artifacts=False):
             return
         LIMIT[0] -= 1
     flags = dict((t[0], t[2]) for t in TREATMENTS)[treatment]
-    argv = [str(BENCH_GPT), f"--ocannl_backend={backend}", "--ocannl_autotune_cache_dir=",
-            "--ocannl_log_config_sourcing=true"] + flags
+    argv = [str(BENCH_GPT), *cells.pins(backend), "--ocannl_autotune_cache_dir="] + flags
     extra = {"BENCH_FIXTURE": str(HERE / "fixtures" / f"{fixture}.safetensors")}
     # build_files_prefix names a subdirectory of ./build_files (a path is mangled into one name),
     # so the artifacts are written under benchmarks/build_files/ and moved into DIR afterwards.
@@ -194,8 +210,16 @@ def run_cell(out, backend, fixture, treatment, r, artifacts=False):
         why = str(exc) if isinstance(exc, cell_group.CleanupFailed) else "interrupted mid-cell"
         record_failure(out, base, why, env, cell_checkpoint(base))
         raise
+    # A cell that ran but not under its stated treatment measured something else: its status is
+    # marked so that `result_line` (the summary's reader and the resume check) never counts it.
+    treatment = treatment_problems(base, backend, argv) if status == 0 else []
     with open(str(base) + ".status", "w") as f:
-        f.write(f"{status}\n")
+        f.write(f"{'treatment' if treatment else status}\n")
+    if treatment:
+        why = "configuration not the cell's command line: " + "; ".join(treatment)
+        log(f"FAILED {base.name}: {display_value(why)}")
+        record_failure(out, base, why, env, cell_checkpoint(base))
+        return
     if artifacts:
         staged = HERE / "build_files" / prefix
         if staged.is_dir() and any(staged.iterdir()):

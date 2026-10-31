@@ -9,7 +9,7 @@
 #   benchmarks/gh1529_nvrtc_cost.sh ab      ROOT OUT FIXTURE BUDGET ROUNDS
 #   benchmarks/gh1529_nvrtc_cost.sh summary OUT
 #
-#   ROOT     the checkout (its benchmarks/ocannl_config is the runner's configuration).
+#   ROOT     the checkout (its benchmarks/ and its build); the runner reads no config file.
 #   OUT      results directory; `prepare` creates it (refused unless empty), `measure` adds to it.
 #   FIXTURE  the gpt2_mini_train fixture (.safetensors); checked with fixture_digest.py --check.
 #   BUDGET   seconds for the tuned search's whole tune_placements call (tune_call_budget_seconds).
@@ -35,10 +35,15 @@
 # kernels) while the cache-on arm's miss programs, text no process had compiled, read cold. A
 # search over candidates nobody compiled before -- the case the cache is for -- meets the cold cost.
 #
-# Exit: 0 every step succeeded; 1 a step failed; 2 usage. Hermetic like the other drivers: every
-# OCANNL_* variable is unset and the backend is on argv.
+# Every bench_gpt process is a cell of the shared runner (ROOT's benchmarks/cells.py `cell`,
+# gh-ocannl-1607): no OCANNL_*, BENCH_* or OpenMP variable and no config file reaches it, the backend
+# and the treatment are on argv and the runner modes stated, it runs from a directory of its own
+# under OUT (OUT/dump, OUT/search, OUT/search-mib<arm>-r<round>: each keeps its cell.json record), and
+# its resolved configuration is read back. CUDA_CACHE_DISABLE is the CUDA driver's, passed through
+# and recorded with the cell. The probe is a C program, not an OCANNL process, and runs as it is.
+#
+# Exit: 0 every step succeeded; 1 a step failed; 2 usage; 125 a process outlived its cleanup.
 set -u
-while read -r v; do unset "$v"; done < <(env | sed -nE 's/^(OCANNL_[A-Za-z0-9_]*)=.*/\1/p')
 usage() { sed -n '/^# Usage/,/^# Exit/p' "$0" | sed '$d' >&2; exit 2; }
 CUDA_HOME=${CUDA_HOME:-/usr/local/cuda}
 BENCH=benchmarks/runners/ocannl/bench_gpt.exe
@@ -110,15 +115,15 @@ case "${1:-}" in
     cp "$ROOT/_build/default/$BENCH" "$OUT/bin/bench_gpt.exe" || exit 1
     gcc -O2 -o "$OUT/bin/gh1529_nvrtc_cost" "$ROOT/benchmarks/gh1529_nvrtc_cost.c" \
       -I"$CUDA_HOME/include" -L"$CUDA_HOME/lib64" -lnvrtc -lcuda -lpthread || exit 1
-    PREFIX=gh1529-dump-$$
-    DUMP=$ROOT/benchmarks/build_files/$PREFIX
-    rm -rf "$DUMP"
+    PREFIX=gh1529-dump
+    DUMP=$OUT/dump/build_files/$PREFIX
     # With the kernel code cache off (gh-ocannl-1529) the routine compiles as one program whose PTX
     # is written beside its source as <routine>.ptx; with it on, a cache-miss program is named apart.
-    (cd "$ROOT/benchmarks" && BENCH_FIXTURE=$FIX BENCH_TUNE=0 "$OUT/bin/bench_gpt.exe" \
-      --ocannl_backend=cuda --ocannl_output_debug_files_in_build_directory=true \
-      --ocannl_cuda_kernel_cache_mib=0 \
-      --ocannl_build_files_prefix="$PREFIX") > "$OUT/dump.out" 2> "$OUT/dump.err" \
+    python3 "$ROOT/benchmarks/cells.py" cell --backend cuda --dir "$OUT/dump" \
+      --stdout "$OUT/dump.out" --stderr "$OUT/dump.err" --expect cuda_kernel_cache_mib=0 -- \
+      BENCH_FIXTURE="$FIX" BENCH_TUNE=0 "$OUT/bin/bench_gpt.exe" \
+      --ocannl_output_debug_files_in_build_directory=true --ocannl_cuda_kernel_cache_mib=0 \
+      --ocannl_build_files_prefix="$PREFIX" \
       || { echo "gh1529: the untuned dump run failed (see $OUT/dump.err)" >&2; exit 1; }
     best= bestn=0
     for f in "$DUMP"/*.cu; do
@@ -161,11 +166,13 @@ case "${1:-}" in
       -I"$CUDA_HOME/include" --use_fast_math "$(cat "$OUT/src/arch")" > "$OUT/probe.out" 2>&1 \
       || { echo "gh1529: probe failed (see $OUT/probe.out)" >&2; exit 1; }
     rm -rf "$OUT/autotune_cache"
-    (cd "$ROOT/benchmarks" && BENCH_FIXTURE=$FIX BENCH_TUNE=1 BENCH_TIMING_TRACE=1 \
-      "$OUT/bin/bench_gpt.exe" --ocannl_backend=cuda \
+    python3 "$ROOT/benchmarks/cells.py" cell --backend cuda --dir "$OUT/search" \
+      --stdout "$OUT/search.out" --stderr "$OUT/search.err" -- \
+      BENCH_FIXTURE="$FIX" BENCH_TUNE=1 BENCH_TIMING_TRACE=1 "$OUT/bin/bench_gpt.exe" \
       --ocannl_autotune_cache_dir="$OUT/autotune_cache" \
-      --ocannl_tune_call_budget_seconds="$BUDGET") > "$OUT/search.out" 2> "$OUT/search.err"
+      --ocannl_tune_call_budget_seconds="$BUDGET"
     rc=$?
+    [ "$rc" -eq 125 ] && { echo "gh1529: a process outlived its cleanup; stopping" >&2; exit 125; }
     echo "search exit: $rc" | tee -a "$OUT/driver.log"
     summary "$OUT" | tee "$OUT/summary.txt"
     # A search that failed after printing compile records still fails the measurement.
@@ -192,11 +199,13 @@ case "${1:-}" in
         arm=(); [ "$mib" = default ] || arm=(--ocannl_cuda_kernel_cache_mib="$mib")
         base=$OUT/search-mib$mib-r$r
         rm -rf "$OUT/autotune_cache"
-        (cd "$ROOT/benchmarks" && CUDA_CACHE_DISABLE=1 BENCH_FIXTURE=$FIX BENCH_TUNE=1 \
-          BENCH_TIMING_TRACE=1 "$OUT/bin/bench_gpt.exe" --ocannl_backend=cuda "${arm[@]}" \
-          --ocannl_autotune_cache_dir="$OUT/autotune_cache" \
-          --ocannl_tune_call_budget_seconds="$BUDGET") > "$base.out" 2> "$base.err"
+        CUDA_CACHE_DISABLE=1 python3 "$ROOT/benchmarks/cells.py" cell --backend cuda \
+          --dir "$base" --stdout "$base.out" --stderr "$base.err" -- \
+          BENCH_FIXTURE="$FIX" BENCH_TUNE=1 BENCH_TIMING_TRACE=1 "$OUT/bin/bench_gpt.exe" \
+          ${arm[@]+"${arm[@]}"} --ocannl_autotune_cache_dir="$OUT/autotune_cache" \
+          --ocannl_tune_call_budget_seconds="$BUDGET"
         rc=$?
+        [ "$rc" -eq 125 ] && { echo "gh1529: a process outlived its cleanup; stopping" >&2; exit 125; }
         [ "$rc" -eq 0 ] || status=1
         echo "round $r mib=$mib: exit $rc" | tee -a "$OUT/driver.log"
       done

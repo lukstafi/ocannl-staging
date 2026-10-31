@@ -7,7 +7,8 @@
 #   [repeats batches] (default 200 8, both even) size bin/projection_shape_bench's timing; anything
 #   smaller is a smoke run of the driver, not a measurement.
 #
-# Legs, in order (each writes <leg>.out / <leg>.err under <out-dir>, then an `exit: N` line):
+# Legs, in order, each a cell of the shared runner (benchmarks/cells.py `cell`, gh-ocannl-1607):
+# <out-dir>/<leg>/ holds its stdout, stderr and cell.json record; then an `exit: N` line.
 #   psb_fwd   bin/projection_shape_bench <repeats> <batches> outproj fwd both
 #             every scalar seed of the out projection's sites (gpt2_mini's b8 x 128 rows and its
 #             merged 1024 rows, j = 256, (h, e) = (8, 32), plus a 16-row twin at the split-reduce
@@ -21,11 +22,13 @@
 # ratio, and (psb_fwd) the search's crown with its wall-clock cost on the `crowned:` line. Every
 # candidate is checked cell by cell against a host oracle on inputs whose sums are exact in f32.
 #
-# Hermetic: OCANNL_* and BENCH_* are unset, the treatment is on argv, the runner starts from
-# benchmarks/ (the nearest ocannl_config; bin/ has the cwd trap). No fixture is read. Exits with
-# the first failed leg's status (1, or a crash's) when any leg failed, 3 when the only faults are
-# legs whose timings were all refused for host contention (the bench's own exit 3: the box's
-# verdict, not the experiment's), 0 otherwise.
+# Hermetic through the runner: no OCANNL_*, BENCH_* or OpenMP variable and no config file reaches a
+# leg, which runs from a directory of its own with its treatment on argv, and its resolved
+# configuration is read back (a leg that did not run under it fails). No fixture is read. Exits
+# with the first failed leg's status (1, or a crash's) when any leg failed, 3 when the only faults
+# are legs whose timings were all refused for host contention (the bench's own exit 3: the box's
+# verdict, not the experiment's), 125 at once when a leg's process group outlived its cleanup, 0
+# otherwise.
 set -u
 [ $# -eq 2 ] || [ $# -eq 4 ] || { sed -n '6,8p' "$0"; exit 2; }
 OUT=$1 BACKEND=$2
@@ -36,8 +39,6 @@ for n in "$REPEATS" "$BATCHES"; do
   ((10#$n > 0 && 10#$n % 2 == 0)) || { echo "gh1279_cells: repeats and batches must be positive and even, got $n" >&2; exit 2; }
 done
 case $BACKEND in cuda | hip | metal) ;; *) echo "gh1279_cells: a GPU backend (cuda, hip, metal), got '$BACKEND'" >&2; exit 2 ;; esac
-while read -r v; do unset "$v"; done < <(env | sed -n 's/^\(OCANNL_[A-Z0-9_]*\)=.*/\1/p')
-while read -r v; do unset "$v"; done < <(env | sed -n 's/^\(BENCH_[A-Z0-9_]*\)=.*/\1/p')
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 mkdir -p "$OUT" || exit 1
 OUT=$(CDPATH= cd -- "$OUT" && pwd)
@@ -47,16 +48,16 @@ COMMIT=$(git -C "$ROOT" rev-parse HEAD) || exit 1
 echo "gh1279_cells: commit $COMMIT, backend $BACKEND, repeats $REPEATS, batches $BATCHES" | tee "$OUT/manifest"
 cd "$ROOT" || exit 1
 dune build bin/projection_shape_bench.exe 2>/dev/null || { echo "BUILD FAILED"; exit 1; }
-cd benchmarks || exit 1
-EXE=../_build/default/bin/projection_shape_bench.exe
+EXE=$ROOT/_build/default/bin/projection_shape_bench.exe
 rc=0
 leg() { # NAME ORDER MODE
-  "$EXE" "$REPEATS" "$BATCHES" outproj "$2" "$3" --ocannl_backend="$BACKEND" \
-    >"$OUT/$1.out" 2>"$OUT/$1.err"
+  python3 "$ROOT/benchmarks/cells.py" cell --backend "$BACKEND" --dir "$OUT/$1" -- \
+    "$EXE" "$REPEATS" "$BATCHES" outproj "$2" "$3"
   local r=$?
-  echo "exit: $r" >>"$OUT/$1.out"
+  echo "exit: $r" >>"$OUT/$1/stdout"
   echo "leg $1 ($2 $3): exit: $r"
-  grep -E '^gh1279:|crowned:' "$OUT/$1.out"
+  [ "$r" -eq 125 ] && { echo "leg $1: a process outlived its cleanup; stopping"; exit 125; }
+  grep -E '^gh1279:|crowned:' "$OUT/$1/stdout"
   # A failure (any nonzero status but 3: a 1, a crash's 139) outranks a refusal (3), whichever leg
   # came last; the first failure's status stands.
   if [ "$r" -ne 0 ] && { [ "$rc" -eq 0 ] || [ "$rc" -eq 3 ]; }; then rc=$r; fi

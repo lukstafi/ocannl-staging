@@ -1,7 +1,10 @@
 """Shared cell parsing, validation and tables for the gh-ocannl-1051 drivers.
 
 Used by gh1051_bf16_ab.sh (mode "ab") and gh1051_boundary_split.sh (mode "split"), so that the
-two cannot drift apart on what a valid cell is.
+two cannot drift apart on what a valid cell is. The ab driver's cells are bin_cells.py runs, one
+per size (`load_runs`: a cell counts only when its run found it clean -- exit 0, its resolved
+configuration its command line, no failed output check); the split driver keeps its own cell logs
+(`load`), since the two revisions it measures predate the configuration stream.
 
 A timing is accepted only from a cell whose OUTPUT is validated, not merely whose exit status is.
 schedule_bench's own verdict cannot do that for bf16: its k-term partial sums round, so it reports
@@ -37,7 +40,7 @@ proof: a weighted double sum can in principle collide.
   Mma_intrinsics and no scalar fallback -- schedule_bench only warns when a Tile_mma declines (no
   tile MMA on the device, no rocWMMA headers), and a scalar timing must not stand in for a WMMA one.
 - EVERY log is accounted for: a cell file the parser cannot name (a mistyped size, say) is a
-  problem, not silently skipped.
+  problem, not silently skipped, and so is a bin_cells run whose cells are not all there.
 - SPLIT mode: the two revisions differ only in how the wide d boundary is addressed, with identical
   conversions, so every variant's checksum must be identical across them; the mma cells
   must also lie within REL_BOUND of the same run's parallel (serial, wide) checksum.
@@ -52,6 +55,7 @@ import re
 import statistics
 import sys
 
+import cells as cell_runner
 from display_safe import display_value, log_line, table_lines
 
 VARIANTS = ["parallel", "smem", "regtile", "mma_pd1", "mma_pd2"]
@@ -59,7 +63,12 @@ DIGITS = set()
 # The structural bound (see above): five times the ~5% a legitimately per-step-narrowed 2048-term
 # bf16 cell shows on minix and tuf, a quarter of what a zeroed output shows.
 REL_BOUND = 0.25
-LINE = re.compile(r"^(\w+)\s+([0-9.]+) ms\s+([0-9.]+) GFLOP/s\s+\(.*chk ([^,]+),.*\[(.*)\]\s*$")
+# A timing line: `<variant> <ms> ms <rate> GFLOP/s (spot [i] v, chk a/b, <agreement>)  [<mma census>]`,
+# then, since gh-ocannl-1668, `[<grid census>]`. The mma census is the FIRST bracket after the
+# parenthesis: a greedy last-bracket match read the grid census in its place, where no
+# Mma_intrinsics can appear.
+LINE = re.compile(r"^(\w+)\s+([0-9.]+) ms\s+([0-9.]+) GFLOP/s\s+\(.*chk ([^,]+),.*\)"
+                  r"\s+\[([^\]]*)\](?:\s+\[[^\]]*\])?\s*$")
 
 
 def digits(chk):
@@ -67,16 +76,22 @@ def digits(chk):
     return max(len(re.sub(r"[^0-9]", "", x.split("e")[0]).lstrip("0")) for x in chk.split("/"))
 
 
-def parse_log(path):
-    """{variant: (ms, (chk_a, chk_b), census)} for one cell log."""
+def parse_text(text):
+    """{variant: (ms, (chk_a, chk_b), census)} for one cell's output."""
     out = {}
-    for line in open(path):
+    for line in text.splitlines():
         m = LINE.match(line)
         if m and m.group(1) in VARIANTS:
             chk = tuple(float(x) for x in m.group(4).split("/"))
             DIGITS.add(digits(m.group(4)))
             out[m.group(1)] = (float(m.group(2)), chk, m.group(5))
     return out
+
+
+def parse_log(path):
+    """`parse_text` of one cell log."""
+    with open(path) as f:
+        return parse_text(f.read())
 
 
 def status_ok(path, prec):
@@ -100,6 +115,23 @@ def rel(a, b):
     return max(abs(x - y) / max(abs(y), 1e-300) for x, y in zip(a, b))
 
 
+def add_cell(cells, problems, name, key, parsed):
+    """One cell's timings into `cells`, keyed (size, arm, prec, variant); a missing variant or a
+    tensorized one that did not tensorize is a problem of `name`."""
+    for v in VARIANTS:
+        if v not in parsed:
+            problems.append(f"{name}: MISSING timing for {v}")
+            continue
+        census = parsed[v][2]
+        if key["prec"] == "bfloat16" and v.startswith("mma") and (
+            "Mma_intrinsics" not in census or "fallback" in census
+        ):
+            problems.append(f"{name}: {v} did not tensorize [{census}]")
+        cells.setdefault(tuple(key[k] for k in ("size", "arm", "prec")) + (v,), []).append(
+            parsed[v]
+        )
+
+
 def load(out, pattern, key_of):
     cells, problems = {}, []
     for f in sorted(glob.glob(os.path.join(out, pattern))):
@@ -110,19 +142,54 @@ def load(out, pattern, key_of):
         ok, why = status_ok(f, key["prec"])
         if not ok:
             problems.append(f"{os.path.basename(f)}: {why}")
-        parsed = parse_log(f)
-        for v in VARIANTS:
-            if v not in parsed:
-                problems.append(f"{os.path.basename(f)}: MISSING timing for {v}")
+        add_cell(cells, problems, os.path.basename(f), key, parse_log(f))
+    return cells, problems
+
+
+ARM_RE = re.compile(r"(true|false)-(bfloat16|single)")
+
+
+def load_runs(out):
+    """The ab driver's cells: one bin_cells run per size under `out` (`n<size>/`), each cell named
+    by its arm `<bf16_arithmetic>-<prec>`. A cell its run did not find clean, a run missing a
+    planned cell or failing a run-level check, an unnamed arm and a stray run directory are
+    problems."""
+    cells, problems = {}, []
+    for run in sorted(glob.glob(os.path.join(out, "n*"))):
+        name = os.path.basename(run)
+        m = re.fullmatch(r"n(\d+)", name)
+        if not m:
+            problems.append(f"{display_value(name)}: not a run this driver can name")
+            continue
+        try:
+            manifest, records = cell_runner.read_run(run)
+        except (OSError, ValueError) as e:
+            problems.append(f"{name}: no complete bin_cells run ({display_value(str(e))})")
+            continue
+        size = int(m.group(1))
+        if manifest.get("common_args", [None])[:1] != [str(size)]:
+            problems.append(f"{name}: the run measured {display_value(str(manifest.get('common_args')))}")
+        planned = sum(len(order) for order in manifest["orders"])
+        if len(records) != planned:
+            problems.append(f"{name}: {len(records)} of {planned} planned cells ran")
+        problems += [f"{name}: {display_value(p)}"
+                     for p in cell_runner.run_level_problems(manifest, records)]
+        for r in records:
+            cell = f"{name} cell {r['cell']} ({display_value(r['arm'])})"
+            arm = ARM_RE.fullmatch(r["arm"])
+            if not arm:
+                problems.append(f"{cell}: not an arm this driver can name")
                 continue
-            census = parsed[v][2]
-            if key["prec"] == "bfloat16" and v.startswith("mma") and (
-                "Mma_intrinsics" not in census or "fallback" in census
-            ):
-                problems.append(f"{os.path.basename(f)}: {v} did not tensorize [{census}]")
-            cells.setdefault(tuple(key[k] for k in ("size", "arm", "prec")) + (v,), []).append(
-                parsed[v]
-            )
+            if not r["ok"]:
+                problems.append(f"{cell}: {display_value('; '.join(r['problems']))}")
+                continue
+            text = cell_runner.cell_stream(run, r, "stdout")
+            if "FAILED" in text or "SIZE " in text:
+                problems.append(f"{cell}: FAILED variant or SIZE mismatch")
+            add_cell(cells, problems, cell, {"size": size, "arm": arm.group(1),
+                                             "prec": arm.group(2)}, parse_text(text))
+    if not cells and not problems:
+        problems.append("no bin_cells run under the output directory")
     return cells, problems
 
 
@@ -145,11 +212,7 @@ def med(xs):
 
 
 def ab(out, label):
-    def key_of(name):
-        m = re.match(r"n(\d+)_r(\d+)_(\w+?)_(bfloat16|single)\.log$", name)
-        return m and {"size": int(m.group(1)), "arm": m.group(3), "prec": m.group(4)}
-
-    cells, problems = load(out, "n*.log", key_of)
+    cells, problems = load_runs(out)
     sizes = sorted({k[0] for k in cells})
     for size in sizes:
         chk = {}
