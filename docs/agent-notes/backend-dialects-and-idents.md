@@ -347,8 +347,9 @@ What the scheduler, the autotuner, the schedule cache and codegen ask of a backe
 `Backend_intf.backend_facts` (gh-ocannl-1723), never its name: where its `Grid` loops execute
 (`grid_execution`: `Hardware_grid` | `Host_pool`, read through `binds_hardware_grid` /
 `renders_on_host_pool`), workgroup-shared placement, the seeded untuned plan, the queued timing
-policy, the contended-window retry, host-load attribution of dispersion, and the dialect's
-node-identifier prefix. The record literals (`cc_facts`, `cuda_facts`, `hip_facts`, `metal_facts`)
+policy, the contended-window retry, host-load attribution of dispersion, the dialect's
+node-identifier prefix, and the extension of the routine source its `build_files/` artifact writer
+appends (`source_extension`). The record literals (`cc_facts`, `cuda_facts`, `hip_facts`, `metal_facts`)
 live in `Backend_intf`, not in the backend modules, because a backend whose toolkit is absent is
 dune's `Lowered_backend_missing` placeholder, which must answer with the real facts (a cc box models
 Metal and CUDA scheduling through them). A new backend adds a literal, binds it as its
@@ -357,7 +358,11 @@ facts with `Context.backend_facts`; a name's with `Context.backend_facts_of_name
 through `Backends.get_backend` and raises on a name it does not accept. Tests that model a GPU on a cc
 box pass the literal (`Ir.Backend_intf.metal_facts`) rather than a name. Two pins:
 `marker_backend_vocabulary` (every accepted name reaches its module's facts; the facts are
-consistent, `Backend_intf.facts_inconsistencies`; a non-backend name is refused; and the ratchet: every
+consistent, `Backend_intf.facts_inconsistencies`; a non-backend name is refused; the test-side
+restatements in `test/config/config_reads.ml`, which links `base` alone, equal their sources --
+`deprecated_aliases` the non-canonical entries of `Backends.accepted_names`, `code_extension` each
+backend's `source_extension` -- and `Test_utils.Generated.extension_of_backend` looks the name up
+exactly, refusing one that is no backend's; and the ratchet: every
 string constant in `arrayjit/lib`, `lib` and `tensor` spelling an accepted backend name sits in a
 counted, reasoned exemption) and `backend_facts` (the running backend's facts agree with its live
 context and device limits; each fact varied alone moves the decision that reads it).

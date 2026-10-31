@@ -3,10 +3,16 @@ every accepted backend name reaches the facts its backend's module states: true
 every backend OCANNL has states facts consistent with one another: true
 a name that is not a backend's is refused, never classified by what it contains: true
 and a record breaking any one relation is reported: true
-every backend OCANNL has has an emitted-code extension the reader writes for it: true
+the reader's deprecated aliases are exactly the parse table's entries that are not a backend's own name: true
 the reader writes every backend OCANNL has under its own name: true
-every deprecated alias the reader resolves names the backend get_backend selects: true
-a name that is no backend has no extension: true
+the reader's emitted-code extension is the one each backend's facts state: true
+Generated reads every accepted backend name's artifacts under its backend's own extension: true
+Generated refuses a name that is no backend's, whatever it contains: true
+control: a name that is no backend has no extension in the reader: true
+control: an alias added to the parse table alone breaks the alias agreement: true
+control: and so does an alias the reader resolves to another backend: true
+control: a reader disagreeing on one backend's extension breaks the agreement: true
+control: and so does a backend writing under another extension: true
 the compiler's sources are read: true
 every backend-name constant in the compiler's sources is a reasoned exemption: true
 and every exemption counts what its binding holds: true

@@ -100,25 +100,95 @@ let () =
 (* The third relationship, gh-ocannl-1581. [Config_reads] is what [ocannl_read_config] writes for a
    backend setting -- the canonical name a per-backend golden is named after, the extension an
    emitted-code artifact carries -- and [codegen_text_inventory] names the backend a golden's
-   condition means by running it over every backend. Two drifts would be silent. A backend the
-   reader was never taught an extension for writes C's, so its kernel snapshots are diffed against
-   the C ones and the inventory files a CUDA-shaped condition under [cc]. And a deprecated alias
-   resolving otherwise than [Backends.get_backend] resolves it names a log golden after a backend
-   the run did not use. *)
+   condition means by running it over every backend; [Test_utils.Generated] finds a routine's
+   artifact through it. It links [base] alone, so its two tables restate what the backends state,
+   and this is where each is held equal to its source rather than to a second copy of itself.
+
+   Both drifts would be silent. An alias added to [Backends.accepted_names] alone resolves, in the
+   reader, to itself -- a name no backend has -- so a log golden is named after a backend no run
+   uses. And an extension the reader disagrees with the backend on files a backend's kernel
+   snapshots under another dialect, and points [Generated] at a file the backend never writes. The
+   extension's source is the backend's [source_extension] fact, which its artifact writer appends,
+   so a backend renaming what it writes moves the fact this compares. *)
+module BI = Ir.Backend_intf
+
+(* The entries of a parse table that are not a backend's own name: the deprecated aliases, each with
+   the canonical name of the backend it parses to. *)
+let aliases_of accepted =
+  List.filter_map accepted ~f:(fun (name, backend) ->
+      let canonical = Backends.backend_name backend in
+      Option.some_if (not (String.equal name canonical)) (name, canonical))
+
+let spelled pairs =
+  List.sort ~compare:String.compare
+    (List.map pairs ~f:(fun (alias, canonical) -> alias ^ " -> " ^ canonical))
+
+(* Compared as sorted lists, so a pair repeated on either side is a mismatch too. *)
+let aliases_agree ~accepted ~reader =
+  List.equal String.equal (spelled (aliases_of accepted)) (spelled reader)
+
+(* The reader's extension for [backend], dot added, against the one its facts state. *)
+let extension_agrees ~code_extension ~facts backend =
+  Option.equal String.equal
+    (Option.map (code_extension (Backends.backend_name backend)) ~f:(fun e -> "." ^ e))
+    (Some facts.BI.source_extension)
+
 let () =
   let names = List.map Backends.all_of_backend ~f:Backends.backend_name in
-  Verdict.p_none "every backend OCANNL has has an emitted-code extension the reader writes for it"
-    names ~f:(fun name -> Option.is_none (Config_reads.code_extension name));
+  let reader = Config_reads.deprecated_aliases in
+  let agree = aliases_agree ~accepted:Backends.accepted_names ~reader in
+  if not agree then
+    Stdio.eprintf "the reader's aliases are [%s]; the parse table's are [%s]\n"
+      (String.concat ~sep:"; " (spelled reader))
+      (String.concat ~sep:"; " (spelled (aliases_of Backends.accepted_names)));
+  Verdict.p
+    "the reader's deprecated aliases are exactly the parse table's entries that are not a \
+     backend's own name"
+    agree;
   Verdict.p_all "the reader writes every backend OCANNL has under its own name" names
     ~f:(fun name ->
       Option.equal String.equal (Config_reads.written ~key:"backend" name) (Some name));
-  Verdict.p_all "every deprecated alias the reader resolves names the backend get_backend selects"
-    Config_reads.deprecated_aliases ~f:(fun (alias, canonical) ->
-      String.equal canonical (Backends.backend_name (Backends.get_backend ~backend_name:alias ())));
-  (* The control: a name no backend has is one the reader has no extension for, so the claim above
-     is not passing on a function that answers everything. *)
-  Verdict.p "a name that is no backend has no extension"
-    (Option.is_none (Config_reads.code_extension "vulkan"))
+  Verdict.p_all "the reader's emitted-code extension is the one each backend's facts state"
+    Backends.all_of_backend ~f:(fun b ->
+      extension_agrees ~code_extension:Config_reads.code_extension ~facts:(Backends.backend_facts b)
+        b);
+  (* [Generated]'s extension, through every name the parse table accepts and in either case, is the
+     facts' of the backend the name parses to; a name that is not one is refused. *)
+  let generated_extension name =
+    match Test_utils.Generated.extension_of_backend name with
+    | ext -> Some ext
+    | exception Invalid_argument _ -> None
+  in
+  Verdict.p_all
+    "Generated reads every accepted backend name's artifacts under its backend's own extension"
+    Backends.accepted_names ~f:(fun (name, backend) ->
+      let ext = Some (Backends.backend_facts backend).source_extension in
+      Option.equal String.equal (generated_extension name) ext
+      && Option.equal String.equal (generated_extension (String.uppercase name)) ext);
+  (* The controls. Names that contain a backend's name, which the substring test read as that
+     backend, and one that contains none, which it read as C. *)
+  Verdict.p_none "Generated refuses a name that is no backend's, whatever it contains"
+    [ "xcuda"; "hipcc"; "metal_cc"; "vulkan" ] ~f:(fun name ->
+      Option.is_some (generated_extension name));
+  Verdict.p "control: a name that is no backend has no extension in the reader"
+    (Option.is_none (Config_reads.code_extension "vulkan"));
+  Verdict.p "control: an alias added to the parse table alone breaks the alias agreement"
+    (not (aliases_agree ~accepted:(("xcc", Backends.Cc) :: Backends.accepted_names) ~reader));
+  Verdict.p "control: and so does an alias the reader resolves to another backend"
+    (not
+       (aliases_agree ~accepted:Backends.accepted_names
+          ~reader:(List.map reader ~f:(fun (alias, _) -> (alias, "cuda")))));
+  Verdict.p "control: a reader disagreeing on one backend's extension breaks the agreement"
+    (not
+       (extension_agrees
+          ~code_extension:(function "cuda" -> Some "c" | name -> Config_reads.code_extension name)
+          ~facts:(Backends.backend_facts Backends.Cuda)
+          Backends.Cuda));
+  Verdict.p "control: and so does a backend writing under another extension"
+    (not
+       (extension_agrees ~code_extension:Config_reads.code_extension
+          ~facts:{ BI.metal_facts with source_extension = ".msl" }
+          Backends.Metal))
 
 (* The fourth relationship, gh-ocannl-1723's ratchet: no compiler decision tests a backend NAME.
    Every string constant in the compiler's sources -- [arrayjit/lib], [lib], [tensor], in an

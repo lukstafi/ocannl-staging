@@ -1994,7 +1994,9 @@ let compile_source ~name sources =
      otherwise run the earlier kernel. *)
   let run_id = Utils.get_global_run_id () in
   let write ~name source =
-    let build_file = Utils.open_build_file ~base_name:name ~extension:".c" in
+    let build_file =
+      Utils.open_build_file ~base_name:name ~extension:Backend_intf.cc_facts.source_extension
+    in
     Out_channel.output_string build_file.oc source;
     build_file.finalize ();
     compilation_copy ~name ~run_id build_file source
@@ -2040,7 +2042,9 @@ let kernel_compile_lock = Stdlib.Mutex.create ()
 
 let write_source_artifact ~name source =
   if Utils.settings.output_debug_files_in_build_directory then (
-    let build_file = Utils.open_build_file ~base_name:name ~extension:".c" in
+    let build_file =
+      Utils.open_build_file ~base_name:name ~extension:Backend_intf.cc_facts.source_extension
+    in
     Out_channel.output_string build_file.oc source;
     build_file.finalize ())
 
