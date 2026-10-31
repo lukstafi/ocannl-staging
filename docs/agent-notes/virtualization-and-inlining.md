@@ -673,7 +673,9 @@ files.
   `observability_tag`; a failure after a readable answer propagates (no catch-all). A printer names
   every node it shows up front (`to_dag` renders twice: a recording pass, then the real one) and
   reads the readable ones through `Context.to_host_all`, whose `Recomputable` nodes share ONE
-  throwaway routine, one sequenced copy per node (gh-ocannl-1737). Count routines with
+  throwaway routine, one sequenced copy per node (gh-ocannl-1737). `print_tree`'s `depth` shapes
+  only the layout (levels below it are drawn as an indented tree, values included), so no depth
+  narrows the read. Count routines with
   `Context.backend_compiles` against a unit measured by a single-node read, never an assumed 1: a
   Metal routine also counts its link-time library compile. Guards: `observability_query`,
   `recompute_on_read` (bitwise parity against a materialized run, ledger and pool counts, an

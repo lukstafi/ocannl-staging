@@ -13,8 +13,10 @@
    and each intermediate is a distinct polynomial of its cell's value, so a wrong cell, a broadcast
    or an unrun copy cannot match; the arithmetic is exact in single precision, so the claims are
    bitwise. The printed tree (the golden) holds the same exact values a node-by-node read printed
-   before this change. A write to [x] after the run is seen by the next shared read
-   (recompute-at-read, gh-617).
+   before this change. [~depth] bounds only the boxed layout -- the levels below it are drawn as an
+   indented tree, values included -- so a depth-1 print names, and reads, every node, still in one
+   routine. A write to [x] after the run is seen by the next shared read (recompute-at-read,
+   gh-617).
 
    Refusals keep their classification: a node depending on [Local] scratch prints the same reason
    tag inside the shared read, and [Context.to_host_all] raises the very refusal [Context.to_host]
@@ -108,6 +110,19 @@ let () =
   let (), print_cost = compiles_of (fun () -> Train.printf_tree ~with_grad:false ctx out) in
   Stdio.print_endline "";
   p "printing the tree compiles one recompute routine" (print_cost = unit_);
+  (* [~depth] bounds only the boxed layout: the levels below it are drawn as an indented tree, with
+     their values, so a shallow print shows -- and reads -- every node, in the same one routine. *)
+  let shallow, shallow_cost =
+    compiles_of (fun () ->
+        PrintBox_text.to_string
+          (Tensor.to_printbox ~with_id:true ~ctx ~with_grad:false ~depth:1 out))
+  in
+  p "printing at depth 1 compiles one recompute routine too" (shallow_cost = unit_);
+  p_all "and names every node of the graph, past depth 1 included (the golden shows their values)"
+    (x :: out :: chain) ~f:(fun (t : Tensor.t) ->
+      String.is_substring shallow ~substring:(Printf.sprintf "#%d %s" t.value.id (Tn.label t.value)));
+  Stdio.print_string shallow;
+  Stdio.print_endline "";
   (* Recompute-at-read: a write to the leaf is seen by the next shared read. *)
   let ctx' = Context.set_values ctx x.value x_values' in
   let v1 = List.hd_exn chain in

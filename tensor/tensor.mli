@@ -683,6 +683,8 @@ val to_printbox :
   depth:int ->
   t ->
   PrintBox.t
+(** [to_printbox] is the box {!print_tree} prints, laid out by [depth] the same way, with [with_id]
+    and [with_value] defaulting to [false] and [true]. *)
 
 val to_doc :
   ?ctx:Context.t ->
@@ -724,8 +726,9 @@ val print_tree :
   depth:int ->
   t ->
   unit
-(** [print_tree] renders the tensor's graph down to [depth]. With [?ctx], the values of every node
-    of the graph it walks (nodes past [depth] included) are read together through
+(** [print_tree] renders the tensor's graph: its outermost [depth] levels side by side in boxes, the
+    levels below them as an indented tree. [depth] shapes the layout only, so every node of the
+    graph is shown. With [?ctx], the values of all the nodes it shows are read together through
     {!Context.to_host_all}, so the virtual ones are recomputed by one throwaway routine
     (gh-ocannl-1737); an unreadable node is shown as a placeholder naming why
     ({!Context.observability_tag}). [print] reads the value and gradient it shows the same way. *)
