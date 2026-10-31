@@ -174,4 +174,25 @@ let () =
         p "register-tiled matmul parity (GPU) or clean rejection (CPU)"
           (String.is_substring msg ~substring:"not supported")
     | None -> p "register-tiled matmul parity (GPU) or clean rejection (CPU)" false);
-    skipped "unrolled register tile structure (GPU) or rejected (CPU)")
+    skipped "unrolled register tile structure (GPU) or rejected (CPU)");
+  (* The structural leg (gh-ocannl-1626): per-PR CI runs cc, which rejects shared placement, so the
+     claim above that reads the emitted kernel is skipped there. What it pins up to the dialect's
+     spelling is the scheduled IR, which [Sched.apply] builds on the host: the schedule is applied
+     here to the lowering this host captures, and the IR is read -- TM * TN accumulation statements
+     reading both operand tiles, two shared tiles, and only the two load restrictions, each under a
+     Workgroup loop. *)
+  let post = transform (Ll_test.captured_lowering ~name:"mmr_capture" reg_comp) in
+  let guards, _ = Ll_test.guards_and_barriers post.LL.llc in
+  let tiles = post.LL.workgroup_shared in
+  let accumulations = ref 0 in
+  Ll_test.walk post.LL.llc ~on_stmt:(function
+    | LL.Set { llsc; _ } ->
+        let reads = ref [] in
+        Ll_test.walk_scalar llsc ~on_get:(fun tn -> reads := tn :: !reads);
+        if List.count !reads ~f:(Set.mem tiles) = 2 then Int.incr accumulations
+    | _ -> ());
+  p "structural: the unrolled register tile carries TM * TN accumulations over the two shared tiles"
+    (Set.length tiles = 2 && !accumulations = tm * tn);
+  p "structural: only the two load restrictions survive, each under a Workgroup loop"
+    (List.length guards = 2
+    && List.for_all guards ~f:(List.exists ~f:(LL.equal_axis_type LL.Workgroup)))

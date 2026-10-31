@@ -56,6 +56,13 @@ let named name (comp : Asgns.comp) : Asgns.comp =
 let n = 32
 let bm, bn, bk = (8, 8, 8)
 
+(* The structural legs (gh-ocannl-1626): per-PR CI runs cc, which rejects shared placement, so the
+   claims that read the emitted kernel are skipped there. What they pin up to the dialect's spelling
+   -- the shared tiles, the barriers, which guards survive and where -- is the scheduled IR, which
+   [Sched.apply] builds on the host: each schedule is applied here to the lowering this host
+   captures ([Ll_test.captured_lowering]), and the IR is read. *)
+let under_workgroup axes = List.exists axes ~f:(LL.equal_axis_type LL.Workgroup)
+
 let () =
   let mav =
     Array.init (n * n) ~f:(Ll_test.cycle_flat ~dims:[| n; n |] ~modulus:13 ~offset:0. ~stride:0.25)
@@ -172,6 +179,15 @@ let () =
           (String.is_substring msg ~substring:"not supported")
     | None -> p "SMEM matmul parity (GPU) or clean rejection (CPU)" false);
     skipped "shared tiles, barriers, no edge guards (GPU) or rejected (CPU)");
+  (let post = transform (Ll_test.captured_lowering ~name:"mm_smem_capture" smem_comp) in
+   let guards, barriers = Ll_test.guards_and_barriers post.LL.llc in
+   p "structural: the SMEM schedule places two tiles in workgroup-shared memory"
+     (Set.length post.LL.workgroup_shared = 2);
+   p "structural: it inserts barriers" (barriers > 0);
+   p
+     "structural: no edge guard survives: exactly the two load restrictions, each under a \
+      Workgroup loop"
+     (List.length guards = 2 && List.for_all guards ~f:under_workgroup));
 
   (* --- Broadcast-vector staging (PR #90 review regression): a shared Stage with no anchor — the
      source access has no outer-part symbols and no reused workgroup axis. The load nest must NOT go
@@ -255,4 +271,12 @@ let () =
         p "broadcast staging values correct (GPU) or clean rejection (CPU)"
           (String.is_substring msg ~substring:"not supported")
     | None -> p "broadcast staging values correct (GPU) or clean rejection (CPU)" false);
-    skipped "broadcast load is thread-0 guarded under the workgroup axis")
+    skipped "broadcast load is thread-0 guarded under the workgroup axis");
+  (* The review regression this section pins put the load at the routine's top level, unguarded: no
+     guard at all, or one enclosed by no Workgroup loop, fails here. *)
+  let post = bcast_transform (Ll_test.captured_lowering ~name:"bcast_capture" bcast_comp) in
+  let guards, _ = Ll_test.guards_and_barriers post.LL.llc in
+  p "structural: the broadcast schedule places one tile in workgroup-shared memory"
+    (Set.length post.LL.workgroup_shared = 1);
+  p "structural: the broadcast load is guarded once, under the Workgroup axis"
+    (match guards with [ axes ] -> under_workgroup axes | _ -> false)

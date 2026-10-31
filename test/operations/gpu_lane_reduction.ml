@@ -595,13 +595,13 @@ let declared_partial_bytes src =
 
 let () =
   printf "--- leg 11: the schedule's memory estimate counts the partials the kernel declares ---\n";
-  let capabilities = Context.codegen_capabilities (Lazy.force L.base_ctx) in
-  let estimate name =
+  let host_capabilities = Context.codegen_capabilities (Lazy.force L.base_ctx) in
+  let estimate ?(capabilities = host_capabilities) name =
     S.workgroup_memory_bytes ~capabilities (Hashtbl.find_exn scheduled_by_name name)
     - S.workgroup_memory_bytes ~capabilities:Ir.Backend_intf.no_codegen_capabilities
         (Hashtbl.find_exn scheduled_by_name name)
   in
-  let admits name bytes =
+  let admits ?(capabilities = host_capabilities) name bytes =
     match
       S.check_hardware_limits ~name
         ~limits:{ Ir.Backend_intf.no_hardware_limits with max_workgroup_memory_bytes = Some bytes }
@@ -642,7 +642,20 @@ let () =
       gated ~when_:gpu ~on:backend_name
         (Printf.sprintf "%s: %d bytes of partials, admitted at that limit%s" name bytes
            (if bytes > 0 then " and refused one byte below it" else ""))
-        (estimate name = bytes && admits name bytes && (bytes = 0 || not (admits name (bytes - 1)))))
+        (estimate name = bytes && admits name bytes && (bytes = 0 || not (admits name (bytes - 1))));
+      (* The structural half (gh-ocannl-1626): per-PR CI runs cc, whose dialect declares no
+         partials, so the boundaries above are skipped there; the same schedules are judged here
+         under a GPU-like dialect's derived capabilities ([Ll_test.gpu_like_capabilities]). *)
+      let capabilities = Ll_test.gpu_like_capabilities () in
+      p
+        (Printf.sprintf
+           "%s (structural): under a GPU-like dialect, %d bytes of partials, admitted at that \
+            limit%s"
+           name bytes
+           (if bytes > 0 then " and refused one byte below it" else ""))
+        (estimate ~capabilities name = bytes
+        && admits ~capabilities name bytes
+        && (bytes = 0 || not (admits ~capabilities name (bytes - 1)))))
 
 (* gh-ocannl-1334: the single-simdgroup butterfly inserts no barrier, but its shuffles need every
    lane of the warp. [Low_level.inserted_collectives] lists it only under warp-uniform control, the

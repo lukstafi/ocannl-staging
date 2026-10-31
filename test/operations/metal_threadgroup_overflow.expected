@@ -3,3 +3,6 @@ G: odd-length half tiles whose exact bytes total the limit are refused at Hardwa
 O: with exact sizes the gate estimates the odd tiles at exactly the limit: true
 O: pipeline creation's refusal is a contained Workgroup_memory decline at Backend_link, requesting leg G's rounded estimate over the device limit: true
 O: the public compile reports the refusal as a Utils.User_error: true
+C (structural): even-length half tiles are estimated at exactly the limit, rounded or exact, and admitted: true
+G (structural): odd-length half tiles whose exact bytes total the limit are refused, requesting their rounded estimate, over the limit: true
+O (structural): with exact sizes the gate estimates the odd tiles at exactly the limit, and admits them: true

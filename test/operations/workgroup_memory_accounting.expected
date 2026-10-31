@@ -3,6 +3,9 @@ the estimate charges exactly the warp-reduce partials the emitted kernel declare
 past one warp the emitted kernel declares warp-reduce partials: true
 within one warp the emitted kernel declares none: true
 past one warp the gate admits the kernel at exactly its declared partials and refuses it one byte below: true
+structural: under a GPU-like dialect, past one warp the estimate charges partials: true
+structural: under a GPU-like dialect, within one warp it charges none: true
+structural: under a GPU-like dialect, past one warp the gate admits the kernel at exactly its estimate and refuses it one byte below: true
 unmasked: the conv site is mixed precision, f16 operands into an f32 output: true
 unmasked: every GPU conv seed is kept at a limit of exactly its gate estimate: true
 unmasked: every GPU conv seed is refused one byte below its gate estimate: true
