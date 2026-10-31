@@ -349,14 +349,14 @@ let () =
        it inside the round band, or where the finals outranked it (both above), which are the
        preconditions the bare inequality was missing. [infinity >= infinity *. 0.99] holds, so a
        search that timed nothing passes; a finite [mma_best_ms] under an infinite [best_ms] would
-       not, and should not. Excluded on a cache hit: its two times are the storing search's,
-       replayed from the entry, while the finals that explain a gap between them are not -- that
-       search's own report carries them, and here that is the searched report, judged above. *)
+       not, and should not. Judged on a cache hit too: its two times are the storing search's,
+       replayed from the entry, and so is the finals record that explains a gap between them
+       (gh-ocannl-1725). *)
     Verdict.pass_fail
       (which
      ^ "'s best tensorized time undercuts the winner only inside the beam's progress band, or \
         where the finals outranked it")
-      (replayed r || undercut_explained r ~search_ms:r.Autotune.mma_best_ms)
+      (undercut_explained r ~search_ms:r.Autotune.mma_best_ms)
       ~detail:
         (d "mma_best_ms=%s best_ms=%s (band %.0f%%) finals=%s" (ms r.Autotune.mma_best_ms)
            (ms r.Autotune.best_ms) (Autotune.min_progress *. 100.)

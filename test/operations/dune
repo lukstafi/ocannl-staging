@@ -10650,7 +10650,8 @@
   stderr_capture
   arrayjit.verdict
   fissioned_chain
-  scripted_search)
+  scripted_search
+  test_utils)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 

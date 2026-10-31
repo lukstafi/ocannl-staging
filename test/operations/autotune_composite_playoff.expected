@@ -61,3 +61,9 @@ on: every playoff window and playoff finals window is in the playoff phase: true
 refused: R's finals windows were refused, the alternates' admitted: true
 refused: the readings decided R's inconclusive finals, so its first segment was swapped as off: true
 refused: the finals' refusals are not the search's: true
+lucky: R's first window is the fastest search reading: true
+lucky: the playoff swapped only the true best in, and the beam finals crowned it over R: true
+lucky: every candidate's search reading is no faster than the crown's, or was outranked in the beam finals: true
+lucky control: without the finals record, R's reading under the crown's is unexplained: true
+lucky replay: the replay carries the storing search's finals and times, and explains them: true
+lucky legacy: an entry without the record replays as finals that did not run, leaving R's reading unexplained: true

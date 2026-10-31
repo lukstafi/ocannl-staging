@@ -5,8 +5,9 @@
     winner built from a chosen segmentation, a synthetic entry for a pure-filesystem exercise)
     builds it here rather than spelling out the {!Ir.Schedule_cache.entry} record, so a field added
     to the entry reaches every planted one through these defaults. Every entry built here records no
-    default-pipeline measurement, tensorized best, default fingerprint or search trajectory: the
-    shape of an entry written before those fields existed, which replays as "nothing is known".
+    default-pipeline measurement, tensorized best, default fingerprint, search trajectory or finals
+    record: the shape of an entry written before those fields existed, which replays as "nothing is
+    known".
 
     The backend name is an explicit argument wherever a key or a codegen tag is derived (as
     {!Ir.Schedule_cache.codegen_tag} takes it), never read off the limits record. *)
@@ -37,6 +38,7 @@ let entry ?(numerics = SC.numerics_tag ()) ?codegen ?objective ?(saved = []) ?se
     default_fingerprint = None;
     best_steps = None;
     budget_cut = false;
+    finals = None;
   }
 
 (** [key ~backend ~timing_identity ~limits ~capabilities canon] is the key [Autotune.tune] looks
