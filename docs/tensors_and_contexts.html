@@ -602,6 +602,21 @@ dependencies remain satisfied.</p>
 <span id="cb14-13"><a href="#cb14-13" aria-hidden="true" tabindex="-1"></a><span class="co">(* Re-execution works — deps are still satisfied *)</span></span>
 <span id="cb14-14"><a href="#cb14-14" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> ctx = Context.run ctx grad_routine <span class="kw">in</span></span>
 <span id="cb14-15"><a href="#cb14-15" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> _ctx = Context.run ctx sgd_routine <span class="kw">in</span></span></code></pre></div>
+<h4 id="shared-gradients">Shared Gradients</h4>
+<p>A tensor shared by two losses – an optimized
+<code>Require_grad</code> input under a content and a style objective, a
+parameter, a trunk – receives each loss’s contribution to its gradient
+from that loss’s backprop, but only its first-constructed consumer
+carries its gradient zeroing (and, for a trunk, the backprop propagating
+from it). Two <code>Train.grad_update</code> routines over it in one
+lineage would compute neither loss’s gradient, so
+<code>Context.compile</code> refuses the second, naming the gradient and
+both routines (gh-ocannl-1744). Compute the objectives in one routine,
+as <code>Train.grad_update</code> of a loss over their sum; or compile
+<code>Train.zero_params_grads ~params</code> first and then a
+<code>Train.grad_update ~accum_steps:1</code> per objective, neither of
+which zeroes the shared leaf: after the reset and both runs, its
+gradient is the sum’s.</p>
 <h2 id="the-train-module">The Train Module</h2>
 <p>The <code>Train</code> module provides high-level utilities for
 training workflows.</p>
