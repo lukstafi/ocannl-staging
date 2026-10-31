@@ -663,7 +663,22 @@ let () =
         &&
         match measured with
         | S.Lanes_cut -> List.for_all (dv @ dk) ~f:lane_inside_serial
-        | _ -> not (List.exists dv ~f:lane_inside_serial))
+        | _ -> not (List.exists dv ~f:lane_inside_serial));
+  (* The structural leg of the cut mode (gh-ocannl-1626): per-PR CI runs cc, where the claim above
+     is skipped, and the costly claims above pin only the admitted mode's merge. The segments are
+     the GPU pipeline's, computed on the host, so the cheap device's are computed here whatever the
+     host; the costly segments above, whose dV runs off the lanes, are the control. *)
+  let cheap_dv =
+    List.filter
+      (gpu_segments ~limits:cheap fused_opt)
+      ~f:(List.exists ~f:(computes ~writes:writes_dv))
+  in
+  p_all
+    "fused dV, cheap lanes: every segment computing it computes dK beside it, both on their lanes"
+    cheap_dv ~f:(fun seg ->
+      let dv = List.filter seg ~f:(computes ~writes:writes_dv)
+      and dk = List.filter seg ~f:(computes ~writes:writes_dk) in
+      (not (List.is_empty dk)) && List.for_all (dv @ dk) ~f:lane_inside_serial)
 
 (* Leg 8 (gh-ocannl-1239): a row statistic -- [R[b, s, h] += P[b, s, h, t]], whose chain is the
    value pass's plain one, [(b, s, h)], and whose path has no lane extension -- beside the hoisted

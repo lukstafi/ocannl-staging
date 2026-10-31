@@ -116,10 +116,15 @@ lred_guard_uniform64: the estimate counts exactly the partials the emitted kerne
 lred_guard_flag64: the estimate counts exactly the partials the emitted kernel declares: true
 lred_guard_unrolled64: the estimate counts exactly the partials the emitted kernel declares: true
 lred_multi64: 8 bytes of partials, admitted at that limit and refused one byte below it: true
+lred_multi64 (structural): under a GPU-like dialect, 8 bytes of partials, admitted at that limit and refused one byte below it: true
 lred_multi128: 16 bytes of partials, admitted at that limit and refused one byte below it: true
+lred_multi128 (structural): under a GPU-like dialect, 16 bytes of partials, admitted at that limit and refused one byte below it: true
 lred_guard_uniform64: 8 bytes of partials, admitted at that limit and refused one byte below it: true
+lred_guard_uniform64 (structural): under a GPU-like dialect, 8 bytes of partials, admitted at that limit and refused one byte below it: true
 lred_coop32: 0 bytes of partials, admitted at that limit: true
+lred_coop32 (structural): under a GPU-like dialect, 0 bytes of partials, admitted at that limit: true
 lred_guard_flag64: 0 bytes of partials, admitted at that limit: true
+lred_guard_flag64 (structural): under a GPU-like dialect, 0 bytes of partials, admitted at that limit: true
 --- leg 12: the butterfly only under warp-uniform control ---
 lred_guard_uniform32: the validator's notion lists the butterfly at 32-lane shuffles, uniform, and admits it: true
 lred_guard_uniform32: every cell of K holds the serial reference's exact value: true

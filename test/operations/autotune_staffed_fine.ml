@@ -102,6 +102,36 @@ let workload () =
   let comp = Train.forward r in
   (z, r, { comp with Ir.Assignments.asgns = Ir.Assignments.Block_comment ("sf_head", comp.asgns) })
 
+(* The structural leg (gh-ocannl-1626): per-PR CI runs cc, where every claim below is skipped. Its
+   premise -- the finer cuts free a key while sharing one with the coarse cuts -- is the tuner's two
+   segmentations and the seeds of their segments, computed on the host, so they are computed here by
+   the tuner's own pipeline under a synthetic GPU target whatever the host
+   ([Ll_test.tuner_segments], coarse and with [~arity_cuts]), on the lowering this host captures. A
+   key is a segment some GPU sketch seeds, by its placement-aware digest. The control: the coarse
+   segmentation alone keys only what it shares, so the fine key is the finer cuts'. *)
+let () =
+  let _, _, comp = workload () in
+  let base = Ll_test.captured_lowering comp in
+  let target = Ll_test.synthetic_gpu () in
+  let keys arity_cuts =
+    let _, tuples = Ll_test.tuner_segments ~target ~arity_cuts base in
+    List.filter_map tuples ~f:(fun (_, pre, _, _) ->
+        if
+          List.is_empty
+            (Autotune.sketch_seed_params ~is_gpu:true ~is_cpu:false ~limits:target.limits pre)
+        then None
+        else
+          Some (Ir.Schedule_cache.digest (Ir.Schedule_cache.canonicalize ~with_placements:true pre)))
+  in
+  let coarse = keys false and fine = keys true in
+  let shared = List.filter fine ~f:(List.mem coarse ~equal:String.equal) in
+  p "structural: under a synthetic GPU target the fine and coarse segmentations share one key"
+    (List.length shared = 1);
+  p "structural: the finer cuts free a key the coarse cuts do not have"
+    (List.exists fine ~f:(fun k -> not (List.mem coarse k ~equal:String.equal)));
+  p "structural control: the coarse segmentation keys only the shared segment"
+    (List.equal String.equal coarse shared)
+
 let values ctx routine (z, r) =
   let ctx = Context.run ctx routine in
   let got = (Context.get_values ctx z.Tensor.value, Context.get_values ctx r.Tensor.value) in

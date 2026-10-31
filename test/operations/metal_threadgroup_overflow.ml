@@ -234,3 +234,64 @@ let () =
         | Ok () ->
             Stdio.eprintf "metal_threadgroup_overflow: public: compiled\n%!";
             false))
+
+(* The structural leg (gh-ocannl-1626): per-PR CI runs cc, where every leg above is skipped. Legs C
+   and G and leg O's estimate are the schedule-level gate's verdicts, which the host computes: the
+   schedule is applied here to the lowering this host captures, and judged by
+   [Sched.workgroup_memory_bytes] and [Sched.check_hardware_limits_classified] at a stand-in limit
+   of 32 KiB under capabilities rounding each allocation to Metal's measured 4-byte granule. The
+   driver's refusal and the public error stay Metal's. *)
+let () =
+  let limit = 32768 in
+  let elems = limit / half_bytes in
+  let metal_granule =
+    { Ir.Backend_intf.no_codegen_capabilities with workgroup_allocation_alignment = 4 }
+  in
+  let limits =
+    { Ir.Backend_intf.no_hardware_limits with max_workgroup_memory_bytes = Some limit }
+  in
+  let scheduled ~name ~bi =
+    let u =
+      NTDSL.init ~l:(name ^ "_u") ~prec:Ir.Ops.half
+        ~o:[ 2 * bi ]
+        ~f:(fun idcs -> u_value idcs.(0))
+        ()
+    in
+    let v =
+      NTDSL.init ~l:(name ^ "_v") ~prec:Ir.Ops.half
+        ~o:[ elems - bi ]
+        ~f:(fun idcs -> v_value idcs.(0))
+        ()
+    in
+    let%op c = u +++ "i; j => ij" v in
+    let opt = Ll_test.captured_lowering (named name (Train.forward c)) in
+    Sched.apply (schedule ~bi ~u:u.Tensor.value ~v:v.Tensor.value opt) opt
+  in
+  (* [None] where the gate admits, [Some requested] where it refuses on workgroup memory. *)
+  let gate ~capabilities o =
+    match Sched.check_hardware_limits_classified ~name:"tgo_structural" ~limits ~capabilities o with
+    | () -> None
+    | exception
+        SO.Cause_at (_, SO.Resource_exceeded { resource = SO.Workgroup_memory; requested; _ }) ->
+        Some requested
+  in
+  let estimate ~capabilities o = Sched.workgroup_memory_bytes ~capabilities o in
+  let control = scheduled ~name:"tgo_s_control" ~bi:32 in
+  p
+    "C (structural): even-length half tiles are estimated at exactly the limit, rounded or exact, \
+     and admitted"
+    (estimate ~capabilities:metal_granule control = limit
+    && estimate ~capabilities:(exact_sizes metal_granule) control = limit
+    && Option.is_none (gate ~capabilities:metal_granule control));
+  let odd = scheduled ~name:"tgo_s_gate" ~bi:33 in
+  let rounded = estimate ~capabilities:metal_granule odd in
+  p
+    "G (structural): odd-length half tiles whose exact bytes total the limit are refused, \
+     requesting their rounded estimate, over the limit"
+    (estimate ~capabilities:(exact_sizes metal_granule) odd = limit
+    && rounded > limit
+    && Option.equal Int.equal (gate ~capabilities:metal_granule odd) (Some rounded));
+  p
+    "O (structural): with exact sizes the gate estimates the odd tiles at exactly the limit, and \
+     admits them"
+    (Option.is_none (gate ~capabilities:(exact_sizes metal_granule) odd))

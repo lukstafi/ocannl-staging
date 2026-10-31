@@ -1,3 +1,5 @@
+2 (structural): under the GPU pipeline the stored fine segmentation carries a zeros segment with a non-empty zero expansion: true
+2 (structural control): before the configuration changes, the GPU zero policy re-derives every stored zeros segment's expansion: true
 the stored segmentation fissions the routine: true
 the stored segmentation carries a zeros segment: true
 the stored winner replays from the cache: true
@@ -5,6 +7,7 @@ the replay is fissioned: true
 the replay computes the right values: true
 the current policy segments the routine differently from the stored segmentation: true
 the changed configuration re-derives a different zero expansion than the stored one: true
+2 (structural): under the GPU pipeline the changed configuration re-derives a different zero expansion than the stored one: true
 the cache key does not move with the segmentation policy: true
 after the policy change the winner still replays from the cache: true
 after the policy change the replay computes the right values: true
@@ -28,6 +31,7 @@ the folded segmentation opens a segment with the projection's zero: true
 the folded winner replays from the cache: true
 the folded replay computes the right values: true
 the raised threshold no longer proposes the fold: true
+6 (structural): under the synthetic GPU target the raised threshold no longer proposes the fold: true
 under the raised threshold the folded winner replays from the cache, with search: true
 under the raised threshold the folded replay computes the right values, with search: true
 under the raised threshold the folded replay emits identical code, with search: true

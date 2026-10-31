@@ -88,6 +88,31 @@ let seeded ~min_serial =
 let split_bgrad (r : Autotune.seeded_choice) =
   List.exists r.sd_split ~f:(fun (tn, _) -> Ir.Tnode.equal tn bgrad)
 
+(* The structural leg (gh-ocannl-1626): per-PR CI runs cc, where the claims gated on [splits_here]
+   below are skipped. Which reductions the untuned compile splits is decided on the host
+   ([Autotune.seeded_split_sites], reading no device property), so it is decided here for "cuda"
+   whatever the host, on the lowering this host captures, at the executed leg's threshold. The
+   controls: above the serial chain, and for cc, nothing is split, so the split is the threshold's
+   and the backend's, not the fixture's. *)
+let () =
+  let opt = Context.lowered_for_decisions (Context.auto ()) comp Ir.Indexing.Empty in
+  let sites ~backend ~min_serial =
+    Autotune.seeded_split_sites ~backend ~min_serial ~static_indices:[] opt
+  in
+  p "structural: for cuda the bias gradient is split at a threshold below its serial chain"
+    (List.exists (sites ~backend:"cuda" ~min_serial:4096) ~f:(fun (s, _) ->
+         Ir.Tnode.equal s.Autotune.sr_target bgrad));
+  (* Over the split-reduce sites the detector finds, so the controls cannot pass on a routine with
+     none to split. *)
+  let candidates = Autotune.split_reduce_sites opt in
+  p_empty
+    "structural control: for cuda a threshold above every serial chain splits none of the sites"
+    ~over:candidates
+    (sites ~backend:"cuda" ~min_serial:(nb * ns * no * 2));
+  p_empty "structural control: for cc none of the sites is split at the same threshold"
+    ~over:candidates
+    (sites ~backend:"cc" ~min_serial:4096)
+
 let () =
   let default = run Context.compile in
   let split, r = seeded ~min_serial:4096 in

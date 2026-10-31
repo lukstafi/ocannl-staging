@@ -1,3 +1,5 @@
+mc (structural): at a stand-in f32 tile every unfused tensorized GPU seed applies and passes the parallel validation: true
+mc (structural) control: advertising no matrix unit, no tensorized GPU seed is proposed among its GPU seeds: true
 mc: every unfused GPU tensorized seed compiles and computes correctly: true
 mc: every unfused GPU tensorized seed renders tensorized per its mma census: true
 mc: tuned classifier head matches the reference: true

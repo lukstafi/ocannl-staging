@@ -8889,7 +8889,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules seeded_refine_blocks)
- (libraries base ocannl stdio unix arrayjit.verdict)
+ (libraries base ocannl stdio unix arrayjit.verdict ll_test)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -10562,7 +10562,8 @@
 ; the search runs on a GPU backend and every claim is skipped elsewhere.
 
 (test
- ; cc-vector-width: independent -- every claim is gated on a GPU backend, and on cc no search runs.
+ ; cc-vector-width: independent -- the structural leg seeds GPU sketches under a synthetic GPU
+ ; target, every other claim is gated on a GPU backend, and on cc no search runs.
  (name autotune_staffed_fine)
  (package neural_nets_lib)
  (deps

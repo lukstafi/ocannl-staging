@@ -128,9 +128,8 @@ let forward ?(model = model) ?lowered_transform ~name ~on ~block ~seq ~d_k () =
 (* The default pipeline under [limits], as [Schedule.maybe_default_schedules] runs it (the fission
    seam, locals promoted on a GPU, the GPU preset and the schedule-aware merge rule read against
    those limits), and whether any segment's schedule carries a [Fold_mma]. *)
-let pipeline ~limits =
+let pipeline ?(gpu = Sched.backend_is_gpu backend_name) ~limits () =
   let emitted = ref false in
-  let gpu = Sched.backend_is_gpu backend_name in
   let transform (o : LL.optimized) =
     let preset seg = if gpu then Sched.default_gpu ~limits seg else Sched.default_cpu seg in
     let zero_sched tns = if gpu then Sched.zero_expansion ~limits tns else [] in
@@ -214,11 +213,13 @@ let () =
   let capable = Lazy.force f32_mma in
   let limits = Context.hardware_limits (Context.auto ()) in
   let composed = forward ~name:"osbm_cap_composed" ~on:false ~block:0 ~seq ~d_k () in
-  let device_transform, device_emitted = pipeline ~limits in
+  let device_transform, device_emitted = pipeline ~limits () in
   let device =
     forward ~lowered_transform:device_transform ~name:"osbm_cap_device" ~on:true ~block ~seq ~d_k ()
   in
-  let capped_transform, capped_emitted = pipeline ~limits:{ limits with BI.max_grid_yz = Some 1 } in
+  let capped_transform, capped_emitted =
+    pipeline ~limits:{ limits with BI.max_grid_yz = Some 1 } ()
+  in
   let capped =
     forward ~lowered_transform:capped_transform ~name:"osbm_cap_capped" ~on:true ~block ~seq ~d_k ()
   in
@@ -236,7 +237,39 @@ let () =
   p_close "under the grid cap the output matches the composed output within 1e-4 relative"
     capped.values composed.values ~tol:(close_tol ~tol:1e-4);
   p_close "under the device's limits the output matches the composed output within 1e-4 relative"
-    device.values composed.values ~tol:(close_tol ~tol:1e-4)
+    device.values composed.values ~tol:(close_tol ~tol:1e-4);
+  (* The structural leg (gh-ocannl-1626): per-PR CI runs cc, where the preset's emission claims
+     above are skipped and the grid-cap claim holds only because the CPU preset never emits
+     [Fold_mma]. The emission is the GPU preset's decision on the host, so the fold's lowering is
+     captured here and segmented by the GPU pipeline whatever the host, at limits advertising
+     Metal's f32 matrix unit: the preset must emit [Fold_mma], and the same limits under the grid
+     cap must not. *)
+  let captured = ref None in
+  ignore
+    (forward
+       ~lowered_transform:(fun o ->
+         captured :=
+           Some
+             {
+               o with
+               LL.traced_store = Hashtbl.copy o.LL.traced_store;
+               optimize_ctx = LL.copy_optimize_ctx o.LL.optimize_ctx;
+             };
+         [ o ])
+       ~name:"osbm_cap_capture" ~on:true ~block ~seq ~d_k ()
+      : run);
+  let synthetic_emits limits =
+    let transform, emitted = pipeline ~gpu:true ~limits () in
+    ignore (transform (Option.value_exn ~here:[%here] !captured) : LL.optimized list);
+    !emitted
+  in
+  let synthetic = { BI.no_hardware_limits with mma = Some Ir.Metal_mma.capability } in
+  p
+    "structural: under the GPU preset at limits advertising f32 MMA units the preset emits \
+     Fold_mma for the fold"
+    (synthetic_emits synthetic);
+  p "structural: under the GPU preset a grid cap of 1 keeps the scalar fold: no Fold_mma emitted"
+    (not (synthetic_emits { synthetic with max_grid_yz = Some 1 }))
 
 (* --- Leg 3: the training step (the fold forward under the fused backward, treatment F). --- *)
 

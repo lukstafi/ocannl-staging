@@ -971,6 +971,45 @@ let () =
     in
     (!folded_local, !seeds, List.mapi !seeds ~f:run_seed)
   in
+  (* The structural leg of [cvft] (gh-ocannl-1626): per-PR CI runs cc, where the leg below is
+     skipped. The folded segment and its seeds are the tuner's, computed on the host, so they are
+     computed here by the tuner's own pipeline under a synthetic GPU target advertising an f32 8x8x8
+     matrix unit, whatever the host, on the lowering this host captures (never compiled scheduled:
+     the GPU preset's output would reach the host's renderer). The control: the same pipeline
+     without the zero fold leaves the conv segment no per-cell zero of the conv output. *)
+  (let synthetic_limits = Ll_test.f32_mma_limits in
+   let target = Ll_test.synthetic_gpu ~limits:synthetic_limits () in
+   let opt =
+     let _, _, _, y = make_tail "cvft_s" in
+     Ll_test.captured_lowering (named "cvft_s_capture" (Train.forward y))
+   in
+   (* The conv segment, and whether it opens with the conv output's per-cell zero while not
+      materializing it -- [segment_gpu_leg]'s [folded_local]. *)
+   let conv_segment tuples =
+     List.find_map tuples ~f:(fun (_, (seg : LL.optimized), _, _) ->
+         Option.map (Autotune.detect_conv seg.LL.llc) ~f:(fun site ->
+             let d = site.Autotune.c_d in
+             ( seg,
+               (not (Ir.Tnode.Placements.is_materialized_peek seg.LL.optimize_ctx.LL.placements d))
+               && List.exists (LL.flat_lines [ seg.LL.llc ]) ~f:(function
+                 | LL.Zero_out _ -> false
+                 | stmt -> Option.exists (LL.zero_initializer_target stmt) ~f:(Ir.Tnode.equal d)) )))
+   in
+   let folded = conv_segment (snd (Ll_test.tuner_segments ~target opt)) in
+   p
+     "cvft (structural): under a synthetic GPU target the conv segment folds the conv output's \
+      per-cell zero, the output not materialized"
+     (Option.exists folded ~f:snd);
+   p_exists "cvft (structural): the folded conv+tail segment seeds fused-epilogue GPU twins"
+     (Option.value_map folded ~default:[] ~f:(fun (seg, _) ->
+          Autotune.sketch_seed_params ~is_gpu:true ~is_cpu:false ~limits:synthetic_limits seg))
+     ~f:(fun s -> s.Autotune.sk_conv && s.Autotune.sk_gpu && s.Autotune.sk_epilogue);
+   p
+     "cvft (structural control): without the zero fold the conv segment carries no per-cell zero \
+      of the conv output"
+     (Option.exists
+        (conv_segment (snd (Ll_test.tuner_segments_unfolded ~target opt)))
+        ~f:(fun (_, folded_local) -> not folded_local)));
   (let cvft =
      lazy
        (segment_gpu_leg ~tag:"cvft" ~want:want_t ~build:(fun sub ->

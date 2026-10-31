@@ -162,6 +162,28 @@ let run compile =
   Context.sync ctx;
   (Context.get_values ctx scores.Tensor.value, Context.get_values ctx row_max.Tensor.value)
 
+(* The structural leg (gh-ocannl-1626): per-PR CI runs cc, where the claims gated on [seeds_here]
+   below are skipped. The refinement is the seeded plan's, derived on the host
+   ([Autotune.seeded_plan]), so it is derived here for "cuda" whatever the host, on this routine's
+   lowering as this host captures it, at the executed leg's threshold -- part 1's [refine_segments]
+   legs run on synthetic segmentations, this one on the routine the seeded default compiles. The
+   control: above the score product's reduction extent nothing is seeded or refined. *)
+let () =
+  let opt = Context.lowered_for_decisions (Context.auto ()) comp Ir.Indexing.Empty in
+  let census ~min_reduction =
+    Ll_test.seeded_census
+      (Autotune.seeded_plan ~min_reduction ~backend:"cuda"
+         ~limits:Ir.Backend_intf.no_hardware_limits ~accum_prec:Fn.id ~static_indices:[] opt)
+  in
+  p
+    "structural: for cuda the score product is seeded, its segment moved off the maximum's \
+     initialization"
+    (Option.exists (census ~min_reduction:nd) ~f:(fun c -> c.Ll_test.sketched = 1 && c.refined >= 1));
+  p "structural control: above the product's reduction extent nothing is seeded or refined"
+    (Option.for_all
+       (census ~min_reduction:(nd + 1))
+       ~f:(fun c -> c.Ll_test.sketched = 0 && c.refined = 0))
+
 let () =
   let s_default, m_default = run Context.compile in
   let report = ref None in

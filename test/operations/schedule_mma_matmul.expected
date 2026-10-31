@@ -8,6 +8,9 @@ tf32 k=24 divergent tile emits the wmma intrinsic: true
 tf32 k=24 autotune seeds tensorized candidates: true
 tf32 transposed-A matmul matches the serial twin: true
 tf32 transposed-A matmul emits the expected wmma layout: true
+tf32 (structural): policy-off, autotune omits tensorized candidates: true
+tf32 (structural) control: policy-on at the same k, it seeds them: true
+tf32 (structural): k=24, policy-on, autotune seeds tensorized candidates: true
 tensorized matmul values match the serial twin: true
 C-backend fallback matches bitwise: true
 tensorized structure as expected: true
@@ -22,6 +25,7 @@ f16->f32 direct tensorized structure as expected: true
 Fp16_wide half serial rendering equals the once-narrowed wide reference bitwise: true
 Fp16_wide half tensorized matmul equals the same wide reference bitwise (the residency, not the schedule, sets the width): true
 Fp16_wide mma seeds match the backend's advertised emission scopes: true
+Fp16_wide (structural): at a synthetic f16 tile, the mma seeds match each advertised set of emission scopes: true
 Fp16_wide half tensorized structure as expected: true
 Fp16_wide with narrow_compute_f32 off matches the independent wide reference: true
 Fp16_wide with narrow_compute_f32 off declines the register tiling (no narrow C-tile accumulator): true
@@ -44,6 +48,7 @@ the default-policy uniform-bf16 matmul exceeds the narrowing rounding exactly wh
 the Bf16_narrow uniform-bf16 matmul exceeds the narrowing rounding exactly where that mode keeps bf16 storage residency: true
 on HIP with tile MMA, the Bf16_narrow uniform-bf16 twin tensorizes: true
 Bf16_wide mma seeds match the backend's advertised emission scopes: true
+Bf16_wide (structural): at a synthetic bf16 tile, the mma seeds match each advertised set of emission scopes: true
 Bf16_wide uniform-bf16 tensorized structure as expected: true
 f8 tensorized matmul matches the serial twin bitwise: true
 f8 tensorized structure as expected: true

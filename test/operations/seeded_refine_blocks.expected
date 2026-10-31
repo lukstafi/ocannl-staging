@@ -8,6 +8,8 @@ a block whose fine segments seed no more keeps its coarse segments: true
 a block both segmentations cut alike is the coarse segment, decided once: true
 a finer segmentation covering other units is ignored: true
 no finer segmentation leaves the coarse one: true
+structural: for cuda the score product is seeded, its segment moved off the maximum's initialization: true
+structural control: above the product's reduction extent nothing is seeded or refined: true
 on CUDA/HIP the score product is seeded, its segment moved off the maximum's initialization: true
 on CUDA/HIP the seeded routine compiles without falling back to the default: true
 off CUDA/HIP the seeded default seeds nothing: true

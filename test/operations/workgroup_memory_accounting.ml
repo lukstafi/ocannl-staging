@@ -147,7 +147,40 @@ let () =
      byte below"
     multi ~f:(fun leg ->
       let bytes = Sched.workgroup_memory_bytes ~capabilities leg.scheduled in
-      bytes = declared leg && admits leg bytes && not (admits leg (bytes - 1)))
+      bytes = declared leg && admits leg bytes && not (admits leg (bytes - 1)));
+  (* The structural half (gh-ocannl-1626): per-PR CI runs cc, whose dialect renders the serial loop
+     and charges nothing, so the gated claims above are skipped there. The charge and the gate are
+     host-side, so the same schedules are judged here under a GPU-like dialect's derived
+     capabilities ([Ll_test.gpu_like_capabilities]): partials past one warp, none within it, and the
+     gate's boundary at the estimate. That the charge is what the kernel declares stays the GPU
+     claim's: it reads the emitted source. *)
+  let gpu_like = Ll_test.gpu_like_capabilities () in
+  let gpu_like_charge leg =
+    Sched.workgroup_memory_bytes ~capabilities:gpu_like leg.scheduled
+    - Sched.workgroup_memory_bytes ~capabilities:Ir.Backend_intf.no_codegen_capabilities
+        leg.scheduled
+  in
+  p_all "structural: under a GPU-like dialect, past one warp the estimate charges partials" multi
+    ~f:(fun leg -> gpu_like_charge leg > 0);
+  p_all "structural: under a GPU-like dialect, within one warp it charges none"
+    (List.filter legs ~f:(fun leg -> leg.lanes <= 32))
+    ~f:(fun leg -> gpu_like_charge leg = 0);
+  p_all
+    "structural: under a GPU-like dialect, past one warp the gate admits the kernel at exactly its \
+     estimate and refuses it one byte below"
+    multi ~f:(fun leg ->
+      let bytes = Sched.workgroup_memory_bytes ~capabilities:gpu_like leg.scheduled in
+      let admits bytes =
+        match
+          Sched.check_hardware_limits ~name:leg.name
+            ~limits:
+              { Ir.Backend_intf.no_hardware_limits with max_workgroup_memory_bytes = Some bytes }
+            ~capabilities:gpu_like leg.scheduled
+        with
+        | () -> true
+        | exception Utils.User_error _ -> false
+      in
+      admits bytes && not (admits (bytes - 1)))
 
 (* === 2. The conv family's pricing. === *)
 

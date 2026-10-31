@@ -4,6 +4,8 @@ bc: no seed declines on companion coverage: true
 bc: every constructed schedule Grid-blocks the minor output axis, never leaving it serial: true
 bc: the minor output axis carries block-level parallelism wherever the geometry allows: true
 bc: the j-blocking detector rejects the CPU pipelines, which block the row axis instead: true
+bc (structural): at a stand-in f32 tile every tensorized GPU seed constructs a schedule that Grid-blocks the minor output axis: true
+bc (structural) control: advertising no matrix unit, no tensorized GPU seed is proposed among its GPU seeds: true
 bc: every unfused GPU seed compiles and computes correctly: true
 bc: tuned batched head matches the reference: true
 bc: the tuning search reports exactly once: true

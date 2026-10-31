@@ -222,6 +222,48 @@ let () =
   in
   let fine_segmentation, fine_tuples = fission ~arity_cuts:true () in
   let saved = List.map (SC.save_segments fine_segmentation fine_tuples) ~f:fst in
+  (* What a re-deriving replay would give a zeros segment: its zero expansion under [zero_sched],
+     saved against the segment as the stored schedule is. *)
+  let rederived_zeros_differ ~zero_sched (s, (_, pre, _, _)) =
+    match s.SC.seg_kind with
+    | `Normal | `Solo | `Unfolded -> false
+    | `Zeros ->
+        let tns =
+          List.filter_map (LL.flat_lines [ pre.LL.llc ]) ~f:(function
+            | LL.Zero_out tn -> Some tn
+            | _ -> None)
+        in
+        let pre_canon = SC.canonicalize ~with_placements:false pre in
+        let rederived, _ = SC.to_saved (SC.base_registry pre_canon) (zero_sched tns) in
+        not (SC.equal_saved_schedule rederived s.SC.seg_saved)
+  in
+  (* The structural leg of the re-derivation claim in 2-3 (gh-ocannl-1626): per-PR CI runs cc, whose
+     zero policy proposes nothing, so the stored zeros segment's schedule and its re-derived one are
+     both empty there. The fine segmentation is saved here as well under the GPU pipeline at no
+     hardware limits whatever the host -- promoted locals, the GPU preset and zero policy -- whose
+     zero expansion reads the configured block size and threshold. The control: before the
+     configuration changes, re-deriving it reproduces the stored expansion. *)
+  let synthetic_limits = Ir.Backend_intf.no_hardware_limits in
+  let synthetic_zero_sched = Sched.zero_expansion ~limits:synthetic_limits in
+  let synthetic_saved, synthetic_tuples =
+    let segmentation, tuples =
+      Sched.fission_segmented ~promote_locals:true ~arity_cuts:true
+        ~preset:(fun o -> Sched.default_gpu ~min_parallel:1 ~limits:synthetic_limits o)
+        ~zero_sched:synthetic_zero_sched ~static_indices:[] (copy rut.base_opt)
+    in
+    (List.map (SC.save_segments segmentation tuples) ~f:fst, tuples)
+  in
+  p
+    "2 (structural): under the GPU pipeline the stored fine segmentation carries a zeros segment \
+     with a non-empty zero expansion"
+    (List.exists synthetic_saved ~f:(fun s ->
+         Poly.equal s.SC.seg_kind `Zeros && not (List.is_empty s.SC.seg_saved)));
+  p_none
+    "2 (structural control): before the configuration changes, the GPU zero policy re-derives \
+     every stored zeros segment's expansion"
+    (List.filter (List.zip_exn synthetic_saved synthetic_tuples) ~f:(fun (s, _) ->
+         Poly.equal s.SC.seg_kind `Zeros))
+    ~f:(rederived_zeros_differ ~zero_sched:synthetic_zero_sched);
   let store = store ~cache_dir rut in
   let tune () =
     tune ~name ~cache_dir comp ~read:(fun ctx ->
@@ -266,23 +308,16 @@ let () =
   p "the current policy segments the routine differently from the stored segmentation"
     (not (Sched.equal_segmentation policy_segmentation (SC.segmentation_of saved)));
   (* What a re-deriving replay would give a zeros segment now: its zero expansion under the changed
-     configuration, saved against the segment as the stored schedule is. *)
-  let rederived_zeros_differ (s, (_, pre, _, _)) =
-    match s.SC.seg_kind with
-    | `Normal | `Solo | `Unfolded -> false
-    | `Zeros ->
-        let tns =
-          List.filter_map (LL.flat_lines [ pre.LL.llc ]) ~f:(function
-            | LL.Zero_out tn -> Some tn
-            | _ -> None)
-        in
-        let pre_canon = SC.canonicalize ~with_placements:false pre in
-        let rederived, _ = SC.to_saved (SC.base_registry pre_canon) (zero_sched tns) in
-        not (SC.equal_saved_schedule rederived s.SC.seg_saved)
-  in
+     configuration. *)
   gated ~when_:is_gpu ~on:backend_name
     "the changed configuration re-derives a different zero expansion than the stored one"
-    (List.exists (List.zip_exn saved fine_tuples) ~f:rederived_zeros_differ);
+    (List.exists (List.zip_exn saved fine_tuples) ~f:(rederived_zeros_differ ~zero_sched));
+  p
+    "2 (structural): under the GPU pipeline the changed configuration re-derives a different zero \
+     expansion than the stored one"
+    (List.exists
+       (List.zip_exn synthetic_saved synthetic_tuples)
+       ~f:(rederived_zeros_differ ~zero_sched:synthetic_zero_sched));
   p "the cache key does not move with the segmentation policy"
     (Option.equal String.equal key_before (cache_key rut));
   Generated.arm fissioned_source;
@@ -460,7 +495,7 @@ let () =
      saved schedule must reconstruct against its segment unchanged. A policy gate on the replayed
      fold (#1018's round-2 form) leaves the folded segment's head zero whole, so its segment's
      digest moves and the schedule saved against it no longer applies. *)
-  let () =
+  let synthetic_segmentation =
     let limits = Ir.Backend_intf.no_hardware_limits in
     let segmentation, tuples =
       Ll_test.tuner_segments ~target:(Ll_test.synthetic_gpu ~limits ()) rut.base_opt
@@ -511,7 +546,8 @@ let () =
       (Option.exists replayed ~f:(fun (replayed, rtuples) ->
            List.equal SC.equal_saved_schedule
              (List.map (SC.save_segments replayed rtuples) ~f:(fun (s, _) -> s.SC.seg_saved))
-             (List.map saved ~f:(fun s -> s.SC.seg_saved))))
+             (List.map saved ~f:(fun s -> s.SC.seg_saved))));
+    segmentation
   in
   let folded_label = "the folded segmentation opens a segment with the projection's zero" in
   (* The tuner's own segmentation on the host ([Ll_test.tuner_segments]), stored as its winner. *)
@@ -541,6 +577,19 @@ let () =
   let refolds, _ = Ll_test.tuner_segments rut.base_opt in
   gated ~when_:is_gpu ~on:backend_name "the raised threshold no longer proposes the fold"
     (not (Sched.equal_segmentation refolds segmentation));
+  (* The structural leg's twin of the claim above (gh-ocannl-1626): the zero policy reads the
+     configured threshold under the synthetic GPU target too, so the raised threshold must move the
+     fold the structural leg derived -- the leg's premise is the threshold's, not the target's. *)
+  p
+    "6 (structural): under the synthetic GPU target the raised threshold no longer proposes the \
+     fold"
+    (not
+       (Sched.equal_segmentation
+          (fst
+             (Ll_test.tuner_segments
+                ~target:(Ll_test.synthetic_gpu ~limits:Ir.Backend_intf.no_hardware_limits ())
+                rut.base_opt))
+          synthetic_segmentation));
   List.iter [ None; Some false ] ~f:(fun search ->
       let leg = match search with None -> "with search" | Some _ -> "with search disabled" in
       Generated.arm source;

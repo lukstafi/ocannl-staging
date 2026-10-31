@@ -41,6 +41,9 @@ cvzt: every whole-routine zeroed conv+tail GPU seed is a fused-epilogue twin: tr
 cvzt: every whole-routine zeroed conv+tail GPU candidate compiles: true
 cvzt: every compiling whole-routine conv+tail GPU candidate matches the natural form, run twice: true
 cvzt: every compiling whole-routine conv+tail GPU candidate is labeled tensorized: true
+cvft (structural): under a synthetic GPU target the conv segment folds the conv output's per-cell zero, the output not materialized: true
+cvft (structural): the folded conv+tail segment seeds fused-epilogue GPU twins: true
+cvft (structural control): without the zero fold the conv segment carries no per-cell zero of the conv output: true
 cvft: the conv segment folds the conv output's per-cell zero, the output not materialized: true
 cvft: the folded conv+tail segment seeds fused-epilogue GPU twins: true
 cvft: every fused-epilogue GPU twin of the folded segment compiles, and matches the natural form run twice: true

@@ -427,6 +427,26 @@ let () =
 
 let () =
   let comp, g, exact = bias_grad ~label:"srs" ~table:true in
+  (* The structural leg (gh-ocannl-1626): per-PR CI runs cc, where the claims gated on [splits_here]
+     below are skipped. The split is decided on the host ([Autotune.seeded_split_sites], reading no
+     device property), so it is decided here for "cuda" whatever the host, on this fixture's
+     lowering at this section's threshold -- the leg above decides it on the coalesced fixture at a
+     threshold of 1. The controls: twice the serial chain, and cc, split nothing. *)
+  let opt = capture comp in
+  let sites ~backend ~min_serial =
+    Autotune.seeded_split_sites ~backend ~min_serial ~static_indices:[] opt
+  in
+  p "structural: for cuda the untuned split takes the table fixture's bias gradient at 32 blocks"
+    (List.exists
+       (sites ~backend:"cuda" ~min_serial:(nb * ns))
+       ~f:(fun (s, blocks) -> Ir.Tnode.equal s.Autotune.sr_target g && blocks = 32));
+  let candidates = Autotune.split_reduce_sites opt in
+  p_empty "structural control: for cuda twice the serial chain splits none of the sites"
+    ~over:candidates
+    (sites ~backend:"cuda" ~min_serial:(2 * nb * ns));
+  p_empty "structural control: for cc none of the sites is split at the same threshold"
+    ~over:candidates
+    (sites ~backend:"cc" ~min_serial:(nb * ns));
   let report = ref None in
   let ctx, routine =
     Autotune.seeded_default ~min_serial:(nb * ns)

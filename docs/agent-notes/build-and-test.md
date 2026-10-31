@@ -4936,6 +4936,21 @@ box.
   needs a negative control that turns it red on cc: the policy-gate mutant there. `qkv_zero_init`'s
   sketch-escape leg (gh-ocannl-1043) is the earlier instance.
 
+- The suite-wide sweep of that rule (gh-ocannl-1626) found five host-side syntheses, each a
+  `Ll_test` entry point: the seeded untuned plan derived with `Autotune.seeded_plan
+  ~backend:"cuda"` on `Ll_test.captured_lowering` and counted by `Ll_test.seeded_census`; the
+  tuner's segmentation under `Ll_test.synthetic_gpu`; GPU seeds at the stand-in tile
+  `Ll_test.f32_mma_limits` (or a format the leg names); the scheduled IR of a shared-memory
+  schedule read by `Ll_test.guards_and_barriers` instead of a dialect's spelling; and
+  workgroup-memory estimates under `Ll_test.gpu_like_capabilities`, the capabilities
+  `C_syntax.codegen_capabilities` derives for a shuffle-capable dialect. Each leg is labelled
+  `structural` and carries a control in the same leg (the host's backend, a threshold above the
+  fixture, no matrix unit, the unfolded pipeline) under which the premise must be absent. What stays
+  GPU-only is what needs the device: emitted dialect text, execution, device numerics, timing,
+  driver refusals, and the renderer's binding-race check, whose thread and storage environment
+  is renderer state. The inventory and each skipped entry's reason are in the issue's closing
+  comment.
+
 - `refused_action_streams` (gh-ocannl-1005) holds accepted-failure Dune actions to the same
   stream contract as fresh-child controls: a run whose owning executable directly declares
   `arrayjit.verdict` and accepts a nonzero exit must capture or drop both streams on its own action

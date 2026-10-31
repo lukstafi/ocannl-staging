@@ -85,6 +85,39 @@ let () =
      empty seed list fails both claims rather than skipping them. A seed whose [Tile_mma] declined
      to the scalar fallback computes the same values, so each seed's routine census must also say it
      ran tensorized. *)
+  (* The structural leg (gh-ocannl-1626): per-PR CI runs cc, which advertises no GPU tile, so the
+     executed claims below are skipped there. The bug they guard died before any device saw the
+     code: at [LL.validate_parallel], on the host, against the scheduled IR. So the tensorized seeds
+     are proposed here at limits advertising an f32 8x8x8 matrix unit whatever the host, each
+     applied to a hermetic copy of the lowering this host captures and validated as the compile
+     validates it. The control: advertising no matrix unit, no tensorized seed is proposed. *)
+  (let synthetic_limits = Ll_test.f32_mma_limits in
+   let opt = Ll_test.captured_lowering ~name:"mc_capture" comp in
+   let tensorized limits =
+     List.filter (Autotune.sketch_seed_params ~is_gpu:true ~is_cpu:false ~limits opt) ~f:(fun p ->
+         p.Autotune.sk_mma && p.Autotune.sk_gpu && not p.Autotune.sk_epilogue)
+   in
+   p_all
+     "mc (structural): at a stand-in f32 tile every unfused tensorized GPU seed applies and passes \
+      the parallel validation"
+     (tensorized synthetic_limits) ~f:(fun sp ->
+       match
+         let s = Ll_test.hermetic_copy opt in
+         let post = Sched.apply (Autotune.sketch_schedule ~accum_prec ~p:sp s) s in
+         Ir.Low_level.validate_parallel post.Ir.Low_level.optimize_ctx.placements post.llc
+       with
+       | () -> true
+       | exception exn ->
+           Stdio.eprintf "mc (structural): seed %s failed: %s\n" (Autotune.sketch_params_label sp)
+             (Exn.to_string exn);
+           false);
+   p_empty
+     "mc (structural) control: advertising no matrix unit, no tensorized GPU seed is proposed \
+      among its GPU seeds"
+     ~over:
+       (Autotune.sketch_seed_params ~is_gpu:true ~is_cpu:false
+          ~limits:Ir.Backend_intf.no_hardware_limits opt)
+     (tensorized Ir.Backend_intf.no_hardware_limits));
   let claim = "mc: every unfused GPU tensorized seed compiles and computes correctly" in
   let rendered_claim =
     "mc: every unfused GPU tensorized seed renders tensorized per its mma census"

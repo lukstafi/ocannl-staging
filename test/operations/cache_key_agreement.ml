@@ -427,7 +427,7 @@ let () =
         Option.some_if (not (String.equal a b)) name)
   in
   (* What the key computation reads per lookup, in [setups]' regime. *)
-  let reads setups =
+  let reads ?(components = components) setups =
     let saved = Hash_set.to_list Utils.accessed_global_args in
     Hash_set.clear Utils.accessed_global_args;
     let read =
@@ -480,7 +480,7 @@ let () =
           (Set.diff flipped_through_settings settings_borne)));
   (* 3. Each [Keyed] key moves its own component where its scope says the key computation reads it,
      and nothing elsewhere. *)
-  let outcome (key, flip) =
+  let outcome ?(components = components) (key, flip) =
     let component = List.Assoc.find_exn keyed key ~equal:String.equal in
     (* The regime is set inside the flip as well: re-resolving the settings record resets the log
        level the regime raised. *)
@@ -551,6 +551,48 @@ let () =
         eprintf "%s is hashed only on %s, yet a flip moved the %s key\n" key (scope_name scope)
           backend;
       ok);
+  (* 3b. The structural leg (gh-ocannl-1626): per-PR CI runs cc, where the GPU-scoped keys land in
+     [elsewhere] above and only their silence is checked. The keys the shared key computation reads
+     on a GPU backend's behalf ([Schedule_cache.codegen_tag] gates them on the backend name) are
+     flipped here with the components computed for "cuda" whatever the host, and each must move its
+     own component. Which keys those are is the read trace's verdict under "cuda", not a list: a key
+     hashed on cuda but not on cc that the shared computation never reads is read by the CUDA
+     backend's own code, out of this host's reach (stderr names it). *)
+  (let cuda_components () = components_of ctx canon ~backend:"cuda" in
+   let cuda_reads =
+     Set.union (reads ~components:cuda_components []) (reads ~components:cuda_components logging)
+   in
+   let gpu_only =
+     List.filter keyed_flips ~f:(fun (_, flip) ->
+         in_scope flip.scope "cuda" && not (in_scope flip.scope "cc"))
+   in
+   let shared, own = List.partition_tf gpu_only ~f:(fun (key, _) -> Set.mem cuda_reads key) in
+   List.iter own ~f:(fun (key, _) ->
+       eprintf
+         "%s: read by the GPU backends' own code, not flipped for cuda (not part of the golden)\n"
+         key);
+   (* As in 3: a flip the commandline or environment outranks is not made, and says so. *)
+   let outcomes = List.map shared ~f:(outcome ~components:cuda_components) in
+   let took_effect =
+     List.filter outcomes ~f:(fun (key, _, _, flips) ->
+         if List.is_empty flips then skip_outranked ~what:"the Keyed flip for cuda" key;
+         not (List.is_empty flips))
+   in
+   let claim =
+     "structural: every GPU-scoped Keyed key the shared key computation reads for cuda moves its \
+      own component when flipped there"
+   in
+   if List.is_empty took_effect && not (List.is_empty outcomes) then
+     Verdict.skipped ~aggregation:`Environment ~backend claim
+   else
+     p_all claim took_effect ~f:(fun (key, component, _, flips) ->
+         let ok =
+           List.exists flips ~f:(fun (_, moved) -> List.mem moved component ~equal:String.equal)
+         in
+         if not ok then
+           eprintf "%s is classified Keyed %S, but no flip for cuda moved it: %s\n" key component
+             (describe flips);
+         ok));
   (* 4. Nothing outside the [Keyed] class is read per lookup while the key is computed -- in the
      plain regime, and behind the routine-log gate where the gated reads happen. *)
   let read = Set.union (reads []) (reads logging) in

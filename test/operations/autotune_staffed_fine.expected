@@ -1,3 +1,6 @@
+structural: under a synthetic GPU target the fine and coarse segmentations share one key: true
+structural: the finer cuts free a key the coarse cuts do not have: true
+structural control: the coarse segmentation keys only the shared segment: true
 fine: the coarse composite starts from the seeded rule's choices, and its first window carries them: true
 fine: the finer cuts freed a key the coarse ones share a key with: true
 fine: every fine single is staffed with the coarse composite's choice for the shared key: true
