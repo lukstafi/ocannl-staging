@@ -87,7 +87,21 @@ val init_params : ?skip:'a Map.M(Ir.Tnode).t -> t -> comp
     even if the params set is empty. *)
 
 val is_fwd_root : t -> bool
+(** Whether [t]'s forward code is still unconsumed: no consumer embedded it and it was not handed
+    out. The session holds its forward roots strongly, including in the closure checkpoint that
+    captured them, and {!consume_forward_code} refuses a tensor whose reads another forward root
+    computes. A graph built and dropped without ever being evaluated therefore stays referenced. *)
+
 val is_bprop_root : t -> bool
+(** Whether [t]'s backprop code is still unconsumed. The session holds its backprop roots WEAKLY,
+    checkpoints included (gh-ocannl-1745). The entry lives while any record sharing [t]'s
+    [consumption] cell is reachable from outside the session's root maps: [t] itself, a
+    [{ t with ... }] copy that keeps ownership, or a tensor that holds [t] as a child. A
+    differentiable graph whose forward code was handed out ({!Train.forward},
+    {!Train.forward_once}), and which the caller then dropped, is reclaimed by the GC. A loss built
+    over a tensor the caller still holds embeds its backprop as before. A dropped root no longer
+    vetoes {!consume_backprop_code}; a dependence on its code is refused by the compilation
+    lineage's requirement check ({!Context.run}). *)
 
 val take_forward_code : t -> comp
 (** The unchecked half of {!consume_forward_code}, for a tensor the caller has established is a

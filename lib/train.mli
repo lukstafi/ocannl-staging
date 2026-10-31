@@ -422,7 +422,11 @@ val run_once :
     tensor, or {!forward}/{!grad_update} of it through {!to_routine}) is refused by
     {!Context.compile}. To run a computation repeatedly, compile it with {!to_routine} and run the
     routine with {!Context.run}; to compile an alternative version, start from a context that does
-    not descend from this one (a sibling). *)
+    not descend from this one (a sibling).
+
+    The session does not pin the tensor either: once its forward code is handed out, it stays a
+    backprop root only while the caller holds it, so a graph dropped after a forward-only run is
+    reclaimed by the GC (gh-ocannl-1745; see {!Tensor.is_bprop_root}). *)
 
 val forward_once :
   ?output_cd_file:bool ->

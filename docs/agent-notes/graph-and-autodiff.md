@@ -70,6 +70,16 @@ files.
   tensor embeds its forward code — an explicit `t.forward` before a statement naming `t` is now
   refused as a second copy, and an earlier statement reading that root reads it before it is
   computed.
+- The backprop-root map is weak and the forward-root map strong (gh-ocannl-1745). A backprop
+  entry is an ephemeron keyed by the tensor's `consumption` cell (`Weak_root` in `tensor.ml`),
+  live while any ownership-preserving record copy is reachable, so a graph dropped after its
+  forward was handed out is reclaimed, checkpoints included. Forward roots stay strong:
+  `consume_forward_code`'s conflict check is the only guard on forward reads (a lineage has no
+  forward `requires`), and it must not depend on GC timing. So an unevaluated dropped graph stays
+  pinned, as does a root captured by the last closure until the next closure. Traps: a stray
+  reference to ANY record sharing the cell keeps the entry alive. A GC witness builds the graph
+  in an `[@inline never]` function returning a `Weak` observer, and reads it with `Weak.check`
+  after `Gc.full_major` (`dropped_graph_reclaimed.ml`).
 
 - The `projections` handle an `op_asn` receives is a promise: `Tensor.op` creates the operation's
   shape update step only after `op_asn` returns, because the step's `neutral_elem` is immutable and
