@@ -1969,9 +1969,9 @@ architectures:</p>
 <p>A <code>%op</code> function gets a <em>shape scheme</em>
 automatically (gh-ocannl-1751), on top of the explicit layer
 <code>Tensor.Scheme</code> (gh-ocannl-404, see <a href="./shape_inference.md#shape-schemes">shape inference</a>). By
-default its applications register <em>guided</em> by the scheme
-(gh-ocannl-1761, below); <code>op_shape_schemes=check</code> selects
-<em>checking mode</em>, described first:</p>
+default its applications are checked against the scheme (<em>checking
+mode</em>, described first); <code>op_shape_schemes=guided</code> makes
+them register <em>guided</em> by it instead (gh-ocannl-1761, below):</p>
 <ul>
 <li><strong>When it is traced.</strong> The closure built at the
 <code>()</code> application traces the scheme of the function it
@@ -2037,9 +2037,9 @@ shape-variable ids from reserved ranges, so printed ids and shapes,
 compilation choices, generated code and random draws are the same with
 or without schemes), but OCaml side effects of the body (a counter, a
 print) happen.</p>
-<p><strong>Guided registration (the default, gh-ocannl-1761).</strong>
-Under <code>op_shape_schemes=guided</code>, an application instantiates
-the scheme once against its arguments’ shapes – the trace’s constraints,
+<p><strong>Guided registration (opt-in, gh-ocannl-1761).</strong> Under
+<code>op_shape_schemes=guided</code>, an application instantiates the
+scheme once against its arguments’ shapes – the trace’s constraints,
 renamed, solved together with the arguments – and then runs the body,
 whose shape registration follows the trace:</p>
 <ul>
@@ -2078,6 +2078,12 @@ between applications supported: opt such a function out.</li>
 the body runs, as in checking mode, and leaves the session as it was.
 <code>Tensor.Scheme.registration_counts</code> reports the guided,
 fallback and unmatched steps.</li>
+<li><strong>Cost.</strong> Guided registration is not cheaper than
+checking mode: the instantiated constraints stand beside the steps’ ties
+until the closure, and solving the ties re-solves them, so it is slower
+than inline registration, superlinearly in the model’s depth
+(gh-ocannl-1752’s measurement, <a href="./shape_inference.md#what-schemes-buy-measured">shape
+inference</a>). That is why it is not the default.</li>
 </ul>
 <p><strong>Opting out.</strong> <code>[@@ocannl.no_scheme]</code> on the
 binding, or <code>[@ocannl.no_scheme]</code> on a <code>fun</code>
