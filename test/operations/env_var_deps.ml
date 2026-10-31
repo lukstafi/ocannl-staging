@@ -234,14 +234,36 @@ let rec depends_on_universe = function
    take it too (Codex P1 round 4): not because the gate contends -- it links `arrayjit.utils` and
    starts no OpenMP pool -- but because the one unlocked action in a file of locked ones is what the
    next person copies when writing a real training test. Asked of the file rather than hard-coded
-   per directory, so a directory that adopts the lock later brings its gate along. *)
-let training_lock = "ocannl_training_test"
+   per directory, so a directory that adopts the lock later brings its gate along.
+
+   GLOBAL, spelled with its leading [/]. Dune resolves any other lock name against the directory the
+   stanza applies to, so [(locks ocannl_training_test)] in test/operations and in test/training were
+   two locks, and the OpenMP pools the lock exists to keep apart overlapped across the two
+   directories (verified on dune 3.23 and 3.24: two sleeper actions under one relative name in two
+   directories ran concurrently, under [/name] in sequence; build-and-test.md#dune-mechanics). So
+   any other spelling of this lock -- the bare name, [./]- or [../]-qualified -- is refused wherever
+   it appears, rather than read as taking the lock. *)
+let training_lock_name = "ocannl_training_test"
+let training_lock = "/" ^ training_lock_name
 
 let rec takes_training_lock = function
   | Sexp.List (Sexp.Atom "locks" :: args) ->
       List.exists args ~f:(function Sexp.Atom a -> String.equal a training_lock | _ -> false)
   | Sexp.List l -> List.exists l ~f:takes_training_lock
   | Sexp.Atom _ -> false
+
+(* The lock names in a stanza's [(locks …)] fields that name the training lock under any spelling
+   but the global one: a path whose last component is its name. *)
+let rec misspelled_training_locks = function
+  | Sexp.List (Sexp.Atom "locks" :: args) ->
+      List.filter_map args ~f:(function
+        | Sexp.Atom a
+          when (not (String.equal a training_lock))
+               && String.equal (Stdlib.Filename.basename a) training_lock_name ->
+            Some a
+        | _ -> None)
+  | Sexp.List l -> List.concat_map l ~f:misspelled_training_locks
+  | Sexp.Atom _ -> []
 
 (* The alias vocabulary -- what a stanza attaches to, what its `deps` build, what an `(alias …)`
    stanza defines -- lives in the shared scanner, which tools/batch-backends.sh's reachability
@@ -1894,6 +1916,22 @@ let main () =
             gated_aliases ~subdir:(Scan.in_subdir dir subdir) ~programs:gate_programs here
           in
           let entries = entry_points here in
+          List.iter here ~f:(fun s ->
+              List.iter (misspelled_training_locks s) ~f:(fun spelled ->
+                  fail
+                    (Printf.sprintf
+                       "%s%s names the training lock as `%s` on %s -- dune resolves a lock name \
+                        without a leading `/` against the directory the stanza applies to, so it \
+                        is a different lock from every other directory's and the OpenMP pools it \
+                        keeps apart overlap across directories; spell it `%s`"
+                       dune_file
+                       (if String.is_empty subdir then ""
+                        else Printf.sprintf ", in `(subdir %s …)`" subdir)
+                       spelled
+                       (match aliases_of s with
+                       | [] -> "a stanza on no alias"
+                       | aliases -> String.concat ~sep:", " aliases)
+                       training_lock)));
           (* The lock (Codex P1 round 4): a gate in a directory whose actions take it has to take it
              too. Since this check receives a directory group, a group's unlocked gate cannot hide
              behind the outer [(subdir ...)] form (Codex P2, round 5). *)
@@ -3905,7 +3943,7 @@ let family_member_stanza ~shape ~metal =
          `Subdir_unlocked_gate` variant, which is the arrangement the repository's own rule forbids:
          one unlocked action in a directory of locked ones. *)
       let locks =
-        match shape with Subdir_unlocked_gate -> "  (locks ocannl_training_test)\n" | _ -> ""
+        match shape with Subdir_unlocked_gate -> "  (locks /ocannl_training_test)\n" | _ -> ""
       in
       (* The collision: a hand-written rule on the alias dune generates for the group's own `(test)`
          stanza. Building that alias would run both. *)
@@ -4334,6 +4372,16 @@ let family_control () =
   let subdir_unlocked =
     run ~shape:Subdir_unlocked_gate ~metal:true ~lifecycle:false ~family:None ()
   in
+  (* The same group with the member's lock spelled relative: dune makes that a lock of the group's
+     own directory, shared with nothing outside it, so it is refused as a misspelling -- and does
+     not count as taking the lock, so the gate beside it owes none. *)
+  let relative_lock =
+    run ~shape:Subdir_unlocked_gate
+      ~transform:
+        (String.substr_replace_all ~pattern:"(locks /ocannl_training_test)"
+           ~with_:"(locks ocannl_training_test)")
+      ~metal:true ~lifecycle:false ~family:None ()
+  in
   (* And a `(test)` stanza as the runner of a lifecycle executable. *)
   let test_stanza_runner =
     run ~shape:Test_stanza_runner ~metal:false ~lifecycle:true ~family:lifecycle ()
@@ -4429,6 +4477,13 @@ let family_control () =
     && String.is_substring (snd subdir_unlocked) ~substring:"does not take the lock"
     && String.is_substring (snd subdir_unlocked) ~substring:"(subdir child"
   in
+  let relative_lock_ok =
+    exited 1 relative_lock
+    && String.is_substring (snd relative_lock)
+         ~substring:"names the training lock as `ocannl_training_test`"
+    && String.is_substring (snd relative_lock) ~substring:"(subdir child"
+    && not (String.is_substring (snd relative_lock) ~substring:"does not take the lock")
+  in
   let public_by_path_ok = omitted_ok lifecycle_family.family_alias public_by_path in
   let test_stanza_runner_ok = listed_ok test_stanza_runner in
   let sibling_defaults_ok = listed_ok sibling_defaults in
@@ -4464,6 +4519,7 @@ let family_control () =
   if not mention_only_ok then report "the instrumentation named but not read" mention_only;
   if not subdir_ungated_ok then report "family alias in a group with no gate" subdir_ungated;
   if not subdir_unlocked_ok then report "locked group whose gate takes no lock" subdir_unlocked;
+  if not relative_lock_ok then report "the training lock spelled relative" relative_lock;
   if not public_by_path_ok then report "a file sharing the public name" public_by_path;
   if not test_stanza_runner_ok then report "a test stanza as the runner" test_stanza_runner;
   if not sibling_defaults_ok then report "two default-module stanzas" sibling_defaults;
@@ -4560,6 +4616,12 @@ let family_control () =
     "a `(subdir …)` group whose actions take the training lock and whose gate does not is reported \
      there too"
     subdir_unlocked_ok;
+  attribute
+    "the training lock spelled without its leading `/` is a per-directory lock, and is refused"
+    [ relative_lock ];
+  Verdict.p
+    "the training lock spelled without its leading `/` is a per-directory lock, and is refused"
+    relative_lock_ok;
 
   Verdict.p
     "a rule running a file that shares the executable's public name is not its runner, however \

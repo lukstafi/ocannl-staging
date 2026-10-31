@@ -419,6 +419,7 @@ let raw_entries =
         "[scanner-refusal:95919586e2a2b25eaaf13ca8093ab584] repository-wide scan rule";
         "[scanner-refusal:be41f253ce4b808b6b4ec587c304ec08] repository-wide scan rule";
         "[scanner-refusal:b040632469771b25abb3469878413be3] the repository scanner";
+        "[scanner-refusal:b7991c01507b15cea041c6066f07038b] names the training";
         "[scanner-refusal:bbadfd8513559355fedbc54dc3dc678a] serializes its actions";
         "[scanner-refusal:eb5d5419b3bd18240469743cbabc58f2] has actions on";
         "[scanner-refusal:a06dccc27afe2153a7700609691d3c8d] attaches a rule";
@@ -495,6 +496,7 @@ let raw_entries =
         "[scanner-refusal:7735cb3446daca7f4157aa26d3d583da] names the instrumentation";
         "[scanner-refusal:248545b295fe9393f046d06407875db5] family alias defined";
         "[scanner-refusal:65fecdef5d771aadd55c653ca5f36ccd] group whose actions";
+        "[scanner-refusal:3200824ccd2f1707a2ea135232ae64ed] per-directory lock and";
         "[scanner-refusal:84e456282a1ff74968abe67ae2fa4694] executable's public name";
         "[scanner-refusal:be7f67353f6c0f8782c3b867b1023af5] runtest-<name> dune generates";
         "[scanner-refusal:4a8965b97909e604cda0ce07fd679917] a lifecycle member";
@@ -854,6 +856,9 @@ let raw_direct_evidence =
     ( "env_var_deps.ml:bbadfd8513559355fedbc54dc3dc678a",
       "a `(subdir …)` group whose actions take the training lock and whose gate does not is \
        reported there too: true" );
+    ( "env_var_deps.ml:b7991c01507b15cea041c6066f07038b",
+      "the training lock spelled without its leading `/` is a per-directory lock, and is refused: \
+       true" );
     ( "env_var_deps.ml:eb5d5419b3bd18240469743cbabc58f2",
       "a rule on a `(test)`'s generated alias that runs ANOTHER directory's binary is not the \
        deliberate gate collision, and is reported: true" );
