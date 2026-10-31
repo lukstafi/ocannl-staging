@@ -222,7 +222,7 @@
 #  57. every tracked ocannl_config naming a backend is one the backends are
 #      read from.
 #  58. the readers batch-backends.sh builds are test/config's: ocannl_read_config
-#      answers --read=backend, ocannl_slot_kind asks Test_utils.Slot_kind and
+#      answers --read=backend (through test/config/config_reads.ml), ocannl_slot_kind asks Test_utils.Slot_kind and
 #      prints the grammar batch_resolve parses, and Slot_kind's config_dirs is
 #      BATCH_CONFIG_DIRS.
 #  93 sits after leg 58: a tree carrying a backend marker env_var_deps refuses
@@ -5976,8 +5976,15 @@ else
       { slot_detail="test/config/dune has no executable named $(basename "$exe")"; break; }
   done
 fi
-[ -n "$slot_detail" ] || grep -q '| Some "backend" ->' "$HERE/../$slot_reader_exe.ml" ||
-  slot_detail="$slot_reader_exe.ml does not answer --read=backend"
+# The answer itself lives in test/config/config_reads.ml (gh-ocannl-1581), the
+# code codegen_text_inventory also runs to name what a written value means: the
+# reader dispatches the keys it lists there, and "backend" must be one of them.
+[ -n "$slot_detail" ] || grep -q 'List.mem Config_reads.backend_keys key' "$HERE/../$slot_reader_exe.ml" ||
+  slot_detail="$slot_reader_exe.ml does not answer the keys Config_reads decides"
+[ -n "$slot_detail" ] || grep -q '^let backend_keys = \[ "backend"; ' "$HERE/../test/config/config_reads.ml" ||
+  slot_detail="test/config/config_reads.ml does not list backend among its backend_keys"
+[ -n "$slot_detail" ] || grep -q '^  | "backend" -> Some (canonical_backend setting)$' "$HERE/../test/config/config_reads.ml" ||
+  slot_detail="test/config/config_reads.ml does not answer --read=backend"
 [ -n "$slot_detail" ] || grep -q 'Test_utils.Slot_kind.answer' "$HERE/../$slot_reach_exe.ml" ||
   slot_detail="$slot_reach_exe.ml does not ask Test_utils.Slot_kind"
 # The reachability tool's grammar is the one batch_resolve parses: a `names
