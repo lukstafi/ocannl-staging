@@ -37,7 +37,7 @@
 (rule
  (alias scans)
  ; ocannl-backend: none -- links no backend: it only maps generator inputs to output paths.
- (target generated_sources)
+ (targets generated_sources generators.filelist)
  (package neural_nets_lib)
  (deps
   (alias runtest-env_spelling_gate)
@@ -45,11 +45,16 @@
   (:generators
    (glob_files_rec ../../../*.mll)
    (glob_files_rec ../../../*.mly)))
+ ; The generator set goes over as a response file, never on the command line (gh-ocannl-1748).
  (action
-  (with-stdout-to
-   %{target}
-   (run
-    %{dep:../atomic_file_rename_scan.exe}
-    --generated-deps
-    atomic_file_rename_scan_fixture
-    %{generators}))))
+  (progn
+   (with-stdout-to
+    generators.filelist
+    (echo "%{generators}"))
+   (with-stdout-to
+    generated_sources
+    (run
+     %{dep:../atomic_file_rename_scan.exe}
+     --generated-deps
+     atomic_file_rename_scan_fixture
+     @generators.filelist)))))

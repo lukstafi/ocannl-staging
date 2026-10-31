@@ -37,6 +37,12 @@ open Stdio
    nonzero exit means dune never writes the redirected stdout, the same lines go to stderr, where
    they survive to be read (gh-ocannl-601). *)
 open Verdict.Claims
+
+(* The dependency set arrives as a `@<path>` response file, because a list that grows with the
+   repository does not belong on a Windows command line (gh-ocannl-1748); see
+   [Test_utils.Scan_argv]. *)
+let argv = Test_utils.Scan_argv.expand Stdlib.Sys.argv
+
 module SC = Ir.Schedule_cache
 module Config_key_scan = Test_utils.Config_key_scan
 
@@ -130,17 +136,14 @@ let class_name : Utils.config_key_class -> string = function
   | Utils.Execution_neutral -> "execution-neutral"
 
 let () =
-  if Array.length Stdlib.Sys.argv < 2 then (
-    eprintf "Usage: %s <dependency...>\n" Stdlib.Sys.argv.(0);
+  if Array.length argv < 2 then (
+    eprintf "Usage: %s <dependency...>\n" argv.(0);
     Stdlib.exit 1);
   (* The arguments are the rule's whole dependency set, globbed over the library directories rather
      than enumerated by hand (gh-ocannl-592). *)
-  let source_files =
-    Config_key_scan.sources_among (Array.to_list (Array.subo Stdlib.Sys.argv ~pos:1))
-  in
+  let source_files = Config_key_scan.sources_among (Array.to_list (Array.subo argv ~pos:1)) in
   if List.is_empty source_files then (
-    eprintf "%s: no sources among the arguments -- the rule's globs match nothing\n"
-      Stdlib.Sys.argv.(0);
+    eprintf "%s: no sources among the arguments -- the rule's globs match nothing\n" argv.(0);
     Stdlib.exit 1);
   let by_file = Config_key_scan.keys_by_file source_files in
   let listing keys = String.concat ~sep:", " (Set.to_list keys) in

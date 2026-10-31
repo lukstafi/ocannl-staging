@@ -1,0 +1,39 @@
+every dune file in the source tree reads the same to sexplib and to dune: true
+every spawned command line has a bounded expansion and every stanza is one this scan places: true
+every bounded spawned command line stays under this scan's limit: true
+every judged `%{read:...}` file is still read on a spawned command line: true
+
+Synthetic controls run the shipping scanner over a passing tree and over each refused shape;
+refusal output is captured and matched below.
+
+listed deps, a response file, default and named test actions, a judged read under chdir, a short-form rule in a subdir and a short system line pass: true
+gh-ocannl-1720's shape, a recursive glob in %{deps} on a command line, is refused: true
+a named dependency bound to a glob is refused where the command line expands it: true
+listed deps whose expansion reaches the limit are refused with their bound: true
+a shell line that reaches the limit is refused: true
+a system line under the process limit but past cmd.exe's is refused at cmd.exe's own limit: true
+a pform with no bound is refused: true
+a read of a file no judgment bounds is refused: true
+an action head on neither list is refused: true
+a chdir to a directory the scan cannot resolve is refused: true
+an include stanza is refused: true
+a dune file sexplib would read with a hole in it is refused: true
+
+Synthetic controls: scanner refusal diagnostics exercised by this control golden:
+  [scanner-refusal:7b1d721a6b358055eeef13e57e5ba202] source tree reads
+  [scanner-refusal:69918b599474e445c1e2dce74dc3e841] every spawned command
+  [scanner-refusal:6eba8bdcf1112c04fdf6c29d4770c94a] bounded spawned command
+  [scanner-refusal:15437884bd1d780ac790343204eab7e4] every judged
+  [scanner-refusal:e22a999e7b876b3b14333e3000c76c04] response file default
+  [scanner-refusal:407d4f902a30caffd73b344ba63b6731] gh-ocannl-1720's shape a
+  [scanner-refusal:23074ca9ed294d7115c4a6c3d3c6e5eb] named dependency bound
+  [scanner-refusal:fee1a23a89df95042e6931bab5c95fa5] whose expansion reaches
+  [scanner-refusal:51a97beb27d22afda197ecf8855fa059] line that reaches
+  [scanner-refusal:b605b3e6ab959664f78a63dbbbe15d16] cmd.exe's
+  [scanner-refusal:6438c6083e355a1d9525b4508fc34320] bound is refused
+  [scanner-refusal:8abbbf622b67401b3c6ed085c0e56eef] no judgment bounds
+  [scanner-refusal:1156b111ec97fe778b6dbcba4ce8e21c] head on neither
+  [scanner-refusal:c89bc9f1b5b4e0adddd25e00a9c88da7] scan cannot resolve
+  [scanner-refusal:d71d7140161f2e19abd0f58123eaea02] an include stanza
+  [scanner-refusal:f2f50b0ccfbbada97516cea48cbc3f16] file sexplib would
+End of synthetic controls.

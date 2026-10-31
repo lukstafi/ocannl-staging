@@ -7,6 +7,12 @@ open Stdio
    nonzero exit means dune never writes the redirected stdout, the same lines go to stderr, where
    they survive to be read (gh-ocannl-601). *)
 open Verdict.Claims
+
+(* The dependency set arrives as a `@<path>` response file, because a list that grows with the
+   repository does not belong on a Windows command line (gh-ocannl-1748); see
+   [Test_utils.Scan_argv]. *)
+let argv = Test_utils.Scan_argv.expand Stdlib.Sys.argv
+
 module Config_key_scan = Test_utils.Config_key_scan
 
 (* A lower bound on the config keys the call-site scan finds: a floor, not a count, so that adding a
@@ -54,18 +60,15 @@ let extract_keys filename =
   |> Set.of_list (module String)
 
 let () =
-  if Array.length Stdlib.Sys.argv < 3 then (
-    eprintf "Usage: %s <reference_file> <source_file...>\n" Stdlib.Sys.argv.(0);
+  if Array.length argv < 3 then (
+    eprintf "Usage: %s <reference_file> <source_file...>\n" argv.(0);
     Stdlib.exit 1);
-  let reference_file = Stdlib.Sys.argv.(1) in
+  let reference_file = argv.(1) in
   (* The rest is the rule's whole dependency set, globbed over the library directories rather than
      enumerated by hand (gh-ocannl-592). *)
-  let source_files =
-    Config_key_scan.sources_among (Array.to_list (Array.subo Stdlib.Sys.argv ~pos:2))
-  in
+  let source_files = Config_key_scan.sources_among (Array.to_list (Array.subo argv ~pos:2)) in
   if List.is_empty source_files then (
-    eprintf "%s: no sources among the arguments -- the rule's globs match nothing\n"
-      Stdlib.Sys.argv.(0);
+    eprintf "%s: no sources among the arguments -- the rule's globs match nothing\n" argv.(0);
     Stdlib.exit 1);
   let file_keys = extract_keys reference_file in
   let code_keys = Utils.known_config_keys in
@@ -397,7 +400,7 @@ let () =
       (List.map held ~f:(fun (base, read) -> entry base read.Config_key_scan.held_key))
   in
   let listed =
-    match List.find (Array.to_list Stdlib.Sys.argv) ~f:(String.is_suffix ~suffix:note_suffix) with
+    match List.find (Array.to_list argv) ~f:(String.is_suffix ~suffix:note_suffix) with
     | None -> Set.empty (module String)
     | Some note ->
         Config_key_scan.process_lifetime_entries (In_channel.read_lines note)

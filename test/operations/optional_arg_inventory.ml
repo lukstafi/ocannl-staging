@@ -4,6 +4,12 @@
 
 open Base
 open Stdio
+
+(* The dependency set arrives as a `@<path>` response file, because a list that grows with the
+   repository does not belong on a Windows command line (gh-ocannl-1748); see
+   [Test_utils.Scan_argv]. *)
+let argv = Test_utils.Scan_argv.expand Stdlib.Sys.argv
+
 module Scan = Test_utils.Optional_arg_scan
 module Dune = Test_utils.Dune_stanza_scan
 module Sources = Test_utils.Config_key_scan
@@ -30,15 +36,15 @@ let refusal_control () =
   Refusal_manifest.print source
 
 let () =
-  if Array.length Stdlib.Sys.argv = 2 && String.equal Stdlib.Sys.argv.(1) "--refusal-control" then (
+  if Array.length argv = 2 && String.equal argv.(1) "--refusal-control" then (
     refusal_control ();
     Stdlib.exit 0);
-  if Array.length Stdlib.Sys.argv < 3 then (
-    eprintf "Usage: %s <workspace_root> <lib source...>\n" Stdlib.Sys.argv.(0);
+  if Array.length argv < 3 then (
+    eprintf "Usage: %s <workspace_root> <lib source...>\n" argv.(0);
     Stdlib.exit 1);
-  let base = Dune.base_dir Stdlib.Sys.argv.(1) in
+  let base = Dune.base_dir argv.(1) in
   let arguments =
-    Array.to_list (Array.subo Stdlib.Sys.argv ~pos:2)
+    Array.to_list (Array.subo argv ~pos:2)
     |> List.map ~f:(fun path -> (Dune.repo_relative base path, path))
   in
   let on_disk = Map.of_alist_reduce (module String) arguments ~f:(fun first _ -> first) in

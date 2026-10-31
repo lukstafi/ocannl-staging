@@ -45,6 +45,12 @@ open Base
 open Ocannl
 open Nn_blocks.DSL_modules
 open Verdict.Claims
+
+(* The dependency set arrives as a `@<path>` response file, because a list that grows with the
+   repository does not belong on a Windows command line (gh-ocannl-1748); see
+   [Test_utils.Scan_argv]. *)
+let argv = Test_utils.Scan_argv.expand Stdlib.Sys.argv
+
 module IDX = Train.IDX
 
 (* ---------------------------------------------------------------------------------------------- *)
@@ -217,8 +223,7 @@ let%op through_function x = TDSL.pointmul x x ()
    number), not by its name, and claimed below to have its source text beside it in the corpus. *)
 let library_sites, corpus =
   let files =
-    Array.to_list (Sys.get_argv ())
-    |> List.tl_exn
+    Array.to_list argv |> List.tl_exn
     |> List.filter ~f:(fun f -> String.is_suffix f ~suffix:".ml")
     |> List.map ~f:(fun f -> (f, Stdio.In_channel.read_all f))
   in

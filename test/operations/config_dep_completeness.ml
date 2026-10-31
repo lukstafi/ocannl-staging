@@ -67,6 +67,12 @@ open Stdio
    dune never writes the redirected stdout, the same lines go to stderr, where they survive to be
    read (gh-ocannl-601). *)
 open Verdict.Claims
+
+(* The dependency set arrives as a `@<path>` response file, because a list that grows with the
+   repository does not belong on a Windows command line (gh-ocannl-1748); see
+   [Test_utils.Scan_argv]. *)
+let argv = Test_utils.Scan_argv.expand Stdlib.Sys.argv
+
 module Scan = Test_utils.Dune_stanza_scan
 
 (* Rules that run something which reads no configuration. Keyed by "<dir>:<what the scan reports>",
@@ -121,15 +127,15 @@ let exempt_sites =
 module Resolution = Test_utils.Config_dep_resolution
 
 let () =
-  if Array.length Stdlib.Sys.argv < 2 then (
-    eprintf "Usage: %s <workspace_root> <dune file or ocannl_config...>\n" Stdlib.Sys.argv.(0);
+  if Array.length argv < 2 then (
+    eprintf "Usage: %s <workspace_root> <dune file or ocannl_config...>\n" argv.(0);
     Stdlib.exit 1);
   (* Paths arrive relative to the rule's directory deep in the build tree; [Scan.base_dir] and
      [Scan.repo_relative] turn them into repository-relative ones (see their comment there). They
      are reported repository-relative and opened as dune handed them over. *)
-  let base = Scan.base_dir Stdlib.Sys.argv.(1) in
+  let base = Scan.base_dir argv.(1) in
   let paths =
-    Array.to_list (Array.subo Stdlib.Sys.argv ~pos:2)
+    Array.to_list (Array.subo argv ~pos:2)
     |> List.map ~f:(fun path -> (Scan.repo_relative base path, path))
     |> List.dedup_and_sort ~compare:(fun (a, _) (b, _) -> String.compare a b)
   in
