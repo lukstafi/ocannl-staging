@@ -1,3 +1,4 @@
+every partial sum of every row's seed and cells is exact in f32: true
 the queried accumulator capability matches the independent backend policy table: true
 Schedule.optop coverage:
   Split              covered by split-then-unroll, split-then-swap, split-then-vectorize-inner, split-then-vectorize-narrow

@@ -16,24 +16,25 @@
 
    - VALUE. A localizing member must agree BITWISE with the serial baseline's execution; a
    read-modify-write member must agree bitwise with the host's per-step-narrowed reference. Both
-   references are exact: the operands are storage-exact multiples of 1/8 whose PARTIAL SUMS leave
-   the storage format's exactness range (see {!cells}), so the two references differ at bf16 and f16
-   — proven here rather than assumed, by the "the whole-nest and per-step references differ" claims.
-   At f32 they coincide, which is the identity-precision leg gh-ocannl-693 added: there the value
-   claim pins substitution and iteration coverage rather than accumulator width. - FORM. The emitted
-   kernel is classified — localized scope, per-step read-modify-write, SIMD accumulator grid,
-   warp-shuffle tree, [Tile_mma] scalar fallback — and must be the form the member claims. Without
-   this a composition that silently stopped reaching its form would keep passing its value claim by
-   falling back to another one, which is exactly the false green the issue is about: agreement
-   between two renderings is worthless if they are the same rendering. - DECISION (gh-ocannl-733).
-   The form does not determine WHICH code path produced it: a nest whose accumulated cell is free of
-   the enclosing index is peeled at the enclosing level under a confined guard, while one whose cell
-   mentions it peels the reduction level alone under a lane-private guard the cell separates — and
-   both emit one localized scope with one closing store. So each member also declares what codegen's
-   reduction peel decided, checked against the routine's own peel census ({!Context.routine.peel})
-   rather than against emitted text. Without it a member can be green over a kernel the code path it
-   is named for never touched, which is the same false green one level down: agreement between two
-   decisions is worthless if they produce the same rendering.
+   references are exact, and they differ where it matters. The operands are multiples of 1/8 the
+   storage format holds without rounding, and their PARTIAL SUMS leave the range bf16 and f16 hold
+   without rounding (see {!cells}), so the two references differ at bf16 and f16 — proven here
+   rather than assumed, by the "the whole-nest and per-step references differ" claims. At f32 they
+   coincide, which is the identity-precision leg gh-ocannl-693 added: there the value claim pins
+   substitution and iteration coverage rather than accumulator width. - FORM. The emitted kernel is
+   classified — localized scope, per-step read-modify-write, SIMD accumulator grid, warp-shuffle
+   tree, [Tile_mma] scalar fallback — and must be the form the member claims. Without this a
+   composition that silently stopped reaching its form would keep passing its value claim by falling
+   back to another one, which is exactly the false green the issue is about: agreement between two
+   renderings is worthless if they are the same rendering. - DECISION (gh-ocannl-733). The form does
+   not determine WHICH code path produced it: a nest whose accumulated cell is free of the enclosing
+   index is peeled at the enclosing level under a confined guard, while one whose cell mentions it
+   peels the reduction level alone under a lane-private guard the cell separates — and both emit one
+   localized scope with one closing store. So each member also declares what codegen's reduction
+   peel decided, checked against the routine's own peel census ({!Context.routine.peel}) rather than
+   against emitted text. Without it a member can be green over a kernel the code path it is named
+   for never touched, which is the same false green one level down: agreement between two decisions
+   is worthless if they produce the same rendering.
 
    The member list itself is printed, so a form added to codegen without a table entry shows up as a
    golden diff rather than as silence. Members a backend cannot evaluate (SIMD grids off the C
@@ -150,6 +151,15 @@ let x_values = Array.init (rows * cols) ~f:(fun n -> cell (n / cols) (n % cols))
    same units as the operands so the sums stay f32-exact. *)
 let seed_value r = (100. +. (7. *. Float.of_int r)) /. 8.
 let out_seed = Array.init rows ~f:seed_value
+
+(* The bitwise premise of the reassociating members' f32 value claims (the note above [reference]):
+   each row sums its seed and its [cols] cells — or a prefix of them, from the seed or from zero, as
+   the guarded shapes and the virtual accumulator do — and every partial sum of those, in any
+   association, is exact in f32. *)
+let () =
+  p_all "every partial sum of every row's seed and cells is exact in f32"
+    (List.init rows ~f:(fun r -> seed_value r :: List.init cols ~f:(cell r)))
+    ~f:(Ll_test.exact_partials ~sig_bits:24)
 
 (* Host references, per storage precision. [round] is the library's own conversion, so these are the
    kernel's roundings and not an approximation of them. *)
@@ -1144,11 +1154,11 @@ and scalar_axis_kinds (llsc : LL.scalar_t) : LL.axis_type list =
 (* Every value claim is BITWISE, the reassociating compositions included. A swapped split, a
    block-partial reduction and a shuffle tree all change the order of the additions, so they would
    normally earn a tolerance — but each of them is declared over f32 only (or, for the shuffle,
-   available at f32 only), and there these operands' partial sums are exact, so every association
-   gives the same float. That is not an assumption: the "at f32 the whole-nest and per-step
-   references coincide" claim asserts exactly the exactness the argument rests on. A tolerance would
-   have hidden a real narrowing at a seam behind an allowance for a reassociation that cannot cost
-   anything here. *)
+   available at f32 only), and there every association of these operands gives the same float. That
+   is not an assumption: the [Ll_test.exact_partials] claim beside {!out_seed} derives it from the
+   operands, for every association, where the "at f32 the whole-nest and per-step references
+   coincide" claim reads only the serial one. A tolerance would have hidden a real narrowing at a
+   seam behind an allowance for a reassociation that cannot cost anything here. *)
 
 type reference =
   | Baseline  (** The serial rendering of the plain nest, executed at this precision: 32 terms. *)
@@ -1404,9 +1414,9 @@ let members =
            (gh-ocannl-682), and refuses anything else by raising rather than by falling back — so
            off the C backends this member is evaluable at f32 and at whichever narrow precisions the
            backend's [accum_prec] widens, which is bf16 on CUDA and nothing elsewhere. Its value
-           claim stays bitwise there: the tree reassociates, but these operands' f32 partial sums
-           are exact whatever the association, and both the shuffle and the localized serial
-           baseline narrow to bf16 exactly once. *)
+           claim stays bitwise there: the tree reassociates, but every association of these
+           operands' f32 sums gives the same float (derived beside {!out_seed}), and both the
+           shuffle and the localized serial baseline narrow to bf16 exactly once. *)
       ~available:(fun prec_name -> on_cpu || shuffle_takes prec_name)
       ~peel:
         (if on_cpu then Peeled { Cs.levels = 1; guards = [] }

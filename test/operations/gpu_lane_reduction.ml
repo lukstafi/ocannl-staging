@@ -12,28 +12,29 @@
    rendered as a simdgroup butterfly all-reduce that leaves the sum in every lane, or as the serial
    loop in every lane where the shuffle cannot render it.
 
-   Legs, each executed on the run's backend against the serial reference (integer-valued operands:
-   every partial sum is an exact float, so the comparison is exact whatever the association): 1.
-   equal widths at one simdgroup (E = D = 32), cooperative: lanes, the reduction retyped, the
-   emitted GPU kernel spells the all-reduce; 2. the same nest duplicated: lanes, the reduction
-   serial, no all-reduce emitted; 3. refused: no lanes, the plain plan; 4. unequal widths (E = 16 or
-   64 beside D = 32): cooperative retypes a reduction or declines the lanes, so the plain plan -- a
-   reduction every lane would run whole is the duplicated arm, measured as a regression; 5. a
-   partial simdgroup (E = D = 16) likewise keeps the plain plan at the devices' 32-lane shuffles,
-   and on a device claiming 16-lane ones the retype happens and the renderer (32-lane warps)
-   declines the shuffle, every lane running the loop; 6. several simdgroups (gh-ocannl-1168): at the
-   default bound of one simdgroup (E = D = 64) the plain plan; allowed two or four simdgroups, E = D
-   = 64 and 128 take lanes and the renderer all-reduces across simdgroups through workgroup-shared
-   partials between two barriers per pair -- executed exact against the serial reference AND the
-   materialized (unscheduled) run, over operands whose per-simdgroup partials discriminate a dropped
-   or misrouted partial -- while a width past the bound keeps the plain plan, and a device claiming
-   64-lane shuffles gets the retype the renderer renders as two 32-lane simdgroups; 7. the same nest
-   over an ordinary scope local, not the fused backward's [dp]: the plain plan in every mode -- the
-   reassociation's license is the gate that minted [dp], not the shape; 8. a [Workgroup_reduce]
-   hand-retyped over such a local keeps the hardware binding a staged reduction relies on (compiled,
-   and read on GPU backends); 9. the configured [auto] resolves from the device's economics --
-   cooperative where per-lane recompute is cheap (Metal, CUDA), refused elsewhere (HIP, cc,
-   unmeasured) -- and the default schedule equals the resolved explicit mode's. *)
+   Legs, each executed on the run's backend against the serial reference (integer-valued operands,
+   whose exactness in f32 under any association each case derives in [dk_nest], so the comparison is
+   [Float.equal]): 1. equal widths at one simdgroup (E = D = 32), cooperative: lanes, the reduction
+   retyped, the emitted GPU kernel spells the all-reduce; 2. the same nest duplicated: lanes, the
+   reduction serial, no all-reduce emitted; 3. refused: no lanes, the plain plan; 4. unequal widths
+   (E = 16 or 64 beside D = 32): cooperative retypes a reduction or declines the lanes, so the plain
+   plan -- a reduction every lane would run whole is the duplicated arm, measured as a regression;
+   5. a partial simdgroup (E = D = 16) likewise keeps the plain plan at the devices' 32-lane
+   shuffles, and on a device claiming 16-lane ones the retype happens and the renderer (32-lane
+   warps) declines the shuffle, every lane running the loop; 6. several simdgroups (gh-ocannl-1168):
+   at the default bound of one simdgroup (E = D = 64) the plain plan; allowed two or four
+   simdgroups, E = D = 64 and 128 take lanes and the renderer all-reduces across simdgroups through
+   workgroup-shared partials between two barriers per pair -- executed exact against the serial
+   reference AND the materialized (unscheduled) run, over operands whose per-simdgroup partials
+   discriminate a dropped or misrouted partial -- while a width past the bound keeps the plain plan,
+   and a device claiming 64-lane shuffles gets the retype the renderer renders as two 32-lane
+   simdgroups; 7. the same nest over an ordinary scope local, not the fused backward's [dp]: the
+   plain plan in every mode -- the reassociation's license is the gate that minted [dp], not the
+   shape; 8. a [Workgroup_reduce] hand-retyped over such a local keeps the hardware binding a staged
+   reduction relies on (compiled, and read on GPU backends); 9. the configured [auto] resolves from
+   the device's economics -- cooperative where per-lane recompute is cheap (Metal, CUDA), refused
+   elsewhere (HIP, cc, unmeasured) -- and the default schedule equals the resolved explicit
+   mode's. *)
 
 open Base
 open Stdio
@@ -179,6 +180,22 @@ let dk_nest ?(minted = true) ?guard ?(flag_below = 32) ~name ~e_n ~d_n () =
             acc +. (dp *. q_value b s h d)))
   in
   let expected = k_with (fun _ -> List.range 0 e_n) in
+  (* The premise of every [Float.equal] below, from the operands themselves: each [dp] sums
+     nonnegative integer products over [e], and each cell of [K] its seed and the [dp * Q] terms
+     over [s], so every partial sum of either reduction, in any association, is exact in f32. *)
+  let cells dims = List.init (Array.fold dims ~init:1 ~f:( * )) ~f:(L.unflat ~dims) in
+  let dp_terms b s t h = List.init e_n ~f:(fun e -> a_value b s h e *. b_value b t h e) in
+  let k_terms i =
+    let b, t, h, d = (i.(0), i.(1), i.(2), i.(3)) in
+    k_seed b t h d
+    :: List.init s_n ~f:(fun s ->
+        List.sum (module Float) (dp_terms b s t h) ~f:Fn.id *. q_value b s h d)
+  in
+  p_all
+    (Printf.sprintf "%s: every partial sum of every dp and every K cell is exact in f32" name)
+    (List.map (cells [| b_n; s_n; t_n; h_n |]) ~f:(fun i -> dp_terms i.(0) i.(1) i.(2) i.(3))
+    @ List.map (cells k_dims) ~f:k_terms)
+    ~f:(Ll_test.exact_partials ~sig_bits:24);
   {
     name;
     opt;

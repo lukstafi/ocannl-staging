@@ -3,6 +3,7 @@ host uploads
 24 uploads took at most 1 + ceil(log2 24) working pools: true
 the uploads' pools hold at most twice the bytes uploaded: true
 the routine reading every upload linked within Metal's pool binding budget: true
+every partial sum of every cell's uploads is exact in f32: true
 the routine sums every upload: true
 every parameter reads back its own upload: true
 the child reads back its own upload: true
@@ -65,6 +66,7 @@ device copies
 24 uploads took at most 1 + ceil(log2 24) working pools: true
 the uploads' pools hold at most twice the bytes uploaded: true
 the routine reading every upload linked within Metal's pool binding budget: true
+every partial sum of every cell's uploads is exact in f32: true
 the routine sums every upload: true
 every parameter reads back its own upload: true
 the child reads back its own upload: true
