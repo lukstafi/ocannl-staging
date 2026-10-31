@@ -105,6 +105,17 @@ __device__ __forceinline__ double ocannl_shfl_xor(double v, int lane_mask) {
                              : __float_as_uint(fmodf(x, y)));
 }|},
       [] );
+    (* gh-ocannl-1730: ROCm's f64 [fmod] shares the defect, measured on gfx1102 -- the signed zero
+       of [x] for [fmod(+-0, +-0)] and [fmod(+-inf, +-inf)] -- and takes the same fix. *)
+    ( "ocannl_fmod",
+      {|__device__ __forceinline__ double ocannl_fmod(double x, double y) {
+  return __longlong_as_double(
+      (((unsigned long long)__double_as_longlong(x) & 0x7FFFFFFFFFFFFFFFull) >= 0x7FF0000000000000ull
+       || ((unsigned long long)__double_as_longlong(y) & 0x7FFFFFFFFFFFFFFFull) == 0ull)
+          ? 0x7FF8000000000000ll
+          : __double_as_longlong(fmod(x, y)));
+}|},
+      [] );
     ( "uint32_to_single_uniform",
       {|__device__ __forceinline__ float uint32_to_single_uniform(unsigned int x) {
   /* Use __uint2float_rn for correct rounding */

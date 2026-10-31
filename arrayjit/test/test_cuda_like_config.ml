@@ -77,14 +77,24 @@ let () =
         "__float2half(ocannl_fmodf(__half2float(a), __half2float(b)))" );
     ]
     ~f:(fun (doc, want) -> String.equal (render doc) want);
+  (* gh-ocannl-1730: at f64, HIP's [fmod] shares the f32 defect, and its fast-math [1.0 / sqrt(x)]
+     is NaN for +-0 and +inf, where ROCm's [rsqrt] is not. *)
+  p_all "HIP f64 rsqrt renders as ROCm's rsqrt and f64 fmod through its wrapper"
+    [
+      (Hip.unop_syntax Ops.double Ops.Recip_sqrt a, "rsqrt(a)");
+      (Hip.binop_syntax Ops.double Ops.Mod a b, "ocannl_fmod(a, b)");
+    ]
+    ~f:(fun (doc, want) -> String.equal (render doc) want);
   p_all "HIP's sqrt and fmod wrappers are defined in its builtins table"
-    [ "ocannl_sqrtf"; "ocannl_fmodf" ] ~f:(fun key ->
+    [ "ocannl_sqrtf"; "ocannl_fmodf"; "ocannl_fmod" ] ~f:(fun key ->
       List.exists Builtins_hip.builtins ~f:(fun (k, _, _) -> String.equal k key));
   p_all "CUDA sqrt, rsqrt and fmod keep the library functions, half fmod widened"
     [
       (Cuda.unop_syntax Ops.single Ops.Sqrt a, "sqrtf(a)");
       (Cuda.unop_syntax Ops.single Ops.Recip_sqrt a, "(1.0f / sqrtf(a))");
       (Cuda.binop_syntax Ops.single Ops.Mod a b, "fmodf(a, b)");
+      (Cuda.unop_syntax Ops.double Ops.Recip_sqrt a, "(1.0 / sqrt(a))");
+      (Cuda.binop_syntax Ops.double Ops.Mod a b, "fmod(a, b)");
       ( Cuda.binop_syntax Ops.half Ops.Mod a b,
         "__float2half(fmodf(__half2float(a), __half2float(b)))" );
     ]
