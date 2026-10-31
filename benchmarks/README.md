@@ -1063,18 +1063,27 @@ benchmarks/check-box.sh --box rog-nv --fixture gpt2_mini_train --fixture gpt2_mi
 `--box` is the box's ID in `fixtures/DIGESTS.txt`'s `measurement-boxes` field, or the fleet's
 name for it (`mac-studio` m4-max, `rog-nv-linux` rog-nv, `minix-amd-linux` minix, `tuf-amd-linux`
 tuf; `check-box.sh --fleet-names` prints the table, the check says which box a fleet name
-resolved to before its items, and a driver given one records the box's ID; gh-ocannl-1433); the script's
+resolved to before its items, and a driver given one records the box's ID; gh-ocannl-1433). The
+table also holds the fleet's box that measures nothing, `macbook-pro` (the M4 Pro MacBook, a
+Metal correctness box), as `-`, so the roster matches the fleet's, and `--box macbook-pro` is
+refused as no measurement box (exit 2). The script's
 `box_profile` names what that box's torch must reach (cuda on rog-nv, hip on minix and tuf, mps on
 m4-max) and the toolchain its drivers compile with (`nvcc`, `hipcc`, the macOS SDK). It prints one
 `ok`/`GAP`/`skip` line per item -- the venv (`~/.venvs/ocannl-bench`, `--venv` moves it), its
 packages, `pip freeze` against the `~/.venvs/ocannl-bench.requirements.txt` provisioning recorded,
 one tensor round-tripped through the device (minix's rocm7.1 torch passed `is_available()` and
 segfaulted on that copy), `Python.h` for torch.compile, the interpreter this checkout's drivers
-resolve through `bench_venv.py`, the toolchain, and each fixture against this checkout's
-`DIGESTS.txt` -- then `READY`, or `GAP (<n> of <m> items)` with exit 1; usage errors exit 2.
-`--fixture` (a workload stem, repeatable) narrows the fixtures to the session's; without it,
-every fixture `DIGESTS.txt` records under the box's origin is required. A fixture that MATCHes
-another box's row is measurable and its line says so, as the report's origin field will.
+resolve through `bench_venv.py`, the toolchain, the box's rows by name (`fixture-records`:
+`fixture_digest.py --check-names --expect-recorded <box>`, below), and each fixture against this
+checkout's `DIGESTS.txt` -- then `READY`, or `GAP (<n> of <m> items)` with exit 1; usage errors
+exit 2. `--fixture` (a workload stem, repeatable) narrows the fixtures to the session's; without
+it, every fixture `DIGESTS.txt` records under the box's origin is required. A fixture that
+MATCHes another box's row is measurable and its line says so, as the report's origin field will,
+as long as the box has a row of its own under that name: `fixture-records` reads GAP for a
+fixture name the box has no row for -- a named one, or, without `--fixture`, a workload's fixture
+the store holds (a copy that landed and was never recorded) -- and its repair is
+`fixture_digest.py --record-matching --origin <box>`, which records a copy of bytes already on
+record and refuses anything else.
 
 It checks and never provisions. Each GAP line is followed by its repair: on a Linux box
 lukstafi/ludics-lite's `scripts/install-linux.sh --bench-venv [nvidia|amd]` (the venv, its
