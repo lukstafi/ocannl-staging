@@ -473,7 +473,16 @@ let train_step ~bwd =
         segments)
       ctx update Ir.Indexing.Empty
   in
-  let ctx = Context.run ctx routine in
+  (* Every gradient is prefilled clear of its result, differently in the fused and the composed
+     step: fresh buffers are already zero, so a gradient zero that never runs would be invisible,
+     and one both steps drop would leave the same prefill in both (gh-ocannl-1625). *)
+  let prefill ctx p =
+    let grad = (Option.value_exn p.Tensor.diff).Tensor.grad in
+    let n = Array.fold (Lazy.force grad.Ir.Tnode.dims) ~init:1 ~f:( * ) in
+    Context.set_values ctx grad
+      (Array.init n ~f:(fun k -> Float.of_int ((if bwd then 2000 else 1000) + k)))
+  in
+  let ctx = Context.run (List.fold params ~init:ctx ~f:prefill) routine in
   let grads =
     Array.concat
       (List.map params ~f:(fun p ->

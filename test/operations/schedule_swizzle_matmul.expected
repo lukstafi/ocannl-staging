@@ -1,3 +1,4 @@
+the prefill of the targets differs from the serial twin's result in every cell: true
 swizzled SMEM matmul parity (GPU) or clean rejection (CPU): true
 tile accesses XOR-swizzled (GPU) or rejected (CPU): true
 b128-swizzled SMEM matmul parity (GPU) or clean rejection (CPU): true

@@ -1,3 +1,4 @@
+the prefill of the accumulator differs from the serial twin's result in every cell: true
 register-tiled matmul parity (GPU) or clean rejection (CPU): true
 unrolled register tile structure (GPU) or rejected (CPU): true
 structural: the unrolled register tile carries TM * TN accumulations over the two shared tiles: true

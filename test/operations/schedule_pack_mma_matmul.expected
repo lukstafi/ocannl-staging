@@ -2,11 +2,15 @@ packed+tensorized matmul matches the serial twin bitwise: true
 packed tiles feed the register-tiled micro-kernel: true
 packed transposed-B matmul matches the serial twin bitwise: true
 packing normalizes the transposed-B layout for the register tiling: true
+pmm_grid_mma: the prefill of the target differs from the serial twin's result in every cell: true
 grid-blocked tensorized matmul matches the serial twin bitwise: true
 grid-blocked Tile_mma renders pool-parallel: true
+pmm_par_packed: the prefill of the target differs from the serial twin's result in every cell: true
 parallel packed matmul matches the serial twin bitwise: true
 parallel packed composition renders pool-parallel with per-chunk tiles: true
+pmm_gridpack: the prefill of the target differs from the serial twin's result in every cell: true
 grid + hoisted-pack matmul matches the serial twin bitwise: true
 grid + hoisted-pack renders pool-parallel with no in-kernel tile writes: true
+pmm_mixed: the prefill of the target differs from the serial twin's result in every cell: true
 mixed grid-outermost matmul matches the serial twin bitwise: true
 mixed shape: hoisted B~ panel plus per-chunk in-kernel A~ tile: true

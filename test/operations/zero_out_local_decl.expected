@@ -6,3 +6,5 @@
                                   │      <unobservable: Local>
                                   │     #0 0...3
                                   │      0.00  1.00  2.00  3.00
+re-zero after a write: the write is observed, then the second zero clears every cell: true
+zero inside a loop: each iteration's accumulator opens from zero, not the running sum: true

@@ -2,6 +2,7 @@ padded packed matmul matches the serial twin bitwise: true
 padded 33x65x70 runs the register-tiled micro-kernel: true
 staged tiles zero-fill their fringe and the store-back is masked: true
 padded staged+tensorized matmul parity (GPU): true
+the prefill of the padded target differs from the serial twin's result in every cell: true
 padded GPU intrinsics follow the advertised tile divisibility: true
 awkward site seeds staged GPU MMA pad-compositions: true
 awkward site does not seed the unstaged (in-place) GPU flavor: true

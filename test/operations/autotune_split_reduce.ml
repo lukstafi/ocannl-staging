@@ -109,10 +109,17 @@ let capture_base comp =
   in
   Option.value_exn ~here:[%here] !capture
 
+(* Every executed routine here runs twice before it is read: the partials a split mints have no host
+   handle to prefill, and fresh buffers are zero, so only a second run sees a partials init that
+   never ran (gh-ocannl-1625). A tuned winner is a split only when the search picks one; leg 4's
+   replay always is. Every routine is a forward pass or an update without an SGD step, which a
+   correct routine repeats idempotently. *)
+let run_twice ctx routine = Context.run (Context.run ctx routine) routine
+
 let run_forward ~name (t : Tensor.t) =
   let ctx = Context.auto () in
   let ctx, routine = Context.compile ctx (named name (Train.forward t)) Ir.Indexing.Empty in
-  let ctx = Context.run ctx routine in
+  let ctx = run_twice ctx routine in
   Context.get_values ctx t.Tensor.value
 
 (* === Leg 1: site detection. === *)
@@ -206,7 +213,7 @@ let () =
       (named "asr_tuned" (Train.forward y1))
       Ir.Indexing.Empty
   in
-  let ctx = Context.run ctx routine in
+  let ctx = run_twice ctx routine in
   let got = Context.get_values ctx y1.Tensor.value in
   (match !report with
   | Some r ->
@@ -268,7 +275,7 @@ let () =
       ~report:(fun r -> hit_report := Some r)
       hctx hc_comp Ir.Indexing.Empty
   in
-  let hctx = Context.run hctx hroutine in
+  let hctx = run_twice hctx hroutine in
   let got = Context.get_values hctx y1.Tensor.value in
   let cache_claim =
     Cache_plant.unless_unkeyed ~identity:(Option.is_some (Context.timing_identity sctx))
@@ -321,7 +328,7 @@ let () =
       (named "asr_ms_tuned" (Train.forward z1))
       Ir.Indexing.Empty
   in
-  let ctx = Context.run ctx routine in
+  let ctx = run_twice ctx routine in
   let got = Context.get_values ctx z1.Tensor.value in
   (match !report with
   | Some r ->
@@ -501,7 +508,7 @@ let () =
   let rctx, rroutine =
     Context.compile rctx (named "asr_cg_serial" (Train.grad_update loss0)) Ir.Indexing.Empty
   in
-  let rctx = Context.run rctx rroutine in
+  let rctx = run_twice rctx rroutine in
   let want = nonzero "asr_cg_serial" (cg_grad rctx bias0) in
 
   let bias1, loss1 = make_bias_grad "tuned" in
@@ -527,7 +534,7 @@ let () =
       (named "asr_cg_tuned" (Train.grad_update loss1))
       Ir.Indexing.Empty
   in
-  let ctx = Context.run ctx routine in
+  let ctx = run_twice ctx routine in
   let got = cg_grad ctx bias1 in
   (match !report with
   | Some r ->
@@ -612,7 +619,7 @@ let () =
       (named "asr_rk_capped" (Train.forward z1))
       Ir.Indexing.Empty
   in
-  let ctx = Context.run ctx routine in
+  let ctx = run_twice ctx routine in
   let got = Context.get_values ctx z1.Tensor.value in
   (match !report with
   | Some r ->

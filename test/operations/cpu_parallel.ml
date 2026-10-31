@@ -127,12 +127,17 @@ let () =
   in
   let ma = TDSL.ndarray mav ~label:[ "ma" ] ~input_dims:[ k ] ~output_dims:[ k ] () in
   let mb = TDSL.ndarray mbv ~label:[ "mb" ] ~input_dims:[ k ] ~output_dims:[ k ] () in
+  (* [Privatize] drops [mc1]'s expanded zero and opens its tile at zero instead; fresh buffers are
+     zero and would hide a dropped or short zero (gh-ocannl-1625), so both twins' target starts off
+     its every result (the sums stay within 64 * 3 * 8). *)
+  let mc_prefill = Array.init (k * k) ~f:(fun c -> Float.of_int (10_000 + c)) in
   let run_mm ~name ~transform mc =
     let comp = named name (Train.forward mc) in
     let ctx = Context.auto () in
     let ctx, routine =
       Context.compile ~lowered_transform:(fun o -> [ transform o ]) ctx comp Ir.Indexing.Empty
     in
+    let ctx = Context.set_values ctx mc.Tensor.value mc_prefill in
     let ctx = Context.run ctx routine in
     Context.get_values ctx mc.Tensor.value
   in
@@ -168,6 +173,8 @@ let () =
       mc1
   in
   p_close "privatized matmul values match the twin" mm_priv mm_twin ~tol:approx_tol;
+  p_all2 "the prefill of the accumulator differs from the twin's result in every cell" mc_prefill
+    mm_twin ~f:(fun a b -> Float.(a <> b));
   let src = Generated.read "cpu_par_privatized" in
   (* The covering zero is forwarded into the private accumulator. Its sole closing-store nest keeps
      the accumulator per chunk inside the parallel construct. CPU emits one parallel construct; GPU

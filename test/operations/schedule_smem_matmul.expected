@@ -1,3 +1,4 @@
+the prefill of the accumulator differs from the serial twin's result in every cell: true
 SMEM matmul parity (GPU) or clean rejection (CPU): true
 shared tiles, barriers, no edge guards (GPU) or rejected (CPU): true
 structural: the SMEM schedule places two tiles in workgroup-shared memory: true

@@ -169,7 +169,9 @@ let tune ?search ~name ~cache_dir comp ~read =
       ~report:(fun rep -> report := Some rep)
       (Context.auto ()) comp Ir.Indexing.Empty
   in
-  let ctx = Context.run ctx routine in
+  (* Run twice: the forward is idempotent, but fresh buffers are already zero, so a replayed zero
+     that never runs shows only on the second run, as a doubled sum (gh-ocannl-1625). *)
+  let ctx = Context.run (Context.run ctx routine) routine in
   let values = read ctx in
   Context.release ctx;
   (values, !report)

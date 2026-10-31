@@ -224,6 +224,10 @@ let () =
     (* Executed parity, not just structure: per-chunk privatization rewrites where the packed values
        live, so compare against a serial twin of the same computation. *)
     if run_parity then (
+      (* The schedule expands [c]'s zero; fresh buffers are zero and would hide a dropped or short
+         expansion (gh-ocannl-1625), so [c] starts off its every result. *)
+      let prefill = Array.init (dim * dim) ~f:(fun x -> Float.of_int (10_000 + x)) in
+      let ctx = Context.set_values ctx c.Tensor.value prefill in
       let ctx = Context.run ctx routine in
       let got = Context.get_values ctx c.Tensor.value in
       let a2 = TDSL.ndarray av ~label:[ "tmd_bp_a2" ] ~input_dims:[ dim ] ~output_dims:[ dim ] () in
@@ -240,6 +244,8 @@ let () =
       let sctx = Context.run sctx sroutine in
       let want = nonzero "decl_serial" (Context.get_values sctx c2.Tensor.value) in
       p_all2 "per-chunk B~ re-pack matches the serial twin bitwise" got want ~f:Float.equal;
+      p_all2 "per-chunk B~ re-pack: the prefill differs from the serial twin's result in every cell"
+        prefill want ~f:(fun a b -> Float.(a <> b));
       (* Parity holds for the scalar fallback too; the routine's census says which ran
          (gh-ocannl-1283). *)
       gated ~when_:on_cpu ~on:backend_name "per-chunk B~ re-pack's routine is labeled tensorized"

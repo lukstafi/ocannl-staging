@@ -37,7 +37,15 @@ let test_diagonal_materialized_reference () =
   let%op diagonal = input ++ "i=>ii" in
   let%op consumer = diagonal + 1 in
   Train.set_materialized diagonal.value;
-  let ctx = Train.forward_once ctx consumer in
+  (* Prefill the materialized [diagonal] off every value the routine writes: a fresh device buffer
+     is already zero, so a dropped zero-init of its off-diagonal would match anyway
+     (gh-ocannl-1625). *)
+  let ctx, routine = Train.to_routine ctx IDX.empty (Train.forward consumer) in
+  let ctx =
+    Context.set_values ctx diagonal.value
+      (Array.init (Ir.Tnode.num_elems diagonal.value) ~f:(fun k -> -.(100. +. Float.of_int k)))
+  in
+  let ctx = Context.run ctx routine in
   Train.printf ~here:[%here] ~with_code:false ~with_grad:false ctx consumer;
   Stdio.printf "\n"
 

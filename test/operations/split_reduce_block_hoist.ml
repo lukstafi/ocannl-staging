@@ -130,7 +130,10 @@ let run_split site =
       ~lowered_transform:(fun opt -> split_segments opt site)
       (Context.auto ()) comp Ir.Indexing.Empty
   in
-  let ctx = Context.run ctx routine in
+  (* Twice: the partials the split mints have no host handle to prefill, and fresh buffers are zero,
+     so only a second run sees a partials init that never ran (gh-ocannl-1625). The update takes no
+     SGD step, so a correct routine repeats idempotently. *)
+  let ctx = Context.run (Context.run ctx routine) routine in
   Context.sync ctx;
   Context.get_values ctx g
 

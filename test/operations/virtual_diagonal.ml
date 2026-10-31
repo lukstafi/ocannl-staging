@@ -34,6 +34,11 @@ let optimize ?materialized llc = optimize ?materialized ~name:"virtual_diagonal"
 (* Every loop here has width 3, matching the default node dims. *)
 let loop s body = loop_n s 3 body
 
+(* The materialized arm's prefill of the producer: per cell, negative, so off the zero init and
+   every producer value. A fresh device buffer is already zero, so without it a dropped [Zero_out]
+   of the materialized node agrees with the virtual arm anyway (gh-ocannl-1625). *)
+let prefill tn = (tn, Array.init (Tn.num_elems tn) ~f:(fun k -> -.(100. +. Float.of_int k)))
+
 (* === Case 1: diagonal producer read by a generic (distinct-symbol) consumer === d[i,i] = 1 + i
    (off-diagonal zero); a materialized consumer reads d[j,k]. The diagonal must virtualize, its read
    must be inlined, and exactly one equality guard must survive (j = k). *)
@@ -56,7 +61,11 @@ let case_diagonal_generic () =
   in
   let seed = [ (o, blank 9) ] and read = [ o ] in
   let virt = execute ~name:"vd_generic" opt ~seed ~read in
-  let mat = execute ~name:"vd_generic_mat" (optimize ~materialized:[ d ] llc) ~seed ~read in
+  let mat =
+    execute ~name:"vd_generic_mat"
+      (optimize ~materialized:[ d ] llc)
+      ~seed:(prefill d :: seed) ~read
+  in
   p "diagonal-generic: executed values are the diagonal" (same virt [ expected ]);
   p "diagonal-generic: virtual and materialized arms agree" (same virt mat)
 
@@ -80,7 +89,9 @@ let case_diagonal_equal () =
   in
   let seed = [ (o, blank 9) ] and read = [ o ] in
   let virt = execute ~name:"vd_equal" opt ~seed ~read in
-  let mat = execute ~name:"vd_equal_mat" (optimize ~materialized:[ d ] llc) ~seed ~read in
+  let mat =
+    execute ~name:"vd_equal_mat" (optimize ~materialized:[ d ] llc) ~seed:(prefill d :: seed) ~read
+  in
   p "diagonal-equal: executed values are the diagonal, off-diagonal untouched"
     (same virt [ expected ]);
   p "diagonal-equal: virtual and materialized arms agree" (same virt mat)
@@ -112,7 +123,11 @@ let case_partial_diagonal () =
   in
   let seed = [ (o, blank 27) ] and read = [ o ] in
   let virt = execute ~name:"vd_partial" opt ~seed ~read in
-  let mat = execute ~name:"vd_partial_mat" (optimize ~materialized:[ d ] llc) ~seed ~read in
+  let mat =
+    execute ~name:"vd_partial_mat"
+      (optimize ~materialized:[ d ] llc)
+      ~seed:(prefill d :: seed) ~read
+  in
   p "partial-diagonal: executed values guard the repeated axis only" (same virt [ expected ]);
   p "partial-diagonal: virtual and materialized arms agree" (same virt mat)
 
@@ -132,7 +147,11 @@ let case_static_dynamic () =
   p "static-dynamic: one equality guard survives" (count_where opt >= 1);
   let seed = [ (o, blank 3) ] and read = [ o ] in
   let virt = execute ~name:"vd_static_dynamic" opt ~seed ~read in
-  let mat = execute ~name:"vd_static_dynamic_mat" (optimize ~materialized:[ d ] llc) ~seed ~read in
+  let mat =
+    execute ~name:"vd_static_dynamic_mat"
+      (optimize ~materialized:[ d ] llc)
+      ~seed:(prefill d :: seed) ~read
+  in
   p "static-dynamic: executed values are row 0 of the diagonal" (same virt [ [| 1.; 0.; 0. |] ]);
   p "static-dynamic: virtual and materialized arms agree" (same virt mat)
 
@@ -156,7 +175,9 @@ let case_single_symbol_affine () =
   (* Unguarded, but still per-index: [o.(j)] is the producer value at [i = j]. *)
   let seed = [ (o, blank 3) ] and read = [ o ] in
   let virt = execute ~name:"vd_affine" opt ~seed ~read in
-  let mat = execute ~name:"vd_affine_mat" (optimize ~materialized:[ d ] llc) ~seed ~read in
+  let mat =
+    execute ~name:"vd_affine_mat" (optimize ~materialized:[ d ] llc) ~seed:(prefill d :: seed) ~read
+  in
   p "single-affine: executed values track the producer index" (same virt [ [| 1.; 2.; 3. |] ]);
   p "single-affine: virtual and materialized arms agree" (same virt mat)
 
@@ -183,7 +204,11 @@ let case_single_symbol_affine_mismatch () =
      agrees, because [d(j, j + 2)] is off the written diagonal and holds the zero-init. *)
   let seed = [ (o, blank 3) ] and read = [ o ] in
   let virt = execute ~name:"vd_affine_mismatch" opt ~seed ~read in
-  let mat = execute ~name:"vd_affine_mismatch_mat" (optimize ~materialized:[ d ] llc) ~seed ~read in
+  let mat =
+    execute ~name:"vd_affine_mismatch_mat"
+      (optimize ~materialized:[ d ] llc)
+      ~seed:(prefill d :: seed) ~read
+  in
   p "single-affine-mismatch: executed values are the init value" (same virt [ [| 0.; 0.; 0. |] ]);
   p "single-affine-mismatch: virtual and materialized arms agree" (same virt mat)
 
@@ -201,7 +226,9 @@ let case_single_symbol () =
   p "single-symbol: no guard" (count_where opt = 0);
   let seed = [ (o, blank 3) ] and read = [ o ] in
   let virt = execute ~name:"vd_single" opt ~seed ~read in
-  let mat = execute ~name:"vd_single_mat" (optimize ~materialized:[ d ] llc) ~seed ~read in
+  let mat =
+    execute ~name:"vd_single_mat" (optimize ~materialized:[ d ] llc) ~seed:(prefill d :: seed) ~read
+  in
   p "single-symbol: executed values track the producer index" (same virt [ [| 1.; 2.; 3. |] ]);
   p "single-symbol: virtual and materialized arms agree" (same virt mat)
 

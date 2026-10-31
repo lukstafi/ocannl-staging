@@ -109,11 +109,12 @@ let make_pair n =
   let mb = TDSL.ndarray mbv ~label:[ "mb" ] ~input_dims:[ n ] ~output_dims:[ n ] () in
   (ma, mb)
 
-let run_forward ?(transform = fun opt -> opt) comp =
+let run_forward ?(transform = fun opt -> opt) ?(prefill = []) comp =
   let ctx = Context.auto () in
   let ctx, routine =
     Context.compile ~lowered_transform:(fun o -> [ transform o ]) ctx comp Ir.Indexing.Empty
   in
+  let ctx = List.fold prefill ~init:ctx ~f:(fun ctx (tn, vs) -> Context.set_values ctx tn vs) in
   Context.run ctx routine
 
 (* --- 1. Both operands hoisted, dividing extents --- *)
@@ -129,9 +130,18 @@ let () =
          ~hoist_b:true opt)
       opt
   in
-  let ctx = run_forward ~transform (named "mmh_hoisted" (Train.forward mc1)) in
+  (* [Privatize] drops [Zero_out mc1] and opens its tile at zero instead; fresh buffers are zero and
+     would hide a tile opened from [mc1] (gh-ocannl-1625), so [mc1] starts off its every result. *)
+  let mc1_prefill = Array.init (32 * 32) ~f:(fun c -> Float.of_int (1000 + c)) in
+  let ctx =
+    run_forward ~transform
+      ~prefill:[ (mc1.Tensor.value, mc1_prefill) ]
+      (named "mmh_hoisted" (Train.forward mc1))
+  in
   let got_hoisted = Context.get_values ctx mc1.Tensor.value in
   p_close "hoisted-packed matmul matches the naive twin" got_hoisted got_naive ~tol:approx_tol;
+  p_all2 "the prefill of the accumulator differs from the naive twin's result in every cell"
+    mc1_prefill got_naive ~f:(fun a b -> Float.(a <> b));
   let src = Generated.read "mmh_hoisted" in
   let has sub = String.is_substring src ~substring:sub in
   p "no in-kernel scratch or copy nests; packed constants are buffer params"

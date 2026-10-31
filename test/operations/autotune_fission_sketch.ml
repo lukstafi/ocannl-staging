@@ -398,7 +398,10 @@ let () =
         ~report:(fun r -> mm_reports := r :: !mm_reports)
         ctx mm_comp Ir.Indexing.Empty
     in
-    let ctx = Context.run ctx routine in
+    (* Run twice (the forward is idempotent): fresh buffers are already zero, so a winner's zero
+       companion or zero segment that misses cells shows only over the first run's sums
+       (gh-ocannl-1625). *)
+    let ctx = Context.run (Context.run ctx routine) routine in
     Context.get_values ctx mc1.Tensor.value
   in
   let got_mm1 = tune_mm () in
@@ -545,7 +548,8 @@ let () =
       ~report:(fun r -> fs_report := Some r)
       fsctx fs_comp Ir.Indexing.Empty
   in
-  let fsctx = Context.run fsctx fsroutine in
+  (* Twice, as [tune_mm] runs: the fissioned matmul's [`Zeros] segment (gh-ocannl-1625). *)
+  let fsctx = Context.run (Context.run fsctx fsroutine) fsroutine in
   let got_fs = Context.get_values fsctx qe1.Tensor.value in
   (match !fs_report with
   | Some r ->
@@ -587,7 +591,8 @@ let () =
         ~report:(fun r -> report := Some r)
         ctx (named tag comp) Ir.Indexing.Empty
     in
-    let ctx = Context.run ctx routine in
+    (* Twice, as [tune_mm] runs (gh-ocannl-1625). *)
+    let ctx = Context.run (Context.run ctx routine) routine in
     let got = Context.get_values ctx y.Tensor.value in
     match !report with
     | Some r ->

@@ -2288,6 +2288,21 @@ in the `tools/*.sh` scripts (gh-ocannl-1111) and in the string literals of the O
   constant producer replays an identical assignment under a too-wide range guard, a value omitting
   one symbol is constant along that axis under a wrong substitution, and a value colliding with the
   zero-init hides a dropped first iteration — each is a leg that passes for the wrong reason.
+- A test of a ZERO-related transform starts every checked run from a state the routine must
+  overwrite (gh-ocannl-1625): init elision, zero seeds and `= {0}` declarations, `Zero_out`
+  elision and sinking, zero expansion and folding, Privatize's dropped zero, `Split_reduce`'s
+  partials zero. A fresh device buffer is already zero, so a zero that never runs computes the
+  same values and the parity check passes. Prefill each zeroed node with per-cell values clear of 0
+  and of what the routine leaves there (`Context.set_values` between compile and run, or the
+  `~seed` of `Ll_test.run_linked`), and claim the prefill differs from the result. A node the
+  schedule mints (the partials) has no host handle: run the idempotent routine twice and read the
+  second run. A `Local` or shared-memory node cannot be prefilled at all: put its zero after a write
+  in the same routine (`zero_out_local_decl`'s hand-built leg). The prefill must reach the
+  transformed arm; a reference that keeps its zeros is indifferent to it. A reference that is a
+  plain compile shares every default-on zero transform (`gpu_elide_covered_zeros` on GPU,
+  `buffer_aliasing`'s sink when both arms set it), so it is no oracle for that one: use a closed
+  form or the gate-off compile. Prove the leg with `tools/mutation-run.sh` and a drop-one-zero
+  patch; the inventory and its mutants are in lukstafi/ocannl-staging's gh-1625 PR body.
 - A test operand minted from a FLATTENED offset stops discriminating at sizes that divide its
   modulus, and does it while still looking right: `(row * stride + col) mod p` collapses to
   `col mod p` whenever `p` divides the row stride, so every row becomes identical. That makes a

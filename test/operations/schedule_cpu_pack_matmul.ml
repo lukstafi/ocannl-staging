@@ -119,9 +119,15 @@ let () =
   let ctx_a, routine_a =
     Context.compile ~lowered_transform:(fun o -> [ transform o ]) ctx_a pack_comp Ir.Indexing.Empty
   in
+  (* [Privatize] drops [Zero_out mc1] and opens its tile at zero instead; fresh buffers are zero and
+     would hide a tile opened from [mc1] (gh-ocannl-1625), so [mc1] starts off its every result. *)
+  let mc1_prefill = Array.init (n * n) ~f:(fun c -> Float.of_int (1000 + c)) in
+  let ctx_a = Context.set_values ctx_a mc1.Tensor.value mc1_prefill in
   let ctx_a = Context.run ctx_a routine_a in
   let got_packed = Context.get_values ctx_a mc1.Tensor.value in
   p_close "packed tiled matmul matches the naive twin" got_packed got_naive ~tol:approx_tol;
+  p_all2 "the prefill of the accumulator differs from the naive twin's result in every cell"
+    mc1_prefill got_naive ~f:(fun a b -> Float.(a <> b));
   let src = Generated.read "mmp_packed" in
   let has sub = String.is_substring src ~substring:sub in
   let count_sub sub = String.substr_index_all src ~may_overlap:false ~pattern:sub |> List.length in

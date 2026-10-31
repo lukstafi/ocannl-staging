@@ -315,6 +315,13 @@ let () =
   let renderer_agrees (idx, mcm, vs, outcome) =
     match (vs, outcome) with
     | [], Ok (ctx, routine) ->
+        (* The base schedule expands [mcm]'s zero; fresh buffers are zero and would hide a dropped
+           or short expansion (gh-ocannl-1625), so [mcm] starts off every result (the sums stay
+           under 1536). *)
+        let ctx =
+          Context.set_values ctx mcm.Tensor.value
+            (Array.init (Array.length got_serial) ~f:(fun c -> Float.of_int (10_000 + c)))
+        in
         let ctx = Context.run ctx routine in
         let got = Context.get_values ctx mcm.Tensor.value in
         Array.for_all2_exn got got_serial ~f:(fun a b -> Float.(abs (a - b) < 1e-2))

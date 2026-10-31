@@ -173,6 +173,7 @@ let () =
    masked contraction places the fragment in threadgroup memory and brackets the reduction loop with
    barriers; the store-back writes only the valid 33 x 65 region. === *)
 let () =
+  let pad_prefill = Array.init (m_ext * n_ext) ~f:(fun c -> Float.of_int (10_000 + c)) in
   let run =
     lazy
       (let ma = TDSL.ndarray mav ~label:[ "gma" ] ~input_dims:[ k_ext ] ~output_dims:[ m_ext ] () in
@@ -244,6 +245,10 @@ let () =
            (named "pad_gpu_mma" (Train.forward gc1))
            Ir.Indexing.Empty
        in
+       (* The schedule expands [gc1]'s zero; fresh buffers are zero and would hide a dropped or
+          short expansion (gh-ocannl-1625), so [gc1] starts off its every result (sums stay under
+          1680). *)
+       let ctx = Context.set_values ctx gc1.Tensor.value pad_prefill in
        let ctx = Context.run ctx routine in
        let got = Context.get_values ctx gc1.Tensor.value in
        (got, want, routine))
@@ -251,6 +256,11 @@ let () =
   in_leg ~leg:gpu_leg "padded staged+tensorized matmul parity (GPU)" (fun label ->
       let got, want, _ = Lazy.force run in
       p_close label got want ~tol:approx_tol);
+  in_leg ~leg:gpu_leg
+    "the prefill of the padded target differs from the serial twin's result in every cell"
+    (fun label ->
+      let _, want, _ = Lazy.force run in
+      p_all2 label pad_prefill want ~f:(fun a b -> Float.(a <> b)));
   (* The schedule's tensorization pass pads n to 8 (72 here). Whether that shape reaches a real
      intrinsic is a tile-capability question; the routine census is the authoritative outcome. *)
   in_leg ~leg:gpu_leg "padded GPU intrinsics follow the advertised tile divisibility" (fun label ->
@@ -479,6 +489,15 @@ let () =
     let tensorized =
       Ir.C_syntax.equal_tensorization routine.Context.mma.Ir.C_syntax.tensorization
         Ir.C_syntax.Tensorized
+    in
+    (* The grid seeds expand [nc]'s zero; fresh buffers are zero and would hide a dropped or short
+       expansion (gh-ocannl-1625), so the split run starts [nc] off every result (the sums stay
+       under 70 * 8.3 * 28.6) while the unsplit run, its bitwise reference, starts fresh. *)
+    let ctx =
+      if split then
+        Context.set_values ctx nc.Tensor.value
+          (Array.init (m_ext * n_ext) ~f:(fun c -> Float.of_int (100_000 + c)))
+      else ctx
     in
     let ctx = Context.run ctx routine in
     let partition, llc = Option.value_exn !applied in

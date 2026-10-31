@@ -30,6 +30,12 @@ open Verdict.Claims
 let mk = node_factory ~first_id:2000 ~dims:[| 6 |] ()
 let optimize ?materialized llc = optimize ?materialized ~name:"virtual_affine" llc
 
+(* The materialized arm's prefill of a zero-initialized producer: per cell, negative, so off the
+   zero init and every producer value. A fresh device buffer is already zero, so without it a
+   dropped [Zero_out] of the materialized node agrees with the virtual arm anyway
+   (gh-ocannl-1625). *)
+let prefill tn = (tn, Array.init (Tn.num_elems tn) ~f:(fun k -> -.(100. +. Float.of_int k)))
+
 (* === Case 1: structural affine match === *)
 let case_structural_match () =
   let tgt = mk ~dims:[| 6 |] "smatch" and out = mk ~dims:[| 6 |] "out1" in
@@ -123,7 +129,11 @@ let case_triangular () =
   in
   let seed = [ (out, blank 12) ] and read = [ out ] in
   let virt = execute ~name:"va_triangular" o ~seed ~read in
-  let mat = execute ~name:"va_triangular_mat" (optimize ~materialized:[ tgt ] llc) ~seed ~read in
+  let mat =
+    execute ~name:"va_triangular_mat"
+      (optimize ~materialized:[ tgt ] llc)
+      ~seed:(prefill tgt :: seed) ~read
+  in
   p "triangular: executed values are the scattered band over the zero-init" (same virt [ expected ]);
   p "triangular: virtual and materialized arms agree" (same virt mat)
 
@@ -173,7 +183,11 @@ let case_stage_a_diagonal () =
   in
   let seed = [ (out, blank 9) ] and read = [ out ] in
   let virt = execute ~name:"va_stage_a" o ~seed ~read in
-  let mat = execute ~name:"va_stage_a_mat" (optimize ~materialized:[ d ] llc) ~seed ~read in
+  let mat =
+    execute ~name:"va_stage_a_mat"
+      (optimize ~materialized:[ d ] llc)
+      ~seed:(prefill d :: seed) ~read
+  in
   p "stage-a diagonal: executed values are the diagonal over the zero-init" (same virt [ expected ]);
   p "stage-a diagonal: virtual and materialized arms agree" (same virt mat)
 

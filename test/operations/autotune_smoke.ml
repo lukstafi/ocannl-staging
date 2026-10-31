@@ -170,6 +170,10 @@ let () =
         [ opt' ])
       pctx mm_comp Ir.Indexing.Empty
   in
+  (* [Privatize] drops [Zero_out mc] and opens its tile at zero instead; fresh buffers are zero and
+     would hide a tile opened from [mc] (gh-ocannl-1625), so [mc] starts off its every result. *)
+  let mc_prefill = Array.init 24 ~f:(fun c -> Float.of_int (1000 + c)) in
+  let pctx = Context.set_values pctx mc.Tensor.value mc_prefill in
   let pctx = Context.run pctx proutine in
   let priv_got = Context.get_values pctx mc.Tensor.value in
   p_close "privatized replay values correct" priv_got mm_expected ~tol:approx_tol;

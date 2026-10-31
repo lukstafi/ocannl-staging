@@ -60,9 +60,9 @@ files.
   `wte.grad` + final-LN-grad union. Zero runs are stably sorted by shape in `collect_units` (they
   commute; units stay a function of the code), else the cuts fall at every alternation of a
   backward pass's shapes. Case 4 of `gpu_fission_mapping`. A parity check of the sort must not
-  share it: compare against the unfissioned routine (no `lowered_transform`, original order), and
-  prefill the zeroed buffers with nonzero values, since fresh ones are already zero and hide a zero
-  that never runs (gh-ocannl-1250, `zero_run_reorder`). Reordering zeros WITHIN a run is
+  share it: compare against the unfissioned routine (no `lowered_transform`, original order), from
+  prefilled buffers (the zero-transform rule in build-and-test.md, "Hand-built IR tests";
+  gh-ocannl-1250, `zero_run_reorder`). Reordering zeros WITHIN a run is
   value-neutral (that is the soundness argument), so no executed check can see it; the hazards a
   value check catches are a dropped zero and a sort that crosses the run's boundary (an
   overlapping slice write, an accumulation). The fold pairs a zero with its neighbour AFTER the

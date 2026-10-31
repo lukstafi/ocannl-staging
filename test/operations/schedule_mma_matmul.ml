@@ -363,6 +363,17 @@ let () =
   in
   let ctx_s = Context.run ctx_s routine_s in
   let got_serial = nonzero "mm_serial" (Context.get_values ctx_s mc0.Tensor.value) in
+  (* Every tensorized leg below expands its target's zero ahead of the [Tile_mma]; fresh buffers are
+     zero and would hide a dropped or short expansion (gh-ocannl-1625), so each such run starts its
+     target at [1000 + c] per cell -- off every product these small operands sum to -- and its
+     parity claim then needs every cell overwritten. *)
+  let run_prefilled ctx routine (t : Tensor.t) =
+    let tn = t.Tensor.value in
+    let numel = Array.fold (Tn.dims_without_padding tn) ~init:1 ~f:( * ) in
+    Context.run
+      (Context.set_values ctx tn (Array.init numel ~f:(fun c -> Float.of_int (1000 + c))))
+      routine
+  in
 
   (* --- The tensorized schedule --- *)
   let mma_schedule ?(bm = bm) ~out (opt : LL.optimized) : Sched.schedule =
@@ -405,7 +416,7 @@ let () =
     (* The census is a field of the compiled routine since gh-ocannl-626, not a global this call
        site brackets. *)
     let census = renderings routine in
-    let ctx = Context.run ctx routine in
+    let ctx = run_prefilled ctx routine tensor in
     (Context.get_values ctx tensor.Tensor.value, census)
   in
   let compile_serial ~name tensor =
@@ -612,7 +623,7 @@ let () =
   let ctx_a, routine_a =
     Context.compile ~lowered_transform:(fun o -> [ transform o ]) ctx_a mma_comp Ir.Indexing.Empty
   in
-  let ctx_a = Context.run ctx_a routine_a in
+  let ctx_a = run_prefilled ctx_a routine_a mc1 in
   let got_mma = Context.get_values ctx_a mc1.Tensor.value in
   p_close "tensorized matmul values match the serial twin" got_mma got_serial ~tol:approx_tol;
   (let label = "C-backend fallback matches bitwise" in
@@ -683,7 +694,7 @@ let () =
           (named "mm_h_mma" (Train.forward mch1))
           Ir.Indexing.Empty)
   in
-  let ctx_h = Context.run ctx_h routine_h in
+  let ctx_h = run_prefilled ctx_h routine_h mch1 in
   let got_h = Context.get_values ctx_h mch1.Tensor.value in
   p_all2 "half tensorized matmul matches the serial twin bitwise" got_h got_h_serial ~f:Float.equal;
   (let src = Generated.read "mm_h_mma" in
@@ -1050,7 +1061,7 @@ let () =
         (named ("mm_" ^ tag ^ "_mma") (Train.forward mcb1))
         Ir.Indexing.Empty
     in
-    let ctx_b = Context.run ctx_b routine_b in
+    let ctx_b = run_prefilled ctx_b routine_b mcb1 in
     let got = Context.get_values ctx_b mcb1.Tensor.value in
     (* Bitwise on every backend, HIP's tensor unit included. These legs used to admit a HIP
        tolerance (1e-5 at an f32 accumulator, 5e-2 at a bf16 one), measured on a single exact
@@ -1399,7 +1410,7 @@ let () =
          (named ("mm_" ^ tag ^ "_mma") (Train.forward mcf1))
          Ir.Indexing.Empty
      in
-     let ctx_f8 = Context.run ctx_f8 routine_f8 in
+     let ctx_f8 = run_prefilled ctx_f8 routine_f8 mcf1 in
      let got = Context.get_values ctx_f8 mcf1.Tensor.value in
      p_all2
        (Printf.sprintf "%s tensorized matmul matches the serial twin bitwise" tag)
@@ -1521,7 +1532,7 @@ let () =
            (named "mm_edge_mma" (Train.forward ec1))
            Ir.Indexing.Empty
        in
-       let ctx_e = Context.run ctx_e routine_e in
+       let ctx_e = run_prefilled ctx_e routine_e ec1 in
        (Context.get_values ctx_e ec1.Tensor.value, got_edge_serial, routine_e))
   in
   in_leg ~leg:cpu_leg "edge-extent tensorized matmul matches the serial twin bitwise" (fun label ->
@@ -1610,7 +1621,7 @@ let () =
            (named "mm_width_mma" (Train.forward wc1))
            Ir.Indexing.Empty
        in
-       let ctx_w = Context.run ctx_w routine_w in
+       let ctx_w = run_prefilled ctx_w routine_w wc1 in
        (Context.get_values ctx_w wc1.Tensor.value, got_width_serial, routine_w))
   in
   in_leg ~leg:cpu_leg "extent-adapted tensorized matmul matches the serial twin bitwise"
@@ -1699,7 +1710,7 @@ let () =
            (named "mm_fused_mma" (Train.forward fc1))
            Ir.Indexing.Empty
        in
-       let ctx_f = Context.run ctx_f routine_f in
+       let ctx_f = run_prefilled ctx_f routine_f fc1 in
        let got_fused = Context.get_values ctx_f fc1.Tensor.value in
        Unix.putenv contract_var (Option.value previous_contract ~default:"");
        (fav, fbv, got_fused, want_fused, routine_f))
@@ -1810,7 +1821,7 @@ let () =
            ~lowered_transform:(fun o -> [ staged_transform o ])
            ctx_c staged_comp Ir.Indexing.Empty
        in
-       let ctx_c = Context.run ctx_c routine_c in
+       let ctx_c = run_prefilled ctx_c routine_c mc3 in
        let got_staged = Context.get_values ctx_c mc3.Tensor.value in
        (got_staged, routine_c))
   in
@@ -1918,7 +1929,7 @@ let () =
            (named "mm_h_staged_mma" (Train.forward mchs))
            Ir.Indexing.Empty
        in
-       let ctx_d = Context.run ctx_d routine_d in
+       let ctx_d = run_prefilled ctx_d routine_d mchs in
        let got_h_staged = Context.get_values ctx_d mchs.Tensor.value in
        (got_h_staged, routine_d))
   in
@@ -1979,7 +1990,7 @@ let () =
                (named "mm_hu_staged_mma" (Train.forward mchu))
                Ir.Indexing.Empty)
        in
-       let ctx_u = Context.run ctx_u routine_u in
+       let ctx_u = run_prefilled ctx_u routine_u mchu in
        let got_hu = Context.get_values ctx_u mchu.Tensor.value in
        (got_hu, routine_u))
   in
@@ -2067,7 +2078,7 @@ let () =
            Ir.Indexing.Empty
        in
        let census_fw = renderings routine_fw in
-       let ctx_fw = Context.run ctx_fw routine_fw in
+       let ctx_fw = run_prefilled ctx_fw routine_fw mchfw in
        let got_fw = Context.get_values ctx_fw mchfw.Tensor.value in
        Numerics.set_policy saved_policy;
        Stdio.eprintf
@@ -2169,7 +2180,7 @@ let () =
              Ir.Indexing.Empty
          in
          let census = renderings routine in
-         let ctx = Context.run ctx routine in
+         let ctx = run_prefilled ctx routine t in
          (Array.to_list (Context.get_values ctx t.Tensor.value), census, Generated.read name)
        in
        (* The f16 -> f32 arm is policy-independent, so it runs under the ambient policy (the stanza
@@ -2310,7 +2321,7 @@ let () =
              Ir.Indexing.Empty
          in
          let census = renderings routine in
-         let ctx = Context.run ctx routine in
+         let ctx = run_prefilled ctx routine t in
          (Array.to_list (Context.get_values ctx t.Tensor.value), census)
        in
        Numerics.set_policy { saved_policy with bf16_arithmetic = Numerics.Bf16_auto };
@@ -2630,7 +2641,7 @@ let () =
                Ir.Indexing.Empty
            in
            let census = renderings routine in
-           let ctx = Context.run ctx routine in
+           let ctx = run_prefilled ctx routine t in
            let src = Generated.read name in
            (nonzero name (Context.get_values ctx t.Tensor.value), census, register_resident src)
          in
@@ -2731,7 +2742,7 @@ let () =
     let ctx1, routine1 =
       Context.compile ~lowered_transform:(fun o -> [ transform o ]) ctx1 mma_comp Ir.Indexing.Empty
     in
-    let ctx1 = Context.run ctx1 routine1 in
+    let ctx1 = run_prefilled ctx1 routine1 tensorized in
     let got = Context.get_values ctx1 tensorized.Tensor.value in
     p_close
       (Printf.sprintf "%s tensorized matmul matches the serial twin" tag)

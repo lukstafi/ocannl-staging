@@ -82,6 +82,9 @@ let () =
   let ctx2 = Train.init_params (Context.auto ()) two.bindings two.y in
   let ctx2, routine2 = Train.to_routine ctx2 two.bindings two.fwd in
   let ctx2 = Context.set_values ctx2 two.x.Tensor.value [| 37.; 37. |] in
+  (* The sentinel, as the pre-boundary leg below seeds it: a fresh device buffer is already zero, so
+     an empty sum whose zero-init was dropped would read 0.0 anyway (gh-ocannl-1625). *)
+  let ctx2 = Context.set_values ctx2 two.y.Tensor.value (Ll_test.blank 1) in
   Idx.find_exn routine2.Context.bindings two.extent := 0;
   let ctx2 = Context.run ctx2 routine2 in
   let guarded = Context.get_values ctx2 two.y.Tensor.value in

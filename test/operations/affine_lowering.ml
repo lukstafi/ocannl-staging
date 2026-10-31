@@ -209,6 +209,13 @@ let run_triangular ~materialize_dst =
   let ctx = Context.auto () in
   let ctx = Context.set_values ctx src [| 0.; 1.; 2.; 3.; 4.; 5. |] in
   let ctx, routine = Context.compile ~name:"tri_scatter_copy" ctx comp Idx.Empty in
+  (* Prefill the materialized [dst] off its zero init and the scattered values: a fresh device
+     buffer is already zero, so a dropped zero-init would match anyway (gh-ocannl-1625). *)
+  let ctx =
+    if materialize_dst then
+      Context.set_values ctx dst (Array.init 12 ~f:(fun k -> -.(100. +. Float.of_int k)))
+    else ctx
+  in
   let ctx = Context.run ctx routine in
   (Context.get_values ctx out, Tn.Placements.known_virtual (Context.placements ctx) dst)
 

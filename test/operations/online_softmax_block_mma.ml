@@ -118,7 +118,9 @@ let forward ?(model = model) ?lowered_transform ~name ~on ~block ~seq ~d_k () =
       let ctx, routine =
         Context.compile ?lowered_transform ~name ctx t.Tensor.forward Ir.Indexing.Empty
       in
-      let ctx = Context.run ctx routine in
+      (* Run twice (the forward is idempotent): fresh buffers are already zero, so a zero that never
+         runs shows only over the first run's sums (gh-ocannl-1625). *)
+      let ctx = Context.run (Context.run ctx routine) routine in
       {
         values = Context.get_values ctx t.Tensor.value;
         mma = routine.Context.mma;
@@ -296,7 +298,17 @@ let training ~on ~block ~bwd ~seq ~d_k =
       let update = Train.grad_update loss in
       let ctx = Train.init_params (Context.auto ()) Ir.Indexing.Empty loss in
       let ctx, routine = Context.compile ~name:"osbm_step" ctx update Ir.Indexing.Empty in
-      let ctx = Context.run ctx routine in
+      (* Every gradient is prefilled clear of its result, differently in the composed and the fused
+         step: fresh buffers are already zero, so a gradient zero that never runs would be
+         invisible, and one both steps drop would leave the same prefill in both
+         (gh-ocannl-1625). *)
+      let prefill ctx p =
+        let grad = (Option.value_exn p.Tensor.diff).Tensor.grad in
+        let n = Array.fold (Lazy.force grad.Ir.Tnode.dims) ~init:1 ~f:( * ) in
+        Context.set_values ctx grad
+          (Array.init n ~f:(fun k -> Float.of_int ((if on then 2000 else 1000) + k)))
+      in
+      let ctx = Context.run (List.fold params ~init:ctx ~f:prefill) routine in
       ( List.map params ~f:(fun p ->
             Context.get_values ctx (Option.value_exn p.Tensor.diff).Tensor.grad),
         routine.Context.mma ))

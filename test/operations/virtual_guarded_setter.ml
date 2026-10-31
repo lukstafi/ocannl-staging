@@ -36,6 +36,11 @@ let n = 4
    off-branch leaves behind) and the sentinel. *)
 let avals = Array.init n ~f:(fun i -> 2. +. Float.of_int i)
 
+(* The materialized arm's prefill of [x]: per cell, negative, so off the zero init, [avals] and the
+   ticks. A fresh device buffer is already zero, so without it a dropped [Zero_out] of the
+   materialized node reads as a kept one (gh-ocannl-1625). *)
+let x_prefill = Array.init n ~f:(fun k -> -.(100. +. Float.of_int k))
+
 (** Runs [o] once per flag value, returning [(off, on)] readings of [out]. Linking once and seeding
     twice is what keeps the two readings the SAME compiled routine — a per-value recompile could
     differ for reasons other than the guard. *)
@@ -79,7 +84,7 @@ let case_guarded_rmw () =
   let moff, mon =
     run_both
       (optimize ~materialized:[ x ] ~name:"vgs_rmw_mat" llc)
-      ~name:"vgs_rmw_mat" ~flag ~seed ~out
+      ~name:"vgs_rmw_mat" ~flag ~seed:((x, x_prefill) :: seed) ~out
   in
   p "guarded RMW: agrees with the materialized arm at both flag values"
     (close off moff && close on mon)
@@ -145,7 +150,7 @@ let case_interior_guard () =
   let mat =
     execute ~name:"vgs_interior_mat"
       (optimize ~materialized:[ x ] ~name:"vgs_interior_mat" llc)
-      ~seed ~read:[ out ]
+      ~seed:((x, x_prefill) :: seed) ~read:[ out ]
   in
   p "interior guard: only the masked-in cells carry the write" (same got [ expected ]);
   p "interior guard: agrees with the materialized arm" (same got mat)

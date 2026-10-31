@@ -4,6 +4,7 @@ census: without the contraction licence the standard layout still renders regist
 census: transposed-B layout falls back to the lane-0 scalar rendering: true
 census: the declined schedule's routine is labeled scalar-fallback, not tensorized: true
 per-chunk B~ re-pack matches the serial twin bitwise: true
+per-chunk B~ re-pack: the prefill differs from the serial twin's result in every cell: true
 per-chunk B~ re-pack's routine is labeled tensorized: true
 per-chunk B~ re-pack under the cap pool-parallelizes: true
 Grid census: under the cap, both Grid loops are on the pool, the accumulation loop's tiles counted: true

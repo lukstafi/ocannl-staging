@@ -151,7 +151,9 @@ let execute ?transform ~name ~init comp outs =
     | None -> Context.compile ~name ctx comp Ir.Indexing.Empty
     | Some f -> Context.compile ~name ~lowered_transform:f ctx comp Ir.Indexing.Empty
   in
-  let ctx = Context.run ctx routine in
+  (* Run twice (the forward is idempotent): fresh buffers are already zero, so a folded or expanded
+     zero that misses cells shows only over the first run's sums (gh-ocannl-1625). *)
+  let ctx = Context.run (Context.run ctx routine) routine in
   (List.map outs ~f:(fun (t : Tensor.t) -> Context.get_values ctx t.Tensor.value), routine.mma)
 
 (* The per-seed executed claim's verdict for one seed: [preset] is applied on the target segment

@@ -1115,8 +1115,15 @@ let execute ~name ~(prog : prog) ~(sched : Sched.schedule) =
       (Lazy.force base_ctx) Ir.Assignments.empty_comp prog.bindings
   in
   prog.bind routine.Context.bindings;
-  let ctx = List.fold prog.seed ~init:ctx ~f:(fun ctx (tn, vs) -> Context.set_values ctx tn vs) in
-  let ctx = Context.run ctx routine in
+  (* Run TWICE, re-seeding before each run, and read after the second: every program node is seeded,
+     so a correct routine is idempotent, while scratch a schedule op mints (as [Split_reduce]'s
+     partials) has no host handle to prefill, and its first run starts from a fresh zero buffer --
+     only a second run can show a dropped zero of it (gh-ocannl-1625). *)
+  let seeded ctx =
+    List.fold prog.seed ~init:ctx ~f:(fun ctx (tn, vs) -> Context.set_values ctx tn vs)
+  in
+  let ctx = Context.run (seeded ctx) routine in
+  let ctx = Context.run (seeded ctx) routine in
   let read tn = Context.get_values ctx tn in
   ( read prog.out,
     List.map prog.verify ~f:(fun (c, tn, want) -> (c, read tn, want)),
@@ -2354,6 +2361,12 @@ let mma_run ~name ~out ~tensorize comp =
     Context.compile ~name
       ~lowered_transform:(fun o -> [ transform o ])
       (Lazy.force base_ctx) comp Idx.Empty
+  in
+  (* Prefill [out] off every value the contraction writes: a fresh device buffer is already zero, so
+     a dropped zero-init of the accumulator would agree anyway (gh-ocannl-1625). *)
+  let ctx =
+    Context.set_values ctx out
+      (Array.init (Tn.num_elems out) ~f:(fun k -> -.(100. +. Float.of_int k)))
   in
   let ctx = Context.run ctx routine in
   (Context.get_values ctx out, routine.Context.mma, routine.Context.peel)

@@ -25,7 +25,13 @@
    claims are about); the elided list has none of them, and keeps no covering zero whose next access
    the pass would accept (it is maximal); each of the pass's three accumulation forms occurs in it
    -- the constant opening, the localized scope, the first-iteration guard -- and none occurs in the
-   reference. *)
+   reference.
+
+   Which mutants fail a value claim (gh-ocannl-1625): a zero dropped while its accumulation keeps
+   reading the cell fails the second run's parity and the narrow-format leg, whose routines start
+   from a sentinel; a zero dropped where it, or the accumulation after it, does not cover the node
+   would pass both (the attention step has no such zero), so the coverage leg executes the two
+   refusals from a prefill. *)
 
 open Base
 open Stdio
@@ -320,6 +326,82 @@ let () =
     = 1);
   p_all2 "elided: out is bitwise equal to the reference's" (bits elided) (bits reference)
     ~f:Int64.equal
+
+(* Coverage, executed (gh-ocannl-1625): two programs whose zero the pass must keep, each run from a
+   prefill of [out] that differs from its result in every cell, so a zero dropped wrongly leaves the
+   prefill (or the prefill plus the sum) where the routine should have cleared it -- fresh buffers
+   are already zero, and would hide that. The reference is the same program with its zero
+   ([?prelowered] compiles keep their zeros), pinned by a closed form. Hand-built and compiled as
+   built ([Ll_test.optimize_scoped], so no simplification narrows the guarded loop), the pass
+   applied explicitly, on every backend.
+
+   - Guarded zero: [if i < 7 then out[i] = 0] over 8 cells, then [out[i] += src[i]] over all 8. The
+   guard trims the zero to cells 0..6, so [Low_level.zero_fill_target] must not take it for a
+   covering zero; a guard ignored, or its bound read one cell too wide, would. - Partial
+   accumulation: [Zero_out out], then [out[i] += src[i]] over cells 0..3 only, so
+   [Low_level.seed_first_write] must refuse: with its covering check skipped, cells 4..7 would keep
+   the prefill. *)
+let () =
+  printf "--- coverage: a zero the next access does not let go is kept ---\n";
+  let cells = 8 in
+  let node = Ll_test.node_factory ~first_id:12600 ~dims:[| cells |] () in
+  let src_values = Array.init cells ~f:(fun k -> Float.of_int (1 + k)) in
+  let prefill = Array.init cells ~f:(fun k -> Float.of_int (100 + k)) in
+  let zero_writes llc =
+    Ll_test.count_stmt
+      ~f:(function LL.Zero_out _ | LL.Set { llsc = LL.Constant 0.; _ } -> true | _ -> false)
+      llc
+  in
+  let case ~what ~tag ~zero ~acc_cells ~expected =
+    let src = node (tag ^ "_src") and out = node (tag ^ "_out") in
+    List.iter [ src; out ] ~f:Ll_test.materialize;
+    let i = Ll_test.sym () in
+    let cell = [| Ll_test.iter i |] in
+    let program =
+      LL.Seq
+        ( zero out,
+          Ll_test.loop_n i acc_cells
+            (Ll_test.set out cell (Ll_test.add (Ll_test.get out cell) (Ll_test.get src cell))) )
+    in
+    let run ~name ~elide_it =
+      let o = Ll_test.optimize_scoped ~materialized:[ src; out ] ~name ~raw:program program in
+      let o =
+        if not elide_it then o
+        else
+          match LL.elide_covered_zeros [ o.LL.llc ] with
+          | [ Some llc ] -> { o with LL.llc }
+          | _ -> o
+      in
+      let ctx =
+        Ll_test.run_linked (Ll_test.link ~name o) ~seed:[ (src, src_values); (out, prefill) ]
+      in
+      (o, Context.get_values ctx out)
+    in
+    let _, reference = run ~name:(tag ^ "_ref") ~elide_it:false in
+    let elided_code, elided = run ~name:(tag ^ "_elided") ~elide_it:true in
+    p_all2 (what ^ ": the prefill differs from the result in every cell") prefill expected
+      ~f:(fun a b -> not (Float.equal a b));
+    p_all2
+      (what ^ ": the reference computes the closed form")
+      (bits reference) (bits expected) ~f:Int64.equal;
+    p (what ^ ": the zero is kept") (zero_writes elided_code.LL.llc = 1);
+    p_all2
+      (what ^ ": out is bitwise equal to the reference's")
+      (bits elided) (bits reference) ~f:Int64.equal
+  in
+  let guarded out =
+    let z = Ll_test.sym () in
+    Ll_test.loop_n z cells
+      (Ll_test.if_at (Ll_test.iprec ())
+         (Ll_test.lt (Ll_test.embed z) (Ll_test.ic (cells - 1)))
+         (Ll_test.set out [| Ll_test.iter z |] (Ll_test.c 0.)))
+  in
+  case ~what:"guarded zero" ~tag:"ze_cov_guarded" ~zero:guarded ~acc_cells:cells
+    ~expected:
+      (Array.init cells ~f:(fun k ->
+           if k < cells - 1 then src_values.(k) else prefill.(k) +. src_values.(k)));
+  case ~what:"partial accumulation" ~tag:"ze_cov_partial" ~zero:Ll_test.zero ~acc_cells:4
+    ~expected:(Array.init cells ~f:(fun k -> if k < 4 then src_values.(k) else 0.))
 
 (* A covering accumulation under a [Scan_loop] whose index is the cell's (no loop repeats a cell):
    the constant opening must reach the read inside the scan's body, or the zero would go while the

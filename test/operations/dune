@@ -1866,7 +1866,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules zero_out_local_decl)
- (libraries base ocannl)
+ (libraries base ocannl ll_test arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
