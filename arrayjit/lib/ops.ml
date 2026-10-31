@@ -1040,8 +1040,14 @@ let c_convert_precision ~from ~to_ =
   | ( (Byte_prec _ | Uint16_prec _ | Int32_prec _ | Uint32_prec _ | Int64_prec _ | Uint64_prec _),
       Half_prec _ ) ->
       ("FLOAT_TO_HALF((float)", ")")
-  (* Uint4x32 conversions - special handling *)
-  | Uint4x32_prec _, _ -> ("uint4x32_to_" ^ prec_string to_ ^ "(", ")")
+  (* Uint4x32 conversions - special handling. A scalar widens into a block through the
+     [<prec>_to_uint4x32] builtins, but no plain conversion back is defined: the spelling this arm
+     used to emit, [uint4x32_to_<prec>], names no builtin, so it rendered a kernel the compiler
+     rejected (gh-ocannl-1731). A block reaches a scalar through the uniform operators. *)
+  | Uint4x32_prec _, _ ->
+      invalid_arg
+        ("Ops.c_convert_precision: no plain conversion from uint4x32 to " ^ prec_string to_
+       ^ "; convert random bits with Uint4x32_to_prec_uniform1 or Uint4x32_to_prec_uniform")
   | _, Uint4x32_prec _ -> (prec_string from ^ "_to_uint4x32(", ")")
   (* Default case for all other conversions *)
   | _ -> ("(" ^ c_typ_of_prec to_ ^ ")(", ")")
