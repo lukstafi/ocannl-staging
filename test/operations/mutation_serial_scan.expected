@@ -37,6 +37,7 @@ tensor/shape.ml: checkpoint_lineage (ref) -- exempt: the lineage of valid checkp
 tensor/shape.ml: checkpoint_seq (ref) -- exempt: a fresh-id counter: ids are never reused, so a rewind need not restore it
 tensor/shape.ml: failed_reads (ref) -- exempt: a record of reads that raised, consulted by a rewind's validity check: never restored
 tensor/shape.ml: live (unread state) -- exempt
+tensor/shape.ml: boundary add_discarded_updates -- part of a rewind: it records the discarded update range, which no rewind restores
 tensor/shape.ml: boundary restore_globals -- part of a rewind: puts back the globals a checkpoint captured
 tensor/shape.ml: boundary rewind -- the rewind: it restores the checkpoint and clears the taint
 tensor/shape.ml: boundary unsafe_reinitialize -- the session reset: it discards all state and clears the taint
@@ -51,13 +52,15 @@ tensor/tensor.ml: handouts.fwd_out (mutable field) -- accounted; kept by rewinds
 tensor/tensor.ml: handouts.bprop_out (mutable field) -- accounted; kept by rewinds: a record of code given to callers, which no rewind takes back
 tensor/tensor.ml: last_closure (ref) -- accounted; kept by rewinds: the last closure's checkpoint: a closure records it, and no rewind restores an older one
 tensor/tensor.ml: discarded_nodes (Hashtbl) -- accounted; kept by rewinds: a registry of what rewinds discarded: rewinds extend it, never restore it
+tensor/tensor.ml: discarded_id_ranges (ref) -- accounted; kept by rewinds: a registry of the id ranges id-neutral windows discarded: windows extend it, never restore it
+tensor/tensor.ml: id_neutral_depth (ref) -- exempt: the nesting of id-neutral windows, restored by their own finally
+tensor/tensor.ml: window_discarded_uids (ref) -- exempt: scratch of the current id-neutral window, emptied when it ends
 tensor/tensor.ml: default_value_prec (ref) -- exempt: user configuration read when a tensor is built, not inference state
 tensor/tensor.ml: default_grad_prec (ref) -- exempt: user configuration read when a tensor is built, not inference state
 tensor/tensor.ml: max_sublabel_length (ref) -- exempt: user configuration of label printing, not inference state
 tensor/tensor.ml: param_postprocess (ref) -- exempt: a user-installed hook applied to new parameters, not inference state
 tensor/tensor.ml: applications (unread state) -- exempt
 tensor/tensor.ml: reserved_next_id (unread state) -- exempt
-tensor/tensor.ml: id_neutral_depth (unread state) -- exempt
 tensor/tensor.ml: id_neutral_sabotaged (unread state) -- exempt
 tensor/tensor.ml: observers (unread state) -- exempt
 tensor/tensor.ml: generation (unread state) -- exempt
@@ -66,6 +69,7 @@ tensor/tensor.ml: boundary note_external_handout -- a closed-world act: records 
 tensor/tensor.ml: boundary record_checkpoint -- the closure's record: run at the commit of a successful finish_inference, and to re-anchor after a rewind or a session reset
 tensor/tensor.ml: boundary finally -- a scoped restore: puts back the roots saved at entry, on return and on a raise alike
 tensor/tensor.ml: boundary with_saved_random_seed -- a scoped restore: puts back the seed saved at entry, on return and on a raise alike
+tensor/tensor.ml: boundary end_id_neutral_window -- the end of an id-neutral window: it compacts what the window's rewinds discarded, which no rewind restores
 tensor/tensor.ml: boundary restore_checkpoint -- the rewind: it restores the checkpoint and clears the taint
 tensor/tensor.ml: boundary unsafe_reinitialize -- the session reset: it discards all state and clears the taint
 the scan tracks a noted ref, captured by capture_globals (row.ml's safe_to_guess): true

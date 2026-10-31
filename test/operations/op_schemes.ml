@@ -88,6 +88,25 @@ let%op outer () x =
 (* Random number generation: a trace a scheme cannot carry. *)
 let%op noisy () x = x + uniform ()
 
+(* A body that leaks the tensor it builds, when traced, to a reference: a stale handle. *)
+let leaked : Tensor.t option ref = ref None
+
+let%op leaky () x =
+  let y = x + 1.0 in
+  [%oc leaked := Some y];
+  y
+
+(* A body reading the committed dims of a tensor that is open when the closure is built: the trace
+   cannot run it (inference cannot close in a trace), and the failed read refuses the rewind. *)
+let%op reads_dims c () x =
+  ignore (Shape.to_dims c.Tensor.shape : int array);
+  x + c
+
+let%op reads_dims_plain c () x =
+  ignore (Shape.to_dims c.Tensor.shape : int array);
+  x + c
+[@@ocannl.no_scheme]
+
 let () =
   Verdict.case "the closure built at () traces once; each application checks first" (fun () ->
       Tensor.unsafe_reinitialize ();
@@ -204,6 +223,31 @@ let () =
       in
       p "control: the explicit trace of the same function still raises a shape error"
         (has_substring ~substring:"precision-dependent" msg));
+  Verdict.case "a trace's discarded nodes are kept as one id range" (fun () ->
+      Tensor.unsafe_reinitialize ();
+      let nodes0, ranges0 = Tensor.For_testing.discarded_registry_sizes () in
+      for _ = 1 to 20 do
+        ignore (layer () : Tensor.t -> Tensor.t)
+      done;
+      let nodes1, ranges1 = Tensor.For_testing.discarded_registry_sizes () in
+      p "twenty traces leave no node in the per-node registry" (nodes1 = nodes0);
+      p "and one id range each" (ranges1 - ranges0 = 20);
+      let f = leaky () in
+      let stale = Option.value_exn !leaked in
+      ignore (f (leaf "x" [ 2 ]) : Tensor.t);
+      p "a handle leaked from a trace is still refused, naming the trace"
+        (has_substring
+           ~substring:"discarded by the rewind after the trace of the shape scheme leaky"
+           (error_message (fun () -> TDSL.O.(stale + stale)))));
+  Verdict.case "a refused rewind does not degrade silently" (fun () ->
+      Tensor.unsafe_reinitialize ();
+      let msg = error_message (fun () -> reads_dims (leaf "c" [ 3 ]) ()) in
+      p "building the closure raises, naming the function and the opt-out"
+        (has_substring ~substring:"the trace of the shape scheme reads_dims was refused" msg
+        && has_substring ~substring:"[@@ocannl.no_scheme]" msg);
+      Tensor.unsafe_reinitialize ();
+      p "control (opted out): the same function builds and applies"
+        (Result.is_ok (outcome (fun () -> reads_dims_plain (leaf "c" [ 3 ]) () (leaf "x" [ 3 ])))));
   Verdict.case "a function without a () stage traces at its first application" (fun () ->
       Tensor.unsafe_reinitialize ();
       (* A schemed [layer] built in the same window witnesses that the log records. *)

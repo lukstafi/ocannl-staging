@@ -308,7 +308,33 @@ let () = Shape.set_on_closure record_checkpoint
 let discarded_nodes : (int, string) Hashtbl.t = Hashtbl.create (module Int)
 [@@mutation_serial.kept "a registry of what rewinds discarded: rewinds extend it, never restore it"]
 
-let discarded_by (tn : Tn.t) = Hashtbl.find discarded_nodes tn.uid
+(* Id-neutral windows (gh-ocannl-1751), see [Scheme.with_id_neutral]: a window that is always
+   rewound -- a shape-scheme trace, a definition check -- allocates its tensors' ids from a reserved
+   range above every session id. Every node such a window allocated is discarded when it ends, so
+   its nodes leave [discarded_nodes] then and the window's id range stands for them: a long session
+   tracing a scheme per closure keeps one entry per window, not one per node. Keyed by the range's
+   first id, ranges [[lo, hi)], disjoint. *)
+let reserved_id_base = 1 lsl 40
+
+let discarded_id_ranges : (int * string) Map.M(Int).t ref = ref (Map.empty (module Int))
+[@@mutation_serial.kept
+  "a registry of the id ranges id-neutral windows discarded: windows extend it, never restore it"]
+
+let id_neutral_depth = ref 0
+[@@mutation_serial.exempt "the nesting of id-neutral windows, restored by their own finally"]
+
+(* The uids of the reserved-range nodes rewinds discarded in the current id-neutral window. *)
+let window_discarded_uids : int list ref = ref []
+[@@mutation_serial.exempt "scratch of the current id-neutral window, emptied when it ends"]
+
+let discarded_by (tn : Tn.t) =
+  match Hashtbl.find discarded_nodes tn.uid with
+  | Some _ as provenance -> provenance
+  | None when tn.id >= reserved_id_base -> (
+      match Map.closest_key !discarded_id_ranges `Less_or_equal_to tn.id with
+      | Some (_, (hi, provenance)) when tn.id < hi -> Some provenance
+      | _ -> None)
+  | None -> None
 
 let with_unchanged_roots ~f =
   let fwd_roots = session_state.forward_roots in
@@ -1494,12 +1520,24 @@ let random_seeds () =
 
 let install_validity_check () =
   Tn.validity_check :=
-    if Hashtbl.is_empty discarded_nodes then None
+    if Hashtbl.is_empty discarded_nodes && Map.is_empty !discarded_id_ranges then None
     else
       Some
         (fun tn ->
           Option.iter (discarded_by tn) ~f:(fun provenance ->
               raise @@ Session_error (discarded_message tn provenance, None)))
+
+(* The end of an id-neutral window, whose every node a rewind discarded: those nodes leave the
+   per-node registry, and the window's id range [[first, last)] stands for them. *)
+let end_id_neutral_window ~first ~last ~label =
+  List.iter !window_discarded_uids ~f:(fun uid -> Hashtbl.remove discarded_nodes uid);
+  window_discarded_uids := [];
+  if last > first then
+    discarded_id_ranges := Map.set !discarded_id_ranges ~key:first ~data:(last, label);
+  install_validity_check ()
+[@@mutation_serial.boundary
+  "the end of an id-neutral window: it compacts what the window's rewinds discarded, which no \
+   rewind restores"]
 
 (* Restores the graph half of [ck] and the shape-inference half, discarding what the window
    allocated. The caller has validated [ck]. [omit] skips one restore category: negative controls
@@ -1518,7 +1556,9 @@ let restore_checkpoint ?omit ~provenance ck =
       | (tn : Tn.t) :: rest -> since (tn :: acc) rest
     in
     List.iter (since [] !open_nodes) ~f:(fun (tn : Tn.t) ->
-        Hashtbl.set discarded_nodes ~key:tn.uid ~data:provenance);
+        Hashtbl.set discarded_nodes ~key:tn.uid ~data:provenance;
+        if !id_neutral_depth > 0 && tn.id >= reserved_id_base then
+          window_discarded_uids := tn.uid :: !window_discarded_uids);
     install_validity_check ());
   if not (skip "roots") then (
     (* The checkpoint's roots, wholesale: a root a discarded construction embedded (via [Tensor.op]
@@ -1640,30 +1680,30 @@ module Scheme = struct
      and [Embed_self_id]-seeded random draws do not move. Both id invariants hold: a checkpoint's
      [id_mark] orders pre-existing shapes before later ones within either range, and [op]'s [id >=
      next_id] check catches a handle that outlived its window. *)
-  let reserved_id_base = 1 lsl 40
-
   let reserved_next_id = ref reserved_id_base
   [@@mutation_serial.exempt
     "a fresh-id counter of the id-neutral windows: never reused, so never restored"]
 
-  let id_neutral_depth = ref 0
-  [@@mutation_serial.exempt "the nesting of id-neutral windows, restored by their own finally"]
-
   let id_neutral_sabotaged = ref false
   [@@mutation_serial.exempt "a negative control's switch, set by tests only"]
 
-  let with_id_neutral f =
+  (* Every use rewinds all the window allocated: [label] is the provenance its stale handles
+     report. *)
+  let with_id_neutral ~label f =
     if !id_neutral_depth > 0 || !id_neutral_sabotaged then f ()
     else (
       assert (session_state.next_id < reserved_id_base);
       let saved = session_state.next_id in
-      session_state.next_id <- !reserved_next_id;
+      let first = !reserved_next_id in
+      session_state.next_id <- first;
       Int.incr id_neutral_depth;
       Exn.protect ~f ~finally:(fun () ->
           Int.decr id_neutral_depth;
-          reserved_next_id := max !reserved_next_id session_state.next_id;
+          let last = session_state.next_id in
+          reserved_next_id := max !reserved_next_id last;
           assert (!reserved_next_id < Int.max_value / 2);
-          session_state.next_id <- saved))
+          session_state.next_id <- saved;
+          end_id_neutral_window ~first ~last ~label))
 
   (* The trace proper, to run inside a rewound window. *)
   let trace_core ?sabotage ~label arity f =
@@ -1678,9 +1718,9 @@ module Scheme = struct
 
   let trace_impl ?sabotage ~label arity f =
     try
-      with_id_neutral (fun () ->
-          with_rewind ~label:[%string "the trace of the shape scheme %{label}"] (fun () ->
-              trace_core ?sabotage ~label arity f))
+      let label' = [%string "the trace of the shape scheme %{label}"] in
+      with_id_neutral ~label:label' (fun () ->
+          with_rewind ~label:label' (fun () -> trace_core ?sabotage ~label arity f))
     with Shape.Untraceable_scheme msg ->
       (* The explicit layer keeps its contract: every refusal is a shape error. *)
       let bt = Stdlib.Printexc.get_raw_backtrace () in
@@ -1751,11 +1791,22 @@ module Scheme = struct
     h.state <- Unschemed reason;
     emit (Unschemed (h.name, reason))
 
-  (* A rewind that must succeed for the fallback to be safe: if it fails, [exn] propagates. *)
-  let rewind_or_reraise ck exn bt =
+  (* A rewind that must succeed for the fallback to be safe. When it is refused -- the trace read a
+     pre-existing open shape's committed state (forcing its dims), and a lazy over that read may
+     hold the failure, which no rewind can reset -- the function cannot degrade silently: loud,
+     naming the function and the remedy. *)
+  let rewind_or_reraise h ck exn bt =
     match rewind ck with
     | () -> ()
-    | exception Session_error _ -> Stdlib.Printexc.raise_with_backtrace exn bt
+    | exception Session_error (why, _) ->
+        Stdlib.Printexc.raise_with_backtrace
+          (Row.Shape_error
+             ( [%string
+                 "%{Shape.exn_summary exn}; and the rewind of the trace of the shape scheme \
+                  %{h.name} was refused (%{why}), so the function cannot be left unschemed -- opt \
+                  it out of its scheme with [@@ocannl.no_scheme]"],
+               [] ))
+          bt
 
   let trace_handle h =
     if not (Shape.can_checkpoint ()) then
@@ -1763,8 +1814,9 @@ module Scheme = struct
          Left pending, to trace when a checkpoint is possible. *)
       ()
     else
-      with_id_neutral (fun () ->
-          let ck = checkpoint ~label:[%string "the trace of the shape scheme %{h.name}"] () in
+      let label = [%string "the trace of the shape scheme %{h.name}"] in
+      with_id_neutral ~label (fun () ->
+          let ck = checkpoint ~label () in
           match
             trace_core ~label:h.name h.arity (fun ts ->
                 h.body ts;
@@ -1782,13 +1834,13 @@ module Scheme = struct
               Stdlib.Printexc.raise_with_backtrace exn bt
           | exception (Shape.Untraceable_scheme msg as exn) ->
               let bt = Stdlib.Printexc.get_raw_backtrace () in
-              rewind_or_reraise ck exn bt;
+              rewind_or_reraise h ck exn bt;
               unscheme h msg
           | exception exn ->
               (* The body cannot run on tracers (it reads concrete dims, say): degrade only once the
                  session is verifiably back where it was. *)
               let bt = Stdlib.Printexc.get_raw_backtrace () in
-              rewind_or_reraise ck exn bt;
+              rewind_or_reraise h ck exn bt;
               unscheme h
                 [%string
                   "tracing the shape scheme %{h.name}: the function raised %{Shape.exn_summary exn}"])
@@ -1853,9 +1905,8 @@ module Scheme = struct
     let traced = ref [] in
     let on_event = function Traced l -> traced := l :: !traced | _ -> () in
     (try
-       with_id_neutral (fun () ->
-           with_rewind ~label:[%string "the check of the definition %{name}"] (fun () ->
-               observing ~on_event f))
+       let label = [%string "the check of the definition %{name}"] in
+       with_id_neutral ~label (fun () -> with_rewind ~label (fun () -> observing ~on_event f))
      with Row.Shape_error (msg, trace) ->
        let bt = Stdlib.Printexc.get_raw_backtrace () in
        Stdlib.Printexc.raise_with_backtrace
@@ -1877,6 +1928,8 @@ module For_testing = struct
 
   let set_op_shape_schemes v =
     Scheme.mode_override := Option.map v ~f:(fun b -> if b then Scheme.Check else Scheme.Off)
+
+  let discarded_registry_sizes () = (Hashtbl.length discarded_nodes, Map.length !discarded_id_ranges)
 
   let without_id_neutrality f =
     Scheme.id_neutral_sabotaged := true;

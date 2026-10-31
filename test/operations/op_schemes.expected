@@ -18,6 +18,11 @@ a returned function after its sub-layers is traced once they exist: true
 random number generation: unschemed, by the trace's refusal: true
 and the application ran unchecked: true
 control: the explicit trace of the same function still raises a shape error: true
+twenty traces leave no node in the per-node registry: true
+and one id range each: true
+a handle leaked from a trace is still refused, naming the trace: true
+building the closure raises, naming the function and the opt-out: true
+control (opted out): the same function builds and applies: true
 nothing is traced at the definition: true
 the first application traces, every application checks: true
 the second application does not trace again: true

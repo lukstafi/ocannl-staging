@@ -2257,6 +2257,7 @@ let mutated_since fp =
 
 let exn_summary = function
   | Row.Shape_error (msg, _) -> msg
+  | Untraceable_scheme msg -> msg
   | Utils.User_error msg -> msg
   | exn -> Exn.to_string exn
 
@@ -2268,9 +2269,20 @@ let with_taint_on_failure ~describe f =
     if mutated_since fp then taint_session ~provenance:(describe exn);
     Stdlib.Printexc.raise_with_backtrace exn bt
 
-(* Update-id ranges [(lo, hi]] discarded by rewinds, with the rewind's provenance. *)
-let discarded_updates : (int * int * string) list ref = ref []
+(* Update-id ranges [(lo, hi]] discarded by rewinds, with the rewind's provenance, keyed by [lo].
+   Checkpoints nest, so the ranges are nested or disjoint, and a rewind's [hi] is the newest update
+   id: a new range contains every range starting at or after its [lo], which it replaces -- the
+   newest range containing a step is the provenance reported. The ranges stay disjoint, and a step
+   is looked up by the one range starting below it (gh-ocannl-1751: automatic shape schemes rewind a
+   trace per closure, so a long session accumulates ranges). *)
+let discarded_updates : (int * string) Map.M(Int).t ref = ref (Map.empty (module Int))
 [@@mutation_serial.kept "a registry of what rewinds discarded: rewinds extend it, never restore it"]
+
+let add_discarded_updates ~lo ~hi provenance =
+  let kept, _, _ = Map.split !discarded_updates lo in
+  discarded_updates := Map.set kept ~key:lo ~data:(hi, provenance)
+[@@mutation_serial.boundary
+  "part of a rewind: it records the discarded update range, which no rewind restores"]
 
 (* Called after every successful closure; [Tensor] records its checkpoint here. *)
 let on_closure : (unit -> unit) ref = ref (fun () -> ())
@@ -2281,8 +2293,8 @@ let set_on_closure f = on_closure := f
 
 let check_step_live (step : update_step) =
   let (Update_id.Update_id n) = step.id in
-  List.iter !discarded_updates ~f:(fun (lo, hi, provenance) ->
-      if n > lo && n <= hi then
+  Option.iter (Map.closest_key !discarded_updates `Less_than n) ~f:(fun (_lo, (hi, provenance)) ->
+      if n <= hi then
         raise
         @@ Row.Shape_error
              ( [%string
@@ -2545,7 +2557,7 @@ module Checkpoint = struct
       List.iter (open_shapes ~instances:!active_instances !active_update_steps) ~f:(fun sh ->
           if not (in_frontier ck sh) then mark_discarded sh ~provenance);
       if !update_uid > ck.update_mark then
-        discarded_updates := (ck.update_mark, !update_uid, provenance) :: !discarded_updates;
+        add_discarded_updates ~lo:ck.update_mark ~hi:!update_uid provenance;
       (* The references the window bound or set that the checkpoint holds no snapshot of: made in
          the window (or, for the closure's checkpoint, every one touched since). *)
       List.iter !open_refs ~f:(fun uid ->
@@ -3291,7 +3303,7 @@ let unsafe_reinitialize () =
   tracing := [];
   construction_depth := 0;
   taint := None;
-  discarded_updates := [];
+  discarded_updates := Map.empty (module Int);
   open_refs := [];
   Hashtbl.clear discarded_refs;
   row_numbered_refs := [];
