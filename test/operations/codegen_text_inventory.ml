@@ -121,6 +121,16 @@ let excluded =
        backend emits and a codegen change does not re-run it" );
   ]
 
+(** Members allowed to read a kernel's statements as the text after its [Main logic] banner, each
+    for a reason that is about the reading rather than about the kernel. Checked to be still doing
+    it below: an exemption whose file stopped reading that way is hiding the next one that does. *)
+let after_marker_exempt =
+  [
+    ( "test/operations/cc_kernel_outline.ml",
+      "the outlining test's negative control: it reads after an outlined kernel's banner to show \
+       that reading holds none of the kernel's statements" );
+  ]
+
 let read path = Stdlib.In_channel.with_open_bin path Stdlib.In_channel.input_all
 
 module Dune = Test_utils.Dune_stanza_scan
@@ -168,6 +178,39 @@ let refuse_direct_reads ~fail sites =
               Test_utils.Generated -- init before the first compile, read or assert_emits after it \
               (gh-ocannl-1294)"
              site.Scan.site_path))
+
+(* gh-ocannl-1708: the reading gh-ocannl-1678 retired. Under outlining the text after a kernel's
+   banner holds only calls to its parts, so a positive claim over it goes red and a negative one
+   passes without checking anything -- and no regular run forces outlining, so a new reader of that
+   shape would pass every run until a kernel grew large enough to outline. *)
+let refuse_after_marker_reads ~fail ~exempt sites =
+  List.iter sites ~f:(fun site ->
+      if
+        site.Scan.after_marker
+        && not (List.Assoc.mem exempt site.Scan.site_path ~equal:String.equal)
+      then
+        fail
+          (Printf.sprintf
+             "%s reads a kernel's statements as the text after its Main logic banner (a \
+              substr_index on it), which under outlining holds only calls to the kernel's parts: a \
+              positive claim over it goes red and a negative one checks nothing. Read the \
+              statements through Test_utils.Generated.main_logic or main_logic_lines, which splice \
+              each part in at its call (gh-ocannl-1708)"
+             site.Scan.site_path))
+
+let stale_after_marker_exemptions ~exempt sites =
+  List.filter exempt ~f:(fun (path, _) ->
+      not
+        (List.exists sites ~f:(fun site ->
+             site.Scan.after_marker && String.equal site.Scan.site_path path)))
+
+let refuse_stale_after_marker_exemptions ~fail stale =
+  List.iter stale ~f:(fun (path, reason) ->
+      fail
+        (Printf.sprintf
+           "the after-marker exemption for %s (%s) names a file that no longer reads after the \
+            Main logic banner -- drop it"
+           path reason))
 
 let refusal_control ~wrapper =
   let source = "test/operations/codegen_text_inventory.ml" in
@@ -259,6 +302,60 @@ let refusal_control ~wrapper =
     (Option.to_list
        (Scan.classify_source ~emitters:[] ~path:"test/direct.ml" ~contents:direct_fixture));
   Verdict.p "a test reading build_files/ itself reaches the direct-read refusal" !direct_refused;
+  (* gh-ocannl-1708: the after-marker refusal, on the reader test_uniform_virtual_lane had before
+     gh-ocannl-1678 -- a substr_index on the banner, then a slice -- classified by the scan's own
+     reader, beside the same file with that reading exempted. *)
+  let after_marker_fixture =
+    "let has sub s =\n\
+    \  let body = match String.substr_index s ~pattern:\"Main logic\" with\n\
+    \    | Some i -> String.subo s ~pos:i\n\
+    \    | None -> s\n\
+    \  in\n\
+    \  String.is_substring body ~substring:sub\n\
+     let () = Verdict.p \"lane\" (has \"_uniform_lane(\" (Generated.read \"r\"))\n"
+  in
+  let after_marker_sites =
+    Option.to_list
+      (Scan.classify_source ~emitters:[] ~path:"test/after_marker.ml" ~contents:after_marker_fixture)
+  in
+  let after_refused = ref false in
+  let fail _message =
+    after_refused := true;
+    Test_utils.Refusal_control_manifest.observe_failure ~source
+      ~format:
+        "%s reads a kernel's statements as the text after its Main logic banner (a substr_index on \
+         it), which under outlining holds only calls to the kernel's parts: a positive claim over \
+         it goes red and a negative one checks nothing. Read the statements through \
+         Test_utils.Generated.main_logic or main_logic_lines, which splice each part in at its \
+         call (gh-ocannl-1708)"
+  in
+  refuse_after_marker_reads ~fail ~exempt:[] after_marker_sites;
+  let refused_unexempted = !after_refused in
+  after_refused := false;
+  refuse_after_marker_reads ~fail ~exempt:[ ("test/after_marker.ml", "fixture") ] after_marker_sites;
+  Verdict.p
+    "a test reading after the Main logic banner by hand reaches the after-marker refusal, unless \
+     exempted"
+    (refused_unexempted && not !after_refused);
+  let stale_refused = ref false in
+  let fail _message =
+    stale_refused := true;
+    Test_utils.Refusal_control_manifest.observe_failure ~source
+      ~format:
+        "the after-marker exemption for %s (%s) names a file that no longer reads after the Main \
+         logic banner -- drop it"
+  in
+  let stale =
+    stale_after_marker_exemptions
+      ~exempt:[ ("test/direct.ml", "fixture"); ("test/after_marker.ml", "fixture") ]
+      (Option.to_list
+         (Scan.classify_source ~emitters:[] ~path:"test/direct.ml" ~contents:direct_fixture)
+      @ after_marker_sites)
+  in
+  refuse_stale_after_marker_exemptions ~fail stale;
+  Verdict.p
+    "an after-marker exemption of a file reading no banner reaches the stale-exemption refusal"
+    (!stale_refused && List.equal String.equal (List.map stale ~f:fst) [ "test/direct.ml" ]);
   (* gh-ocannl-1533: a golden beside a dune file that diffs something else is a member nothing
      re-runs, through the same reader the census uses. *)
   let unplaced_refused = ref false in
@@ -452,6 +549,9 @@ let () =
   refuse_raised ~fail:Verdict.fail (List.rev !raised);
   List.iter (List.sort !rejected ~compare:String.compare) ~f:Verdict.fail;
   refuse_direct_reads ~fail:Verdict.fail sites;
+  refuse_after_marker_reads ~fail:Verdict.fail ~exempt:after_marker_exempt sites;
+  let stale_after_marker = stale_after_marker_exemptions ~exempt:after_marker_exempt sites in
+  refuse_stale_after_marker_exemptions ~fail:Verdict.fail stale_after_marker;
   let golden_paths = List.map goldens ~f:(fun g -> g.Scan.path) in
   let golden_routes =
     Map.of_alist_exn
@@ -533,6 +633,7 @@ let () =
     ~f:(fun s ->
       let flags =
         (if s.Scan.direct then [ "reads build_files/ directly" ] else [])
+        @ (if s.Scan.after_marker then [ "reads after the Main logic banner, exempted" ] else [])
         @ (if s.Scan.rendered then [ "renders generated text in memory" ] else [])
         @ (match routes_of site_routes s.Scan.site_path with
           | [] -> []
@@ -640,4 +741,13 @@ let () =
   Verdict.p_none
     "no test source reads build_files/ itself: generated code is read through Test_utils.Generated"
     sites ~f:(fun site -> site.Scan.direct);
+  Verdict.p_none
+    "no test source reads a kernel's statements after its Main logic banner unexempted: they are \
+     read through Test_utils.Generated.main_logic"
+    sites ~f:(fun site ->
+      site.Scan.after_marker
+      && not (List.Assoc.mem after_marker_exempt site.Scan.site_path ~equal:String.equal));
+  Verdict.p_empty "every after-marker exemption still names a file reading after the banner"
+    ~over:(List.map after_marker_exempt ~f:fst)
+    (List.map stale_after_marker ~f:fst);
   Test_utils.Refusal_control_manifest.print "codegen_text_inventory.ml"

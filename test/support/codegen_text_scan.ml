@@ -72,6 +72,14 @@
     ordinary untraced callback from an aggregate or effect the model deliberately leaves alone
     without re-reading the source.
 
+    A member that reads a kernel's statements as the text after its [Main logic] banner -- a
+    [String.substr_index] on the banner, the reading every structural test used before
+    gh-ocannl-1678 -- is tagged ({!site.after_marker}), and [codegen_text_inventory] refuses it
+    (gh-ocannl-1708): an outlined kernel's main logic only calls its parts, which come before it in
+    the file, so that reading sees none of its statements, and a negative claim over it passes
+    without checking anything. {!Test_utils.Generated.main_logic} is the reading that follows the
+    parts.
+
     A compiler-plan classifier in a test that also reads generated source is the one deliberately
     annotated exception, through the [ocannl.codegen_text.compiler_plan] attribute. Its text tests
     describe compiler flags, not emitted code, and are excluded only within that binding. A
@@ -1818,10 +1826,48 @@ type site = {
       (** Why some pinned fragment could not be named at its call site, sorted and deduplicated;
           empty when the itemisation is complete. *)
   direct : bool;  (** Reads [build_files/] without going through {!Test_utils.Generated}. *)
+  after_marker : bool;
+      (** Reads a kernel's statements as the text after its [Main logic] banner
+          ({!reads_after_marker}) rather than through {!Test_utils.Generated.main_logic}. *)
   rendered : bool;
       (** Renders generated text in memory, through an emitter or a dump printer, rather than
           reading an artifact. Such a test has no [build_files/] output to inspect. *)
 }
+
+(** The words of {!Ir.C_syntax.main_logic_marker}, the banner opening a kernel's statements, that a
+    literal spelling of it carries. Not the value itself: this library reads test sources and links
+    no compiler library, and a test may spell the banner shorter than the renderer does. *)
+let main_logic_banner = "Main logic"
+
+(** The searches that hand back a position in the haystack, from which a test slices. *)
+let position_searches = [ "substr_index"; "substr_index_exn"; "substr_index_all" ]
+
+(** Whether [e] searches a text for the [Main logic] banner, so as to read what follows it: a
+    {!position_searches} call whose [~pattern] is a literal carrying {!main_logic_banner} -- spelled
+    at the call site, or reached through a [let] in scope, or the literal part of a concatenation or
+    format -- or names the renderer's [main_logic_marker] value. A line-by-line test of the banner
+    ([String.is_substring line ~substring:"Main logic"], which [thread_private_gate] stops a
+    declarations section at) slices nothing and is not one. A pattern computed some other way is not
+    followed: the reading this tags is the one tests spelled, not every way to spell one. *)
+let reads_after_marker scope e =
+  let names_banner arg =
+    (match pin_of_expr scope arg with
+      | Literal text | Format text | Interpolated text ->
+          String.is_substring text ~substring:main_logic_banner
+      | Computed -> false)
+    ||
+    match longident_of arg with
+    | Some path -> path_ends path ~name:"main_logic_marker"
+    | None -> false
+  in
+  match e.pexp_desc with
+  | Pexp_apply (callee, args) -> (
+      match longident_of callee with
+      | Some path when List.exists position_searches ~f:(fun name -> path_ends path ~name) ->
+          List.exists args ~f:(fun (label, arg) ->
+              match label with Asttypes.Labelled "pattern" -> names_banner arg | _ -> false)
+      | _ -> false)
+  | _ -> false
 
 let render_pin = function
   | Literal text -> Some (Printf.sprintf "%S" text)
@@ -1882,12 +1928,14 @@ let classify_source ~emitters ~path ~contents =
   let aliases = emitter_aliases ~emitters structure in
   let reads_generated = ref false in
   let reads_direct = ref false in
+  let reads_after = ref false in
   let renders = ref false in
   let scan_reads =
     object
       inherit Ast_traverse.iter as super
 
       method! expression e =
+        if reads_after_marker scope e then reads_after := true;
         (if
            List.exists [ "read"; "assert_emits"; "assert_omits" ] ~f:(fun name ->
                calls scope e ~target:"Generated" ~name)
@@ -1901,7 +1949,9 @@ let classify_source ~emitters ~path ~contents =
     end
   in
   scan_reads#structure structure;
-  if not (!reads_generated || !reads_direct || !renders) then None
+  (* A banner search is a read of generated text by itself: the haystack is a kernel's source
+     whichever route brought it. *)
+  if not (!reads_generated || !reads_direct || !reads_after || !renders) then None
   else
     let seeds = buffer_destinations ~emitters ~aliases structure in
     let functions = Hashtbl.Poly.create () in
@@ -2193,5 +2243,6 @@ let classify_source ~emitters ~path ~contents =
         pins = List.dedup_and_sort !pins ~compare:String.compare;
         partial = List.dedup_and_sort !partial ~compare:Poly.compare;
         direct = !reads_direct;
+        after_marker = !reads_after;
         rendered = !renders;
       }

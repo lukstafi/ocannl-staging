@@ -161,13 +161,14 @@ let emitters =
 let render_site = function
   | None -> "none"
   | Some (s : Scan.site) ->
-      Printf.sprintf "%s%s%s%s"
+      Printf.sprintf "%s%s%s%s%s"
         (String.concat ~sep:" " s.Scan.pins)
         (match s.Scan.partial with
         | [] -> ""
         | boundaries ->
             " +partial(" ^ String.concat ~sep:", " (List.map boundaries ~f:Scan.boundary_tag) ^ ")")
         (if s.Scan.direct then " +direct" else "")
+        (if s.Scan.after_marker then " +after_marker" else "")
         (if s.Scan.rendered then " +rendered" else "")
 
 let source_cases =
@@ -252,7 +253,45 @@ let () =
 let () =
   let src = Generated.read "uvl_fwd" in
   p "lane" (has "_uniform_lane(" src)|ocaml},
-      {|"Main logic" "_uniform_lane("|} );
+      {|"Main logic" "_uniform_lane(" +after_marker|} );
+    (* gh-ocannl-1708: the after-marker reading, which [codegen_text_inventory] refuses -- the two
+       cases above are its old shape, and these its other spellings beside the readings that are not
+       it. *)
+    ( "a banner search through the renderer's own marker value reads after the marker",
+      {ocaml|let () =
+  let src = Generated.read "r" in
+  match String.substr_index src ~pattern:Ir.C_syntax.main_logic_marker with
+  | Some i -> p "loop" (String.is_substring (String.subo src ~pos:i) ~substring:"for (")
+  | None -> ()|ocaml},
+      {|"for (" +partial(computed) +after_marker|} );
+    ( "a banner bound by a let, searched with substr_index_exn, reads after the marker",
+      {ocaml|let () =
+  let marker = "/* Main logic. */" in
+  let src = Generated.read "r" in
+  let body = String.subo src ~pos:(String.substr_index_exn src ~pattern:marker) in
+  p "store" (not (String.is_substring body ~substring:"_vec("))|ocaml},
+      {|"/* Main logic. */" "_vec(" +after_marker|} );
+    ( "a banner search is a read of generated text by itself",
+      {ocaml|let statements s =
+  match String.substr_index s ~pattern:"/* Main logic. */" with
+  | Some i -> String.subo s ~pos:i
+  | None -> s|ocaml},
+      "+partial(callback) +after_marker" );
+    ( "a line-by-line test of the banner slices nothing, so it does not read after the marker",
+      {ocaml|let declared src =
+  List.take_while (String.split_lines src) ~f:(fun l ->
+      not (String.is_substring l ~substring:"Main logic"))
+let () = p "decls" (List.length (declared (Generated.read "r")) > 2)|ocaml},
+      "+partial(callback)" );
+    ( "the statements read through Generated.main_logic do not read after the marker",
+      {ocaml|let () =
+  p "lane" (String.is_substring (Generated.main_logic (Generated.read "r")) ~substring:"_lane(")|ocaml},
+      {|"_lane("|} );
+    ( "a search for another banner does not read after the marker",
+      {ocaml|let () =
+  let src = Generated.read "r" in
+  p "decls" (Option.is_some (String.substr_index src ~pattern:"Local declarations"))|ocaml},
+      {|"Local declarations"|} );
     ( "a predicate over the backend's NAME pins nothing, however it is spelled",
       {ocaml|let () =
   let _ = Generated.read "r" in
@@ -397,7 +436,7 @@ let () = p "barrier" (has_barrier (Generated.read "r"))|ocaml},
   in
   String.is_substring body ~substring:sub
 let () = p "lane" (has "_uniform_lane(" (Generated.read "r"))|ocaml},
-      {|"Main logic" "_uniform_lane("|} );
+      {|"Main logic" "_uniform_lane(" +after_marker|} );
     ( "a fragment named through a binding is still that fragment",
       {ocaml|let () =
   let arrow = " := " in

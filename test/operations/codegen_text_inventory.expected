@@ -107,7 +107,7 @@ test/operations/online_softmax_block_mma.expected [derived] beside test/operatio
 test/operations/reduction_forms.expected [derived] beside test/operations/reduction_forms.ml; re-run by @test/operations/runtest-reduction_forms
 test/operations/scan_loop.expected [ll] markers ll-assign; re-run by @test/operations/runtest-scan_loop
 test/operations/test_log_stmt_format.c.expected [c] extension .c.expected; markers c-decl-banner c-logic-banner c-prec-cast c-restrict ll-assign routine-log; re-run by @test/operations/runtest-test_log_stmt_format
-test/operations/test_uniform_virtual_lane.expected [derived] beside test/operations/test_uniform_virtual_lane.ml; re-run by @test/operations/runtest-test_uniform_virtual_lane
+test/operations/test_uniform_virtual_lane.expected [derived] beside test/operations/test_uniform_virtual_lane.ml; re-run by @test/operations/runtest-test_uniform_virtual_lane, @test/operations/runtest-test_uniform_virtual_lane-outlined
 test/operations/test_where_precision-unoptimized.ll.expected [ll] extension .ll.expected; markers ll-assign ll-end; re-run by @test/operations/runtest-test_where_precision-unoptimized
 test/operations/test_where_precision.c.expected [c] extension .c.expected; markers c-decl-banner c-logic-banner c-prec-cast c-restrict ll-end; re-run by @test/operations/runtest-test_where_precision-extension when %{read:../config/ocannl_backend_extension.txt} is c
 test/operations/test_where_precision.cu.expected [cuda] extension .cu.expected; markers c-decl-banner c-logic-banner c-prec-cast cuda-kernel ll-end; re-run by @test/operations/runtest-test_where_precision-extension when %{read:../config/ocannl_backend_extension.txt} is cu
@@ -169,9 +169,9 @@ test/operations/canonical_render.ml [renders generated text in memory; run by @t
     "}set <cr_d>[?,]"
     "}set <cr_d>[b0,]"
     "}set <cr_d>[s0,]"
-test/operations/cc_kernel_outline.ml [run by @test/operations/runtest-cc_kernel_outline; also pins text this scan cannot name: computed fragment]
+test/operations/cc_kernel_outline.ml [reads after the Main logic banner, exempted; run by @test/operations/runtest-cc_kernel_outline; also pins text this scan cannot name: computed fragment]
     "ARRAYJIT_KERNEL_PART void "
-test/operations/cc_march_census.ml [run by @test/operations/runtest-cc_march_census-emission, @test/operations/runtest-cc_march_census-w16_native_foreign, @test/operations/runtest-cc_march_census-w16_native_host, @test/operations/runtest-cc_march_census-w16_wide_foreign, @test/operations/runtest-cc_march_census-w16_wide_host, @test/operations/runtest-cc_march_census-w32_native_foreign, @test/operations/runtest-cc_march_census-w32_native_host, @test/operations/runtest-cc_march_census-w32_wide_foreign, @test/operations/runtest-cc_march_census-w32_wide_host, @test/operations/runtest-cc_march_census-w64_native_foreign, @test/operations/runtest-cc_march_census-w64_native_host, @test/operations/runtest-cc_march_census-w64_wide_foreign, @test/operations/runtest-cc_march_census-w64_wide_host; also pins text this scan cannot name: untraced callback, forwarded parameter, opaque aggregate component, unvalidated haystack]
+test/operations/cc_march_census.ml [run by @test/operations/runtest-cc_march_census-emission, @test/operations/runtest-cc_march_census-emission-outlined, @test/operations/runtest-cc_march_census-w16_native_foreign, @test/operations/runtest-cc_march_census-w16_native_host, @test/operations/runtest-cc_march_census-w16_wide_foreign, @test/operations/runtest-cc_march_census-w16_wide_host, @test/operations/runtest-cc_march_census-w32_native_foreign, @test/operations/runtest-cc_march_census-w32_native_host, @test/operations/runtest-cc_march_census-w32_wide_foreign, @test/operations/runtest-cc_march_census-w32_wide_host, @test/operations/runtest-cc_march_census-w64_native_foreign, @test/operations/runtest-cc_march_census-w64_native_host, @test/operations/runtest-cc_march_census-w64_wide_foreign, @test/operations/runtest-cc_march_census-w64_wide_host; also pins text this scan cannot name: untraced callback, forwarded parameter, opaque aggregate component, unvalidated haystack]
 test/operations/concat_loop_symbols.ml [renders generated text in memory; run by @test/operations/runtest-concat_loop_symbols]
 test/operations/cost_model_floor.ml [renders generated text in memory; run by @test/operations/runtest-cost_model_floor]
 test/operations/cpu_fork_join_chains.ml [run by @test/operations/runtest-cpu_fork_join_chains; also pins text this scan cannot name: opaque aggregate component, rebound parameter]
@@ -551,7 +551,7 @@ test/operations/test_one_hot_embedding_lookup.ml [run by @test/operations/runtes
     "<= 3"
     "?"
     "double *restrict ids_wide"
-test/operations/test_uniform_virtual_lane.ml [run by @test/operations/runtest-test_uniform_virtual_lane; also pins text this scan cannot name: opaque aggregate component]
+test/operations/test_uniform_virtual_lane.ml [run by @test/operations/runtest-test_uniform_virtual_lane, @test/operations/runtest-test_uniform_virtual_lane-outlined; also pins text this scan cannot name: opaque aggregate component]
     "_uniform_lane("
     "_uniform_vec("
 test/operations/thread_private_gate.ml [run by @test/operations/runtest-thread_private_gate; also pins text this scan cannot name: untraced callback, unvalidated haystack]
@@ -616,6 +616,7 @@ so, and the goldens' families say which backends a change has to be run on.
 @test/operations/runtest-canonical_render
 @test/operations/runtest-cc_kernel_outline
 @test/operations/runtest-cc_march_census-emission
+@test/operations/runtest-cc_march_census-emission-outlined
 @test/operations/runtest-cc_march_census-w16_native_foreign
 @test/operations/runtest-cc_march_census-w16_native_host
 @test/operations/runtest-cc_march_census-w16_wide_foreign
@@ -689,6 +690,7 @@ so, and the goldens' families say which backends a change has to be run on.
 @test/operations/runtest-test_one_hot_embedding_backward
 @test/operations/runtest-test_one_hot_embedding_lookup
 @test/operations/runtest-test_uniform_virtual_lane
+@test/operations/runtest-test_uniform_virtual_lane-outlined
 @test/operations/runtest-test_where_precision-extension
 @test/operations/runtest-test_where_precision-unoptimized
 @test/operations/runtest-thread_private_gate
@@ -739,7 +741,7 @@ test/operations/branchless_select.ml [through Ll_test.optimize_and_execute; run 
 test/operations/canonical_render.ml [staged callback; run by @test/operations/runtest-canonical_render]
 test/operations/capture_pass_side_effects.ml [through Ll_test.execute; through Ll_test.run; run by @test/operations/runtest-capture_pass_side_effects]
 test/operations/cc_kernel_outline.ml [through Ll_test.execute; run by @test/operations/runtest-cc_kernel_outline]
-test/operations/cc_march_census.ml [through Ll_test.link; run by @test/operations/runtest-cc_march_census-emission, @test/operations/runtest-cc_march_census-w16_native_foreign, @test/operations/runtest-cc_march_census-w16_native_host, @test/operations/runtest-cc_march_census-w16_wide_foreign, @test/operations/runtest-cc_march_census-w16_wide_host, @test/operations/runtest-cc_march_census-w32_native_foreign, @test/operations/runtest-cc_march_census-w32_native_host, @test/operations/runtest-cc_march_census-w32_wide_foreign, @test/operations/runtest-cc_march_census-w32_wide_host, @test/operations/runtest-cc_march_census-w64_native_foreign, @test/operations/runtest-cc_march_census-w64_native_host, @test/operations/runtest-cc_march_census-w64_wide_foreign, @test/operations/runtest-cc_march_census-w64_wide_host]
+test/operations/cc_march_census.ml [through Ll_test.link; run by @test/operations/runtest-cc_march_census-emission, @test/operations/runtest-cc_march_census-emission-outlined, @test/operations/runtest-cc_march_census-w16_native_foreign, @test/operations/runtest-cc_march_census-w16_native_host, @test/operations/runtest-cc_march_census-w16_wide_foreign, @test/operations/runtest-cc_march_census-w16_wide_host, @test/operations/runtest-cc_march_census-w32_native_foreign, @test/operations/runtest-cc_march_census-w32_native_host, @test/operations/runtest-cc_march_census-w32_wide_foreign, @test/operations/runtest-cc_march_census-w32_wide_host, @test/operations/runtest-cc_march_census-w64_native_foreign, @test/operations/runtest-cc_march_census-w64_native_host, @test/operations/runtest-cc_march_census-w64_wide_foreign, @test/operations/runtest-cc_march_census-w64_wide_host]
 test/operations/codegen_fma_precision.ml [through Ll_test.execute; through Ll_test.link; run by @test/operations/runtest-codegen_fma_precision]
 test/operations/compile_failure_declines.ml [staged callback; prelowered compile; run by @test/operations/runtest-compile_failure_declines]
 test/operations/context_handle_refusals.ml [through Ll_test.link; run by @test/operations/runtest-context_handle_refusals]
@@ -827,6 +829,7 @@ test/operations/zero_run_reorder.ml [prelowered compile; run by @test/operations
 @test/operations/runtest-capture_pass_side_effects
 @test/operations/runtest-cc_kernel_outline
 @test/operations/runtest-cc_march_census-emission
+@test/operations/runtest-cc_march_census-emission-outlined
 @test/operations/runtest-cc_march_census-w16_native_foreign
 @test/operations/runtest-cc_march_census-w16_native_host
 @test/operations/runtest-cc_march_census-w16_wide_foreign
@@ -930,6 +933,8 @@ every module the scanned library interfaces declare was read: true
 every scanned library declares modules: true
 no source hides a route to generated text behind an open: true
 no test source reads build_files/ itself: generated code is read through Test_utils.Generated: true
+no test source reads a kernel's statements after its Main logic banner unexempted: they are read through Test_utils.Generated.main_logic: true
+every after-marker exemption still names a file reading after the banner: true
 
 Synthetic controls: scanner refusal diagnostics exercised by this control golden:
   [scanner-refusal:a59159ac0fd0f431da9519f8016e6762] every scanned root
@@ -943,4 +948,6 @@ Synthetic controls: scanner refusal diagnostics exercised by this control golden
   [scanner-refusal:327f5dea331c9591f8d59a6da296202d] scanned library declares
   [scanner-refusal:80b2a504ebea9c64f6fcc3c5da12164e] generated text behind
   [scanner-refusal:7b848f96a84cc15bb6e1027465d08502] Test_utils.Generated
+  [scanner-refusal:968edb53fac5a4cfadb338c2a0873278] Test_utils.Generated.main_logic
+  [scanner-refusal:65ac789025a090533ae12a66e44fab25] every after-marker exemption
 End of synthetic controls.

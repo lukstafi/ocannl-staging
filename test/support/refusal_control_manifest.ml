@@ -226,11 +226,15 @@ let raw_entries =
         "[scanner-refusal:3f0b314f29005911be716581fa1a4f10] the scan raised";
         "[scanner-refusal:cf8b947a00d5153ebc294985137e0a8a] per-test alias gh-ocannl-1533";
         "[scanner-refusal:564de56163a842792f2175c0c12d75d5] Utils.build_files_dir";
+        "[scanner-refusal:d4306fe9c227b85db951de0b64f85ad8] Test_utils.Generated.main_logic";
+        "[scanner-refusal:6eb14f027a4be6648748900004341e36] the after-marker exemption";
         "[scanner-refusal:b1a8055bff15f499f2f143975afca3d7] reaches the stale-exclusion";
         "[scanner-refusal:2c67621c20b4be85e0176da0370f83cb] reaches the scanner-defect";
         "[scanner-refusal:0e0975906df73fda3897bc10ee9904c0] refuses it exiting";
         "[scanner-refusal:88b9820837c81d0eb1237428429e025c] members' interfaces refuses";
         "[scanner-refusal:c79e4912bfeafc46c28c350ff68cf352] build_files/";
+        "[scanner-refusal:b3c3d570106d81346b28ef7e49f6c458] after-marker refusal unless";
+        "[scanner-refusal:82377b15fd7aac93b28c1deb390f5f55] reaches the stale-exemption";
         "[scanner-refusal:9009ac3e9d8c7293fc8dcced2a1d359c] reaches the unplaced-member";
         "[scanner-refusal:123bedafe19167d3536ddb2ca1115d21] cannot say whether";
         "[scanner-refusal:532d3ed986dd6559fec87d780769ee1f] declares module";
@@ -245,6 +249,8 @@ let raw_entries =
         "[scanner-refusal:327f5dea331c9591f8d59a6da296202d] scanned library declares";
         "[scanner-refusal:80b2a504ebea9c64f6fcc3c5da12164e] generated text behind";
         "[scanner-refusal:7b848f96a84cc15bb6e1027465d08502] Test_utils.Generated";
+        "[scanner-refusal:968edb53fac5a4cfadb338c2a0873278] Test_utils.Generated.main_logic";
+        "[scanner-refusal:65ac789025a090533ae12a66e44fab25] every after-marker exemption";
       ] );
     ( "config_dep_completeness.ml",
       [
