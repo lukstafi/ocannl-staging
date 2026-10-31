@@ -3006,11 +3006,12 @@
   (diff "log_index_width_wide.c.expected" "log_index_width_wide.c.actual")))
 
 (test
- ; ocannl-backend: none -- links no backend: it reads tnode names through Ir.Tnode.get_debug_name as text.
- (name test_debug_name_collapse)
+ ; ocannl-backend: none -- links no backend: it names hand-built tensor nodes through Ir.Tnode, never compiling one.
+ ; gh-ocannl-1686: before minting, a node's debug name is its label_name.
+ (name debug_name_before_minting)
  (package neural_nets_lib)
  (deps ocannl_config)
- (modules test_debug_name_collapse)
+ (modules debug_name_before_minting)
  (libraries base arrayjit.ir stdio arrayjit.verdict))
 
 (test

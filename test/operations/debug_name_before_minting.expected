@@ -1,0 +1,18 @@
+[attention] -> attention
+[attention; attention] -> attention_attention
+[kernel; downsample; downsample] -> kernel_downsample_downsample
+[encoder; attention; attention; output] -> encoder_attention_attention_output
+[foo; -; foo; foo] -> foo_foo_foo
+[*.; w1] -> w1
+[2; scale] -> scale_2
+[2] -> _2
+[] -> n7009
+[grad; w] -> w.grad
+[grad; grad; grad] -> grad_grad.grad
+[grad] -> n7011.grad
+before minting, the debug name is label_name: true
+the label-only form (Tensor's shape name) gives the same name: true
+the heuristic style mints label_name for a label the routine does not repeat: true
+minting such a node leaves its debug name where it was: true
+repeated in its routine: n7013_kernel_downsample_downsample
+control: a label the routine repeats mints a name that moves the debug name: true
