@@ -26,3 +26,12 @@ val other : string
 val label : string
 (** A [label] bound before the snippet: what the use preceding the snippet's own literal binding ("a
     later literal does not resolve an earlier use") reads in a program a compiler builds. *)
+
+(* The project-syntax arm is checked as a top-level item of a test that reports claims, under its
+   stanza's preprocessors and libraries. It is a parse shape: it pins the scanner's reading of a
+   claim inside an extension's payload, whose name no preprocessor expands -- any [[%name ...]]
+   reads the same. *)
+[@@@owning_module "test/gpt2/gpt2_dry_run.ml"]
+
+[@@@known_rejection
+"a claim inside an extension payload is reached", "Uninterpreted extension 'probe'"]

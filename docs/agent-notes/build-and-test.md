@@ -747,10 +747,22 @@ in the `tools/*.sh` scripts (gh-ocannl-1111) and in the string literals of the O
   which pinned a mis-modelled `module X :=` (a local substitution, not a removal); the script's
   first run found two in `config_scan_lexing`: a partial application destructured as a pair
   (fixed), and an optional argument applied to a bare literal (`?l:"k"`, which never types;
-  listed). A snippet in project syntax (`let%op`, `[%cd …]`, a `[@@deriving …]` whose generated
-  names it references) is REFUSED by name: it needs the owning stanza's preprocessors,
-  libraries and DSL scope, which bare `ocamlc` lacks, so check it as a module of a scratch stanza
-  copied from the owning one (`dune build @check`).
+  listed). A snippet in project syntax (`let%op`, `[%cd …]`, `[@@deriving …]`, any extension
+  node) needs its stanza's preprocessors, libraries and DSL scope, which bare `ocamlc` lacks: the
+  stub names a module of the repository whose stanza such code lives in, and the prelude its arms
+  start with, as `[@@@owning_module ("lib/nn_blocks.ml", "open! Base\nopen …DSL_modules")]`.
+  The engine builds that module's directory and compiles each such arm with the flags dune
+  itself reports for the module (`dune ocaml-merlin`: the `-ppx` driver, the `-open`s, every
+  library's `-I`), so the context is the stanza's reading, never a restated copy of its fields
+  (gh-ocannl-1587). Doing it found the `let%op` arms of `optional_arg_scan_cases` in a spelling
+  no compiler builds: an `%op` function with no `()` parameter makes every parameter a label
+  source (`stride.Tensor.value`), and a `"stride*o+k"` spec reads `use_padding`, so the arms took
+  a `()` and the stub a `use_padding`. An extension no preprocessor expands (`[%%ext …]`) is then
+  an ordinary rejection, listed where the arm is that parse shape on purpose. A snippet passed as
+  `~interface:` is compiled as a signature. The context needs the project's libraries, so the harness's
+  leg 1 runs `--no-project-context` (project arms REFUSED) and the `#project` legs check them:
+  CI's toolchain job, which lacks those libraries, expects their skips
+  (`tools/harness-skips-ci-toolchain.txt`), and the build matrix runs them strict.
 - A scan that MODELS library or language semantics (which calls are wrappers, which arguments of a
   library function carry a collection, which bindings a gate reads) states its CLOSED LIST OF
   RECOGNISED FORMS in its reader's header and in the PR body FROM THE FIRST REVIEW ROUND, not once

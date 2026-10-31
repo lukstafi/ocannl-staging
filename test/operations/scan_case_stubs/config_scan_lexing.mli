@@ -79,3 +79,14 @@ val resolve : arg_name:string -> bootstrap:string -> string
    application of an expression"). *)
 [@@@known_rejection
 "optional application with a literal is a read", "but an expression was expected of type"]
+
+(* A parse shape: the arm pins the scanner's generic reading of a structure-level extension, whose
+   name no preprocessor expands -- any [[%%name ...]] reads the same. *)
+[@@@known_rejection
+"a binding inside a structure-level extension is not bare", "Uninterpreted extension 'ext'"]
+
+(* The project-syntax arms ([let%debug_sexp]) are checked as top-level items of [tensor/tensor.ml],
+   a module the configuration scans read, under its stanza's preprocessors and libraries; the
+   prelude is that module's own binding of the debug runtime its [%debug_*] extensions call. *)
+[@@@owning_module
+"tensor/tensor.ml", "let _get_local_debug_runtime = Utils.get_local_debug_runtime"]
