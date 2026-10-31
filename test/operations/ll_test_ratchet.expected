@@ -28,6 +28,7 @@ test/operations/gpu_lane_reduction.ml -- records=0 traversals=3
 test/operations/gpu_serial_lanes.ml -- records=2 traversals=5
 test/operations/integer_power_domain.ml -- records=1 traversals=0
 test/operations/launch_dim_gate.ml -- records=2 traversals=0
+test/operations/ll_test_substitute.ml -- records=1 traversals=0
 test/operations/masked_persistent_fragment.ml -- records=0 traversals=1
 test/operations/narrow_storage_compute.ml -- records=0 traversals=1
 test/operations/online_softmax.ml -- records=8 traversals=4
@@ -40,7 +41,7 @@ test/operations/prelowered_seam.ml -- records=7 traversals=0
 test/operations/reduction_accumulator_residency.ml -- records=4 traversals=1
 test/operations/reduction_forms.ml -- records=19 traversals=2
 test/operations/scan_loop.ml -- records=3 traversals=0
-test/operations/schedule_epilogue_fusion.ml -- records=7 traversals=4
+test/operations/schedule_epilogue_fusion.ml -- records=4 traversals=3
 test/operations/schedule_partition.ml -- records=6 traversals=0
 test/operations/schedule_pipelined_matmul.ml -- records=3 traversals=7
 test/operations/scope_over_materialized.ml -- records=3 traversals=0
@@ -53,7 +54,7 @@ test/operations/vec_signed_zero.ml -- records=0 traversals=1
 test/operations/virtual_chain_fanin.ml -- records=9 traversals=0
 test/operations/virtual_shared_loop.ml -- records=1 traversals=0
 test/operations/winograd_conv.ml -- records=0 traversals=2
-test/support/ll_test.ml -- records=0 traversals=3
+test/support/ll_test.ml -- records=10 traversals=5
 test/operations/affine_lowering.ml -- records<=0 traversals<=3: existing migration debt; adopt ll_test when touched
 test/operations/buffer_aliasing.ml -- records<=1 traversals<=0: links ll_test for operand helpers only; still hand-builds Low_level
 test/operations/cpu_simd_reduction.ml -- records<=5 traversals<=1: links ll_test for operand helpers only; still hand-builds Low_level

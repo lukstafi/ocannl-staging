@@ -262,9 +262,10 @@ let () =
          [ o ])
        ~name:"osbm_cap_capture" ~on:true ~block ~seq ~d_k ()
       : run);
-  let synthetic_emits limits =
+  let captured = Option.value_exn ~here:[%here] !captured in
+  let synthetic_emits ?(program = captured) limits =
     let transform, emitted = pipeline ~gpu:true ~limits () in
-    ignore (transform (Option.value_exn ~here:[%here] !captured) : LL.optimized list);
+    ignore (transform program : LL.optimized list);
     !emitted
   in
   let synthetic = { BI.no_hardware_limits with mma = Some Ir.Metal_mma.capability } in
@@ -280,7 +281,7 @@ let () =
      precision and shape -- every field the former namespace-plus-label rule read -- carries
      none. *)
   let written = ref [] in
-  Ll_test.walk (Option.value_exn ~here:[%here] !captured).LL.llc ~on_set:(fun tn ->
+  Ll_test.walk captured.LL.llc ~on_set:(fun tn ->
       if not (List.mem !written tn ~equal:Ir.Tnode.equal) then written := tn :: !written);
   let tiles =
     List.filter_map !written ~f:(fun tn ->
@@ -290,17 +291,34 @@ let () =
     (match List.map tiles ~f:fst with
     | [ `Scores; `Numerator ] | [ `Numerator; `Scores ] -> true
     | _ -> false);
+  let forged =
+    List.mapi tiles ~f:(fun n (role, tile) ->
+        (role, tile, Ll_test.look_alike ~id:(1722990 + n) tile))
+  in
   p_none "structural: a node forged with a tile's namespace, label, precision and shape has no role"
-    tiles ~f:(fun (_, tile) ->
-      let forged =
-        Ir.Tnode.create ~namespace:tile.Ir.Tnode.namespace
-          (Ir.Tnode.Specified (Lazy.force tile.Ir.Tnode.storage_prec))
-          ~id:1722999 ~label:tile.Ir.Tnode.label
-          ~unpadded_dims:(lazy (Lazy.force tile.Ir.Tnode.dims))
-          ~padding:(lazy None)
-          ()
-      in
-      Option.is_some (Online_softmax.fold_tile_role forged))
+    forged ~f:(fun (_, _, look_alike) -> Option.is_some (Online_softmax.fold_tile_role look_alike));
+  (* The same forgery END TO END (post-wave task post-1-task-13): the look-alike substituted for the
+     tile everywhere in the captured lowering -- its zeroing, the scan's writes and reads -- leaves
+     a program every public field of which still names a fold tile, and the GPU preset at the limits
+     that emit [Fold_mma] above must no longer find the fold there ([Schedule.find_fold_site] reads
+     the tile roles). A namespace-plus-label recognizer finds it and emits. The control:
+     substituting the tile back restores the captured program exactly, so the forged program differs
+     from the one that emits by the node's identity alone. *)
+  List.iter forged ~f:(fun (role, tile, look_alike) ->
+      let which = match role with `Scores -> "score" | `Numerator -> "numerator" in
+      let program = Ll_test.substitute_optimized ~from:tile ~to_:look_alike captured in
+      p
+        (Printf.sprintf
+           "structural: the control: substituting the %s tile back restores the captured program"
+           which)
+        (Ll_test.count_set program look_alike > 0
+        && LL.equal (Ll_test.substitute ~from:look_alike ~to_:tile program.LL.llc) captured.LL.llc);
+      p
+        (Printf.sprintf
+           "structural: with a look-alike substituted for the %s tile the GPU preset emits no \
+            Fold_mma"
+           which)
+        (not (synthetic_emits ~program synthetic)))
 
 (* --- Leg 3: the training step (the fold forward under the fused backward, treatment F). --- *)
 
