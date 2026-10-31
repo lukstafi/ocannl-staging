@@ -1292,6 +1292,19 @@ files.
   through the swizzle map. Eligibility remains per operand and orientation. The census
   distinguishes `Mma_intrinsics_ldmatrix` from `Mma_intrinsics` using the actual load choice,
   so "tensorized" and "fed at rate" are separable in a sweep.
+- "Timed" is not "parallel" on a pool-backed CPU backend either (gh-ocannl-1702): a `Grid` loop
+  the renderer keeps serial (the per-chunk privatization cap `cc_grid_private_bytes_cap`, the launch
+  floor `cc_grid_min_updates`, a sharing rule) computes the same values and is timed under the
+  schedule's Grid placement. `Autotune.report.best_grid` is the crowned candidate's
+  `Context.routine.grid`, and `grid_serial_timed` lists every ranked candidate whose schedule asks
+  for a `Grid` loop (`Autotune.schedule_asks_grid`, read off the saved schedule) while its census
+  records a serial one (`Autotune.grid_rendered_serially`); each also gets a `NOTE grid-serial`
+  line in `autotune_log`. Keyed on the schedule because the label under-promises: the whole-triple
+  `W_sketch[mma-cpu 16x0x0]` carries no ` grid` token yet Grid-splits its row loop, and at 64^3 the
+  launch floor keeps that loop serial. The seeding pre-filter weighs only the packed tiles it knows
+  against the cap; the contracted `bm x bn` accumulator fragment of a grid-outermost shape is weighed
+  only at render, which is how `test/operations/autotune_grid_record` gets a timed hoisted-grid seed
+  rendered serially for the cap.
 - **A test decides how a `Tile_mma` rendered from the census, never the source** (gh-ocannl-1316).
   The lane-0 fallback's `if (lane == 0)` guard also wraps the C backends' register tiling, so
   `"== 0)"` never told the two apart; "no intrinsic spelling" says nothing about a statement that
