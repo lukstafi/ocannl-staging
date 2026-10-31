@@ -5193,6 +5193,9 @@
 ; sharder can deal them apart. The emission piece holds the rules below to that derived list.
 
 (executable
+ ; generated-lock: none -- each piece empties a kernel root of its own, and each emit child
+ ; chdirs into its own directory under it before Generated.init; one lock would serialize the
+ ; pieces again, which is what splitting them undid (gh-ocannl-1502).
  (name cc_march_census)
  (modules cc_march_census)
  (libraries base ocannl stdio unix arrayjit.verdict ll_test test_utils)
@@ -6522,6 +6525,9 @@
   (alias runtest-env_spelling_gate)
   ocannl_config
   (env_var OCANNL_BACKEND))
+ ; Both runs of the executable: the plain one empties build_files/fixed_name_temporaries/ through
+ ; Generated.init, which a concurrent sibling run would share (gh-ocannl-1749).
+ (locks fixed_name_temporaries)
  (action
   (with-stdout-to
    %{target}
@@ -6561,6 +6567,8 @@
   (alias runtest-env_spelling_gate)
   ocannl_config
   (env_var OCANNL_BACKEND))
+ ; The plain run's lock (gh-ocannl-1749).
+ (locks fixed_name_temporaries)
  (action
   (with-stdout-to
    %{target}
