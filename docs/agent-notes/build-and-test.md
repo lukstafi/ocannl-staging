@@ -602,8 +602,8 @@ in the `tools/*.sh` scripts (gh-ocannl-1111) and in the string literals of the O
   the drift pushes — gh-ocannl-689's marker vocabulary was closed deliberately, so a stale copy
   rejected the CORRECT marker for a newly added backend and the author's cheapest remedy was `none`,
   a lie the grammar accepts. Prefer DERIVING over pinning where the derivation is free: 29 test
-  files copied `Ir.Schedule.backend_is_gpu`'s substring test instead of calling it, and the fix was
-  to call it. Where the list must stay put, four properties make the pin real. Assert it from
+  files copied the backend-name substring test instead of calling the shared predicate, and the fix
+  was to call it (the predicate itself became the backend's stated facts, gh-ocannl-1723). Where the list must stay put, four properties make the pin real. Assert it from
   wherever the link cost is ALREADY paid, so no new dependency follows the check around —
   `marker_backend_vocabulary` is a whole executable existing to be the one place that links the
   backend closure. Compare as SORTED LISTS of identities, never as counts or as sets, so a duplicate

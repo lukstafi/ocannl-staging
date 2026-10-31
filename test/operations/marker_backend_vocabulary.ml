@@ -20,7 +20,8 @@
 
    It has since become the place for every relationship that needs the closure, for the same reason:
    the second one below relates the backends to the capability facts their modules state, the third
-   to what the configuration reader writes for each of them. *)
+   to what the configuration reader writes for each of them, and the fourth holds the compiler's
+   sources to asking those facts rather than a backend's name. *)
 
 open Base
 module Backends = Context.Backends
@@ -118,3 +119,187 @@ let () =
      is not passing on a function that answers everything. *)
   Verdict.p "a name that is no backend has no extension"
     (Option.is_none (Config_reads.code_extension "vulkan"))
+
+(* The fourth relationship, gh-ocannl-1723's ratchet: no compiler decision tests a backend NAME.
+   Every string constant in the compiler's sources -- [arrayjit/lib], [lib], [tensor], in an
+   expression or a pattern -- that spells a name [Backends.get_backend] accepts sits in an exemption
+   below that counts it and says why it is not a decision. The vocabulary is
+   [Backends.accepted_names], read, not restated, so a new backend or alias joins the check by
+   joining the parse table.
+
+   BOUNDARY. String constants only, by exact value. A name assembled at run time, compared through a
+   variable, or spelled in another case is past it; so is a decision keyed on something else that
+   stands for the name. The constant is the shape the substring predicates had, and the one a
+   regression would most plausibly bring back.
+
+   An exemption is a file and the innermost structure-level binding the constants sit in, with how
+   many: one more constant there is refused as unlisted, one fewer as a stale count. A
+   dune-[select]ed source ([x.ml] beside [x.missing.ml]) is a copy of one of its alternatives and is
+   read through them. *)
+module Literals = struct
+  open Ppxlib
+
+  type site = { file : string; binding : string; line : int; literal : string }
+
+  let rec binding_name pat =
+    match pat.ppat_desc with
+    | Ppat_var { txt; _ } -> txt
+    | Ppat_constraint (p, _) -> binding_name p
+    | Ppat_construct ({ txt = Lident "()"; _ }, None) -> "()"
+    | _ -> "<pattern>"
+
+  let sites ~vocabulary ~file content =
+    let found = ref [] in
+    let record binding (loc : Location.t) s =
+      if List.mem vocabulary s ~equal:String.equal then
+        found := { file; binding; line = loc.loc_start.pos_lnum; literal = s } :: !found
+    in
+    let visitor binding =
+      object
+        inherit Ast_traverse.iter as super
+
+        method! expression e =
+          (match e.pexp_desc with
+          | Pexp_constant (Pconst_string (s, _, _)) -> record binding e.pexp_loc s
+          | _ -> ());
+          super#expression e
+
+        method! pattern p =
+          (match p.ppat_desc with
+          | Ppat_constant (Pconst_string (s, _, _)) -> record binding p.ppat_loc s
+          | _ -> ());
+          super#pattern p
+      end
+    in
+    let rec items ~outer =
+      List.iter ~f:(fun item ->
+          match item.pstr_desc with
+          | Pstr_value (_, vbs) ->
+              List.iter vbs ~f:(fun vb -> (visitor (binding_name vb.pvb_pat))#value_binding vb)
+          | Pstr_module mb -> module_expr ~outer mb.pmb_expr
+          | Pstr_recmodule mbs -> List.iter mbs ~f:(fun mb -> module_expr ~outer mb.pmb_expr)
+          | Pstr_include incl -> module_expr ~outer incl.pincl_mod
+          | _ -> (visitor outer)#structure_item item)
+    and module_expr ~outer me =
+      match me.pmod_desc with
+      | Pmod_structure s -> items ~outer s
+      | Pmod_functor (_, body) -> module_expr ~outer body
+      | Pmod_constraint (me, _) -> module_expr ~outer me
+      | Pmod_apply (f, arg) ->
+          module_expr ~outer f;
+          module_expr ~outer arg
+      | _ -> (visitor outer)#module_expr me
+    in
+    items ~outer:"<top>" (Parse.implementation (Lexing.from_string content));
+    List.rev !found
+
+  type exemption = { e_file : string; e_binding : string; e_count : int }
+
+  (* The unlisted constants and the exemptions whose count no longer matches. *)
+  let check ~exemptions sites =
+    let key file binding = file ^ " " ^ binding in
+    let counts =
+      List.fold sites
+        ~init:(Map.empty (module String))
+        ~f:(fun m s ->
+          Map.update m (key s.file s.binding) ~f:(fun c -> 1 + Option.value c ~default:0))
+    in
+    let exempt s =
+      List.exists exemptions ~f:(fun e ->
+          String.equal e.e_file s.file && String.equal e.e_binding s.binding)
+    in
+    let unlisted = List.filter sites ~f:(Fn.non exempt) in
+    let stale =
+      List.filter exemptions ~f:(fun e ->
+          Option.value (Map.find counts (key e.e_file e.e_binding)) ~default:0 <> e.e_count)
+    in
+    (unlisted, stale)
+end
+
+(* Each entry: where, how many, and why the constant is not a compiler decision. *)
+let exemptions =
+  let e e_file e_binding e_count (_why : string) = { Literals.e_file; e_binding; e_count } in
+  [
+    e "arrayjit/lib/backends.ml" "accepted_names" 7
+      "the parse table: the one place a backend name is tested, reading the backend setting";
+    e "arrayjit/lib/backends.ml" "get_backend" 1 "the [backend] setting's default, which it parses";
+    e "arrayjit/lib/backends.ml" "backend_name" 5
+      "the variant's inverse, for messages and cache keys";
+    e "arrayjit/lib/cc_backend.ml" "name" 1 "the backend's own name";
+    e "arrayjit/lib/cc_backend.ml" "compiler_command" 1
+      "not a backend name: the C compiler command [ocamlc -config] falls back to";
+    e "arrayjit/lib/cuda_backend.ml" "name" 1 "the backend's own name";
+    e "arrayjit/lib/cuda_backend_impl.missing.ml" "name" 1 "the placeholder's name";
+    e "arrayjit/lib/hip_backend.ml" "name" 1 "the backend's own name";
+    e "arrayjit/lib/hip_backend.ml" "()" 1
+      "reads the backend setting at inline-test init, to open the driver only when HIP is selected";
+    e "arrayjit/lib/hip_backend_impl.missing.ml" "name" 1 "the placeholder's name";
+    e "arrayjit/lib/metal_backend.ml" "name" 1 "the backend's own name";
+    e "arrayjit/lib/metal_backend.ml" "vendor_routine_idents" 1
+      "not a backend name: [metal] is a name the Metal headers declare, which a node may not take";
+    e "arrayjit/lib/metal_backend_impl.missing.ml" "name" 1 "the placeholder's name";
+    e "arrayjit/lib/context.ml" "cuda" 1 "the named constructor of a CUDA context";
+    e "arrayjit/lib/context.ml" "hip" 1 "the named constructor of a HIP context";
+    e "arrayjit/lib/context.ml" "metal" 1 "the named constructor of a Metal context";
+    e "arrayjit/lib/context.ml" "cpu" 2 "the named constructor of a cc / multidev_cc context";
+    e "arrayjit/lib/context.ml" "auto" 4 "the order [auto] tries the backends in, by name";
+  ]
+
+let read_sources dirs =
+  List.concat_map dirs ~f:(fun dir ->
+      let on_disk = "../../" ^ dir in
+      let names = Stdlib.Sys.readdir on_disk |> Array.to_list in
+      List.filter_map names ~f:(fun name ->
+          let selected =
+            Option.value_map (String.chop_suffix name ~suffix:".ml") ~default:false ~f:(fun stem ->
+                List.mem names (stem ^ ".missing.ml") ~equal:String.equal)
+          in
+          if
+            String.is_suffix name ~suffix:".ml"
+            && (not (String.is_suffix name ~suffix:".pp.ml"))
+            && not selected
+          then Some (dir ^ "/" ^ name, Stdio.In_channel.read_all (on_disk ^ "/" ^ name))
+          else None))
+  |> List.sort ~compare:(fun (a, _) (b, _) -> String.compare a b)
+
+let () =
+  let vocabulary = List.map Backends.accepted_names ~f:fst in
+  let sources = read_sources [ "arrayjit/lib"; "lib"; "tensor" ] in
+  let sites =
+    List.concat_map sources ~f:(fun (file, content) -> Literals.sites ~vocabulary ~file content)
+  in
+  let unlisted, stale = Literals.check ~exemptions sites in
+  List.iter unlisted ~f:(fun (s : Literals.site) ->
+      Stdio.eprintf "%s:%d: the backend name %S, in [%s], is in no exemption\n" s.file s.line
+        s.literal s.binding);
+  List.iter stale ~f:(fun (e : Literals.exemption) ->
+      Stdio.eprintf
+        "%s [%s]: the exemption counts %d backend-name constants, the source has another number\n"
+        e.e_file e.e_binding e.e_count);
+  Verdict.p "the compiler's sources are read" (List.length sources > 50);
+  Verdict.p_empty "every backend-name constant in the compiler's sources is a reasoned exemption"
+    ~over:sites unlisted;
+  Verdict.p_empty "and every exemption counts what its binding holds" ~over:exemptions stale;
+  (* The check's own controls, on synthetic sources: a decision on a name in either syntactic
+     position, an alias, a constant past an exemption's count, and the boundary -- a name compared
+     through a variable is not seen. *)
+  let control content = Literals.sites ~vocabulary ~file:"control.ml" content in
+  let unlisted content = fst (Literals.check ~exemptions:[] (control content)) in
+  let refused content = not (List.is_empty (unlisted content)) in
+  Verdict.p "control: a decision on a name in an expression is refused"
+    (refused {|let is_gpu b = String.equal b "cuda"|});
+  Verdict.p "control: a decision on a name in a pattern is refused"
+    (refused {|let cap = function "hip" -> 2048 | _ -> 200|});
+  Verdict.p "control: a deprecated alias is a name too"
+    (refused {|let cpu b = String.equal b "sync_cc"|});
+  Verdict.p "control: a constant beyond an exemption's count makes it stale"
+    (let sites = control {|let name = "metal" let name = "cuda"|} in
+     let _, stale =
+       Literals.check
+         ~exemptions:[ { e_file = "control.ml"; e_binding = "name"; e_count = 1 } ]
+         sites
+     in
+     not (List.is_empty stale));
+  let boundary = {|let is_gpu b ~gpu = String.equal b gpu|} in
+  Verdict.p_empty "control: past the boundary, a name held in a variable is not seen"
+    ~over:[ boundary ] (unlisted boundary)

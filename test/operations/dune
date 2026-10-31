@@ -4105,11 +4105,17 @@
  ; constant: it opens no device, compiles nothing, and its output cannot vary with the backend.
  (name marker_backend_vocabulary)
  (package neural_nets_lib)
- (deps ocannl_config)
+ ; The compiler's sources, for the backend-name constant ratchet (gh-ocannl-1723).
+ (deps
+  ocannl_config
+  (glob_files ../../arrayjit/lib/*.ml)
+  (glob_files ../../lib/*.ml)
+  (glob_files ../../tensor/*.ml))
  (modules marker_backend_vocabulary)
  (libraries
   base
   stdio
+  ppxlib
   arrayjit.ir
   arrayjit.context
   test_utils

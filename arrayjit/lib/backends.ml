@@ -1939,8 +1939,10 @@ module Metal_b : Backend = Raise_backend (With_device_init_deadline (
 type backend = Cc | Multidev_cc | Cuda | Hip | Metal [@@deriving sexp, equal, enumerate]
 
 (* The one place a backend name is tested (gh-ocannl-1723): parsing the [backend] setting. Every
-   compiler decision asks the backend's {!Backend_intf.backend_facts} instead. "sync_cc" and
-   "multicore_cc" are accepted as deprecated aliases of the renamed backends. *)
+   compiler decision asks the backend's {!Backend_intf.backend_facts} instead, and
+   [test/operations/marker_backend_vocabulary] holds the compiler's sources to that, reading this
+   table for the names to look for. "sync_cc" and "multicore_cc" are accepted as deprecated aliases
+   of the renamed backends. *)
 let accepted_names =
   [
     ("cc", Cc);

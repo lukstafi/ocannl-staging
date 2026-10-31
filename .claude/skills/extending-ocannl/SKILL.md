@@ -26,10 +26,11 @@ When outputs differ between backends:
 ## Backend Extensions
 
 1. Implement device-specific module following `Backend_impl` signatures; backends implement stream-based execution with FIFO queuing, plus events and synchronization between streams/devices
-2. Add compilation logic in `arrayjit/lib/backends.ml`
-3. Handle memory management and synchronization
-4. Add configuration options in `ocannl_config.reference`
-5. Type the compiler's rejection of generated code as `Backend_rejected { stage = "compiler"; severity = Compiler_bug }`: raise `Schedule_outcome.Cause_at` at the compiler call (cc, Metal) or answer the toolchain's compile status in `classify_failure` (CUDA, HIP), and nothing else the toolchain raises — a header it could not open (`C_syntax.missing_include`) included. Untyped, it is `Fatal` and one rejected kernel ends a search or the per-kernel table; `test/operations/compile_failure_declines` pins it per backend (ahrefs/ocannl#1387)
+2. Add compilation logic in `arrayjit/lib/backends.ml`, and the backend's name to `Backends.accepted_names`
+3. State the backend's capability facts: a `Backend_intf.backend_facts` literal beside `cc_facts` / `cuda_facts` / ..., bound as the module's `backend_facts` (and its missing-toolkit placeholder's). Compiler decisions read these, never the backend's name (gh-ocannl-1723; `docs/agent-notes/backend-dialects-and-idents.md#backend-capability-facts`)
+4. Handle memory management and synchronization
+5. Add configuration options in `ocannl_config.reference`
+6. Type the compiler's rejection of generated code as `Backend_rejected { stage = "compiler"; severity = Compiler_bug }`: raise `Schedule_outcome.Cause_at` at the compiler call (cc, Metal) or answer the toolchain's compile status in `classify_failure` (CUDA, HIP), and nothing else the toolchain raises — a header it could not open (`C_syntax.missing_include`) included. Untyped, it is `Fatal` and one rejected kernel ends a search or the per-kernel table; `test/operations/compile_failure_declines` pins it per backend (ahrefs/ocannl#1387)
 
 ### Code generation architecture
 

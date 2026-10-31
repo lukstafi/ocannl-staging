@@ -7,3 +7,11 @@ every backend OCANNL has has an emitted-code extension the reader writes for it:
 the reader writes every backend OCANNL has under its own name: true
 every deprecated alias the reader resolves names the backend get_backend selects: true
 a name that is no backend has no extension: true
+the compiler's sources are read: true
+every backend-name constant in the compiler's sources is a reasoned exemption: true
+and every exemption counts what its binding holds: true
+control: a decision on a name in an expression is refused: true
+control: a decision on a name in a pattern is refused: true
+control: a deprecated alias is a name too: true
+control: a constant beyond an exemption's count makes it stale: true
+control: past the boundary, a name held in a variable is not seen: true
