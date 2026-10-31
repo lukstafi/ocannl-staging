@@ -1144,3 +1144,100 @@ let tuner_transform ?target ?arity_cuts ?static_indices ?(schedule = fun _ _ -> 
   List.map
     (snd (tuner_replay ?target ?static_indices ~plan ~schedule o))
     ~f:(fun (_, _, _, post) -> post)
+
+type seeded_census = {
+  sketched : int;  (** Segments decided [Seeded_sketch]. *)
+  sunk : int;  (** Segments decided [Seeded_sunk]. *)
+  refined : int;  (** Default segments the plan replaced by finer pieces ([sp_refined]). *)
+  split : (Ir.Tnode.t * int) list;  (** The split reductions' targets and block counts. *)
+}
+(** What a seeded untuned plan ({!Autotune.seeded_plan}) decides, counted. *)
+
+(** [seeded_census plan], [None] where no plan was derived — the census a cc structural leg of a
+    CUDA/HIP-gated seeding claim asserts (gh-ocannl-1626). The plan is host-side: derived with
+    [~backend:"cuda"] on a lowering the host captured, it decides on every per-PR run what the
+    device's untuned compile decides, where the executed claims are skipped off CUDA/HIP. *)
+let seeded_census (plan : Autotune.seeded_plan option) =
+  Option.map plan ~f:(fun (plan : Autotune.seeded_plan) ->
+      let decisions = match plan.sp_segments with Some (_, ds) -> ds | None -> [] in
+      let count f = List.count decisions ~f in
+      {
+        sketched = count (function Autotune.Seeded_sketch _ -> true | _ -> false);
+        sunk = count (function Autotune.Seeded_sunk _ -> true | _ -> false);
+        refined = plan.sp_refined;
+        split = List.map plan.sp_split ~f:(fun (site, n) -> (site.Autotune.sr_target, n));
+      })
+
+(** A hermetic copy of [o]: its traced store and optimize context copied, so a fission or a schedule
+    applied to the copy leaves [o]'s placements as they were. *)
+let hermetic_copy (o : LL.optimized) =
+  {
+    o with
+    LL.traced_store = Hashtbl.copy o.LL.traced_store;
+    optimize_ctx = LL.copy_optimize_ctx o.LL.optimize_ctx;
+  }
+
+(** [captured_lowering comp]: a hermetic copy of the optimized lowering a compile of [comp] on a
+    fresh context hands its [lowered_transform], before any schedule -- what a structural leg
+    segments or schedules under a synthetic target (gh-ocannl-1626). The compile itself ships the
+    lowering unscheduled, so no GPU-scheduled code reaches the host's renderer. *)
+let captured_lowering ?name comp =
+  let captured = ref None in
+  let ctx, _routine =
+    Context.compile ?name
+      ~lowered_transform:(fun o ->
+        captured := Some (hermetic_copy o);
+        [ o ])
+      (Context.auto ()) comp Ir.Indexing.Empty
+  in
+  Context.release ctx;
+  Option.value_exn !captured
+
+(** Every [If] of [llc] with the axis types of the loops enclosing it, outermost first, and the
+    number of [Workgroup_barrier]s: the guards and barriers a shared-memory schedule leaves, read
+    off the scheduled IR rather than a GPU dialect's spelling of it. *)
+let guards_and_barriers llc =
+  let stack = ref [] and guards = ref [] and barriers = ref 0 in
+  walk llc
+    ~on_stmt:(function
+      | LL.For_loop { axis; _ } -> stack := axis :: !stack
+      | LL.If _ -> guards := List.rev !stack :: !guards
+      | LL.Workgroup_barrier -> Int.incr barriers
+      | _ -> ())
+    ~on_exit:(function LL.For_loop _ -> stack := List.tl_exn !stack | _ -> ());
+  (List.rev !guards, !barriers)
+
+(* A shuffle-capable C dialect with barriers and shared declarations at 32-lane simdgroups. *)
+module Gpu_like_config = struct
+  include Ir.C_syntax.Pure_C_config (struct
+    let procs = [||]
+    let full_printf_support = true
+  end)
+
+  let warp_size = 32
+  let barrier_syntax = Some "barrier();"
+  let shared_decl_prefix = Some "shared "
+end
+
+(** The codegen capabilities [C_syntax.codegen_capabilities] derives for a shuffle-capable C dialect
+    with barriers and workgroup-shared declarations at 32-lane simdgroups -- the premise of the lane
+    all-reduce and warp-reduce partials estimates, derived by the code that derives the GPU
+    backends' own. A structural leg judges a GPU schedule's workgroup-memory estimate and gate under
+    them on every host (gh-ocannl-1626); nothing is rendered in this dialect. *)
+let gpu_like_capabilities () = Ir.C_syntax.codegen_capabilities (module Gpu_like_config)
+
+(** A stand-in matrix unit at no other hardware limit: an f32 x f32 -> f32 8x8x8 tile. The limits a
+    structural leg seeds tensorized GPU sketches under whatever the host (gh-ocannl-1626) -- cc
+    advertises no GPU tile, so per-PR CI proposes none at the host's own limits. *)
+let f32_mma_limits =
+  let module BI = Ir.Backend_intf in
+  {
+    BI.no_hardware_limits with
+    mma =
+      Some
+        {
+          BI.minimal_mma_capability with
+          mma_tile = (8, 8, 8);
+          mma_format_tiles = [ ((BI.Mma_f32, BI.Mma_f32, BI.Mma_f32), (8, 8, 8)) ];
+        };
+  }
