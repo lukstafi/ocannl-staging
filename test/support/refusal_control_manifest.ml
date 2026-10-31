@@ -47,11 +47,14 @@ let raw_entries =
       [
         "[scanner-refusal:fe40918919ee07d96a2c92a926ae0b28] does not parse";
         "[scanner-refusal:035b75b8ce8b0d0f0b1b390267c227e7] debug-name reader raised";
-        "[scanner-refusal:caf654cecf3e614544e6740b12c0ca6a] tree matches nothing";
+        "[scanner-refusal:9168a34c28bab17307d7535ed07d097f] tree matches nothing";
         "[scanner-refusal:cdb9f02e250554d24674371724942ae4] test_tnode_namespaces'";
         "[scanner-refusal:693fe71b6aeb6d44bd88787308cf5017] cc_kernel_outline's";
         "[scanner-refusal:94cdb1a16d792be58f07d154224626df] scope_over_materialized's";
         "[scanner-refusal:f4f4d81c0884b6209eccd072274b494d] rewind_to_last_closure's";
+        "[scanner-refusal:faf8bd39d9f3358220e041edafe252a2] Session_error";
+        "[scanner-refusal:c622584e09b7ad9b23646841eb389ca9] @message_only";
+        "[scanner-refusal:3c688ea5897f696f0882bff06b550c6e] debug_name";
       ] );
     ( "render_decline_inventory.ml",
       [

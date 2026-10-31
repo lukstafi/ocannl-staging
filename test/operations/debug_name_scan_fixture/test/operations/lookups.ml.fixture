@@ -45,5 +45,21 @@ let census_row row tn =
 let bad_marker row tn = String.equal row (Tn.debug_name tn [@rendered_name "census"])
 let stray = (1 [@rendered_name "a marker on a literal"])
 
-(* Refused: an interpolation the parse tree does not expose. *)
+(* Refused: a [%string] interpolation returned, read as the expression it is. Accepted: the same
+   interpolation raised, and a [%string] whose debug_name is a record field. *)
 let interpolated tn = [%string "node %{Tn.debug_name tn}"]
+let raised tn = failwith [%string "node %{Tn.debug_name tn} is missing"]
+let field (sh : Shape.t) = failwith [%string "shape #%{sh.id#Int} %{sh.debug_name}"]
+
+(* Refused: an interpolation that does not parse, which the scan cannot read. *)
+let unreadable tn = failwith [%string "node %{Tn.debug_name (tn}"]
+
+(* Accepted: a parameter named debug_name is not the library's function. *)
+let of_name ~debug_name = Stdio.printf "%s\n" debug_name
+let punned ~debug_name id = { Row.id; debug_name }
+
+(* Accepted: a message-only name, marked on the application or on its [%string]. Refused: a
+   message-only marker on a [%string] that interpolates no debug name. *)
+let refusal tn = Some (Tn.debug_name tn [@message_only "the refusal its caller raises"])
+let refusal' tn = [%string "node %{Tn.debug_name tn}"] [@message_only "the refusal its caller raises"]
+let empty_mark id = [%string "node %{id#Int}"] [@message_only "a message about nothing"]

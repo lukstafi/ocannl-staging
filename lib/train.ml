@@ -50,7 +50,7 @@ let set_materialized (a : Tn.t) = Tn.update_memory_mode a On_device (Site "28:se
 let forward t =
   let fwd = Tensor.consume_forward_code t in
   set_materialized t.Tensor.value;
-  let label = Tn.debug_name t.value in
+  let label = Tn.label_name t.value in
   { fwd with asgns = Asgns.Block_comment (label ^ " fwd", fwd.asgns) }
 
 let loss_accumulator ?(label = "loss_accum") () =
@@ -1595,7 +1595,9 @@ let tune_placements ?name ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?r
                   let arm =
                     Printf.sprintf "flip %s %s (cost %d%s)"
                       (LL.reading_to_string fa.LL.fa_flip)
-                      (Tn.debug_name tn) fa.LL.fa_recompute_cost
+                      (Tn.debug_name tn
+                       [@message_only "the arm's name in this search's log and progress lines"])
+                      fa.LL.fa_recompute_cost
                       (if Set.mem surface.Autotune.ps_enablement tn then ", enablement" else "")
                   in
                   let identity =
@@ -1701,14 +1703,16 @@ let tune_placements ?name ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?r
                     logf
                       "flip group %s: cut by the call budget after %d of its %d alternative(s); \
                        nothing of it is committed"
-                      (Tn.debug_name tn) (List.length results)
+                      (Tn.debug_name tn [@message_only "a tune_placements log line"])
+                      (List.length results)
                       (List.length fc.LL.fc_alternatives)
                 | _ when group_cut -> ()
                 | Some (bfa, r, ms, ctx', timing', rep, _) when Float.(ms < chain_ms) -> (
                     chain := (r, ms, ctx', timing', rep);
                     accepted := (tn, bfa.LL.fa_flip) :: !accepted;
                     if List.length fc.LL.fc_alternatives > 1 then
-                      logf "flip group %s: %s wins at %.4f ms" (Tn.debug_name tn)
+                      logf "flip group %s: %s wins at %.4f ms"
+                        (Tn.debug_name tn [@message_only "a tune_placements log line"])
                         (LL.reading_to_string bfa.LL.fa_flip)
                         ms;
                     match bfa.LL.fa_flip with

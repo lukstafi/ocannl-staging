@@ -2,14 +2,22 @@ accepted position in use: printed or raised
 accepted position in use: a claim label
 accepted position in use: a needle
 accepted position in use: marked [@rendered_name]
+accepted position in use: marked [@message_only]
+accepted position in use: a debug-name alias
 the scan reads test_tnode_namespaces' printed debug names: true
 the scan reads cc_kernel_outline's debug name in a claim label: true
 the scan reads scope_over_materialized's refusal-message needle: true
 the scan reads rewind_to_last_closure's [@rendered_name] marker: true
+the scan reads the library: Tensor's Session_error messages: true
+the scan reads the library: Train's [@message_only] log lines: true
+the scan reads the library: Tensor's debug_name alias: true
 
 Synthetic controls: scanner refusal diagnostics exercised by this control golden:
   [scanner-refusal:cdb9f02e250554d24674371724942ae4] test_tnode_namespaces'
   [scanner-refusal:693fe71b6aeb6d44bd88787308cf5017] cc_kernel_outline's
   [scanner-refusal:94cdb1a16d792be58f07d154224626df] scope_over_materialized's
   [scanner-refusal:f4f4d81c0884b6209eccd072274b494d] rewind_to_last_closure's
+  [scanner-refusal:faf8bd39d9f3358220e041edafe252a2] Session_error
+  [scanner-refusal:c622584e09b7ad9b23646841eb389ca9] @message_only
+  [scanner-refusal:3c688ea5897f696f0882bff06b550c6e] debug_name
 End of synthetic controls.

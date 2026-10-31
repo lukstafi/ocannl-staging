@@ -1,0 +1,16 @@
+(* debug_name_scan_control's tensor/ fixture. Never compiled. *)
+module Tn = Ir.Tnode
+
+exception Session_error of string * t option
+
+(* Accepted: the aliases, whose callers are references in turn; and a Session_error message. *)
+let debug_name t = Tn.debug_name t.value
+let debug_grad t = Tn.debug_name (Option.value_exn t.diff).grad
+let refuse t = raise @@ Session_error ("not a root: " ^ debug_grad t, Some t)
+
+(* Refused: an alias's caller used as a key, and a Session_error's second component. *)
+let by_name ts = List.map ts ~f:(fun t -> (debug_name t, t))
+let wrong t = raise @@ Session_error ("x", Some (debug_name t))
+
+(* Refused: a two-parameter function bound to a reference name is no alias. *)
+let debug_name t suffix = Tn.debug_name t.value ^ suffix

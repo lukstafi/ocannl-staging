@@ -10322,8 +10322,9 @@
 
 ; gh-ocannl-1606: a test reads a node's debug name only to show it, never to find the node -- the
 ; debug name is a display name a renderer can change (gh-ocannl-1552). The reader states its closed
-; list of accepted forms in test/support/debug_name_scan.ml. The corpus is every .ml under test/ and
-; arrayjit/test/ as a source tree holds it.
+; list of accepted forms in test/support/debug_name_scan.ml. The corpus is every .ml under test/,
+; arrayjit/test/, lib/ and tensor/ as a source tree holds it; in the library the rule also keeps a
+; debug name out of the labels and generated-code comments it stores (post-wave task post-1-task-6).
 
 (executable
  (name debug_name_scan)
@@ -10339,7 +10340,9 @@
   ocannl_config
   (sandbox always)
   (source_tree ..)
-  (source_tree ../../arrayjit/test))
+  (source_tree ../../arrayjit/test)
+  (source_tree ../../lib)
+  (source_tree ../../tensor))
  (action
   (with-stdout-to
    %{target}

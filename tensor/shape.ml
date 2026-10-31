@@ -1557,7 +1557,7 @@ let%debug4_sexp get_inequalities ?(for_projections = false)
                        {
                          lhs_name = cur_sh.debug_name;
                          lhs_kind = `Batch;
-                         rhs_name = Tn.debug_name tn;
+                         rhs_name = Tn.label_name tn;
                          rhs_kind = `Output;
                          operation = Some "Slice";
                        };

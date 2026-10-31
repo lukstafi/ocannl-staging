@@ -68,7 +68,7 @@ let shard_along ~axis ~n_shards (t : Tensor.t) : Tensor.t array =
             src_idx.(0) <- idx.(0) + (k * sub);
             get src_idx)
       in
-      TDSL.rebatch ~l:(Printf.sprintf "%s_shard%d" (Tn.debug_name tn) k) nd ())
+      TDSL.rebatch ~l:(Printf.sprintf "%s_shard%d" (Tn.label_name tn) k) nd ())
 
 let gather ~axis (shards : Tensor.t array) : Tensor.t =
   if Array.length shards = 0 then invalid_arg "Parallel.gather: empty shards array";
@@ -290,7 +290,7 @@ let data_parallel ?backend_name ?(reduction = Mean) ?(weight_decay = 0.0) ?(mome
      per-shard backend contexts. *)
   let host_buffer_of (tn : Tn.t) =
     Nd.create_array
-      ~debug:("parallel host buffer for " ^ Tn.debug_name tn)
+      ~debug:("parallel host buffer for " ^ Tn.label_name tn)
       (Lazy.force tn.Tn.storage_prec) ~dims:(Lazy.force tn.Tn.dims)
       ~padding:(Lazy.force tn.Tn.padding)
   in
