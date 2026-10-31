@@ -131,7 +131,8 @@ let ceiling ?(gpu = true) ?(tensorization = "not-requested") ?(narrow_native = f
     ~peak_memory_bandwidth:(snd legs)
 
 let kernel ?(flops = 1_000_000_000) ?(bytes = 1_000_000_000) ?(flops_exact = true)
-    ?(bytes_exact = true) ?(opaque = false) ?(tensorization = "not-requested") ?(seg_ms = 4.) () =
+    ?(bytes_exact = true) ?(opaque = false) ?(tensorization = "not-requested") ?(seg_ms = 4.)
+    ?(seg_ms_lo = 0.875 *. seg_ms) ?(seg_ms_hi = 1.25 *. seg_ms) () =
   {
     Bench_json.segment = 3;
     segments = 12;
@@ -139,6 +140,8 @@ let kernel ?(flops = 1_000_000_000) ?(bytes = 1_000_000_000) ?(flops_exact = tru
     (* A label with the characters that would invalidate the record, as a node name can carry. *)
     writes = "w1.grad \"b1\"";
     seg_ms;
+    seg_ms_lo;
+    seg_ms_hi;
     segments_ms = 20.;
     tensorization;
     flops;
@@ -156,6 +159,11 @@ let dominant_kernels =
       Bench_json.dominant_kernel_object
         ~ceiling:(ceiling ~gpu:false ~narrow_native:true ())
         (Some (kernel ~flops:40_000_000_000 ~seg_ms:8. ())) );
+    ( "exact, range unstated",
+      (* gh-ocannl-1694: fewer admitted timing calls than [Bench_retime.min_readings] state a median
+         and no range; the attainment reads the median either way. *)
+      Bench_json.dominant_kernel_object ~ceiling:(ceiling ())
+        (Some (kernel ~seg_ms_lo:Float.nan ~seg_ms_hi:Float.nan ())) );
     ( "approximate",
       (* The memory leg binds, and its byte count is only an upper bound. *)
       Bench_json.dominant_kernel_object ~ceiling:(ceiling ()) (Some (kernel ~bytes_exact:false ()))
@@ -435,9 +443,20 @@ let () =
     (match ceiling ~gpu:false ~tensorization:"tensorized" () with
     | Ok c -> String.equal c.Bench_json.tag "f32"
     | Error _ -> false);
+  p "the dominant kernel's range rides beside its median (gh-ocannl-1694)"
+    (Yojson.Safe.equal (member "seg_ms" (dk "exact")) (`Int 4)
+    && Yojson.Safe.equal (member "seg_ms_lo" (dk "exact")) (`Float 3.5)
+    && Yojson.Safe.equal (member "seg_ms_hi" (dk "exact")) (`Int 5));
+  p "an unstated range is null, not a number, and the attainment still reads the median"
+    (Yojson.Safe.equal (member "seg_ms_lo" (dk "exact, range unstated")) `Null
+    && Yojson.Safe.equal (member "seg_ms_hi" (dk "exact, range unstated")) `Null
+    && Yojson.Safe.equal
+         (member "pct_of_peak" (dk "exact, range unstated"))
+         (member "pct_of_peak" (dk "exact")));
   p "a kernel that was never timed carries no counts and says why"
     (Yojson.Safe.equal (verdict "no-kernel") (`String "no-kernel")
     && Yojson.Safe.equal (member "seg_ms" (dk "no-kernel")) `Null
+    && Yojson.Safe.equal (member "seg_ms_lo" (dk "no-kernel")) `Null
     && Yojson.Safe.equal
          (member "note" (dk "no-kernel"))
          (`String "all 12 kernels declined to compile on their own"));

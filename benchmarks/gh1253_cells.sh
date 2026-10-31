@@ -278,13 +278,11 @@ else
   echo "   model flags for the wgrad cells: ${model[*]:-none}"
   for batch in 1 8 256; do
     dims="$batch,128,256,1024"
-    cell "wgrad_b${batch}_untiled" env BENCH_TUNE=0 BENCH_WGRAD_REQUIRE_SEEDED=0 BENCH_WGRAD_DIMS="$dims" \
-      BENCH_REPEATS=20 "$wgrad" \
+    cell "wgrad_b${batch}_untiled" env BENCH_TUNE=0 BENCH_WGRAD_REQUIRE_SEEDED=0 BENCH_WGRAD_DIMS="$dims" "$wgrad" \
       --ocannl_model_default_schedule=false \
       --ocannl_gpu_default_sketch_min_reduction=0 --ocannl_gpu_default_split_reduce_min_serial=0 \
       --ocannl_gpu_default_reduction_sink=false ${model[@]+"${model[@]}"}
-    cell "wgrad_b${batch}_seeded" env BENCH_TUNE=0 BENCH_WGRAD_REQUIRE_SEEDED=1 BENCH_WGRAD_DIMS="$dims" \
-      BENCH_REPEATS=20 "$wgrad" \
+    cell "wgrad_b${batch}_seeded" env BENCH_TUNE=0 BENCH_WGRAD_REQUIRE_SEEDED=1 BENCH_WGRAD_DIMS="$dims" "$wgrad" \
       --ocannl_model_default_schedule=false \
       --ocannl_gpu_default_sketch_min_reduction=32 --ocannl_gpu_default_split_reduce_min_serial=0 \
       --ocannl_gpu_default_reduction_sink=false ${model[@]+"${model[@]}"}

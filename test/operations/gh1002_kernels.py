@@ -17,8 +17,8 @@ def check(condition, detail):
         raise SystemExit("FAIL: " + detail)
 
 
-def row(i, total, mma="none", vol="", io=""):
-    return (f"bench: kernel {i}/{total} 0.125 ms grid=[2;3] block=[4;8] "
+def row(i, total, mma="none", vol="", io="", spread=""):
+    return (f"bench: kernel {i}/{total} 0.125 ms {spread}grid=[2;3] block=[4;8] "
             f"{io}mma:{mma} {vol}w: layer_q layer_k\n")
 
 
@@ -30,7 +30,7 @@ with tempfile.TemporaryDirectory() as scratch:
         err.write_text(text)
         return report.kernels(base)
 
-    expected = [{"i": 0, "ms": 0.125, "grid": "2;3", "block": "4;8",
+    expected = [{"i": 0, "ms": 0.125, "lo": None, "hi": None, "grid": "2;3", "block": "4;8",
                  "w": ["layer_q", "layer_k"]}]
     check(parse(row(0, 1)) == expected, "legacy row fields")
     print("legacy rows preserve timing, launch dimensions and writes: true")
@@ -52,6 +52,24 @@ with tempfile.TemporaryDirectory() as scratch:
     check(legacy is not None and legacy["read"] is None and legacy["writes"] == "layer_q layer_k",
           "a row without io must still parse")
     print("an io field parses into bytes read/written and leaves the other fields as they were: true")
+
+    # gh-ocannl-1694: the median's range and admission count (Bench_retime.bounds_fields) sit
+    # between the time and the geometry; below min_readings the bounds print as nan.
+    spread = "ms_lo=0.062500 ms_hi=0.250000 ms_retimed=6/6 "
+    text = row(0, 1, "tile_mma 16x8x16 fp16", "vol:0 ", "io:4096/1024 ", spread)
+    match = report.KERNEL.match(text.rstrip("\n"))
+    check(match is not None and (match["lo"], match["hi"], match["admitted"], match["calls"])
+          == ("0.062500", "0.250000", "6", "6"), "range fields: %s" % (match and match.groupdict()))
+    check(parse(text) == [dict(expected[0], lo=0.0625, hi=0.25)],
+          "the range must not contaminate timing, geometry or writes")
+    unstated = parse(row(0, 1, spread="ms_lo=nan ms_hi=nan ms_retimed=2/2 "))
+    check(unstated is not None and unstated[0]["ms"] == 0.125
+          and unstated[0]["lo"] != unstated[0]["lo"], "an unstated range parses as NaN")
+    print("a range parses beside the median, nan where it is unstated, and leaves the rest as it was: true")
+    untimed = row(0, 2) + ("bench: kernel 1/2 grid=[2;3] block=[4;8] UNTIMED (none of its 6 "
+                           "timing calls was admitted) w: layer_v\n")
+    check(parse(untimed) is None, "a table with an UNTIMED row must be refused")
+    print("a table with an untimed kernel is incomplete: true")
 
     complete = "unrelated diagnostic\n" + row(0, 3) + row(1, 3) + row(2, 3)
     parsed = parse(complete)

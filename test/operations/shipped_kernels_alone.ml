@@ -52,11 +52,13 @@ let () =
   H.run_train_step routines ctx_ref ~step:0;
   Context.sync !ctx_ref;
   let kernels =
-    H.time_shipped_kernels ~out:Stdio.stderr ~repeats:1 ~ctx:!ctx_ref ~bindings
+    H.time_shipped_kernels ~out:Stdio.stderr ~calls:2 ~ctx:!ctx_ref ~bindings
       (H.step_routines routines)
   in
+  (* An [Untimed] kernel compiled and ran; only its readings were refused, by the admission gate a
+     loaded host trips (gh-ocannl-1694), which is not what this test is about. *)
   p_all "every kernel the step ships compiles and runs on its own" kernels ~f:(fun (_, _, result) ->
-      Result.is_ok result)
+      match result with Ok _ | Error (H.Untimed _) -> true | Error (H.Declined _) -> false)
 
 (* The parameter rule's one blind spot, kept open on purpose: a [Staged_compilation] callback's
    accesses are invisible to [Low_level.code_touches_tn], so a kernel holding one keeps every stored

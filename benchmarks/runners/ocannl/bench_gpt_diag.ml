@@ -225,4 +225,5 @@ let () =
           opt
     | None ->
         ignore
-          (H.time_shipped_segments ~ctx:!ctx_ref ~bindings shipped : (float, string) Result.t list)
+          (H.time_shipped_segments ~ctx:!ctx_ref ~bindings shipped
+            : (Bench_retime.spread, H.hermetic_failure) Result.t list)

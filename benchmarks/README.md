@@ -144,7 +144,8 @@ in [report-gh1161-resnet.md](report-gh1161-resnet.md), re-measured with the tune
 [report-gh1161-resnet-20261030.md](report-gh1161-resnet-20261030.md). A **step cell** is `<workload>/<backend>/<variant>/<regime>` (the regime
 `exact` or `approximate`), e.g. `cifar_resnet_b1/cuda/tuned/exact`: the step p50 of that
 `orchestrate.py` row. A **site cell** is a step cell plus a site family, e.g.
-`cifar_resnet_b1/cuda/tuned/exact · sc1x1s2`: the summed min-of-20 kernel times of the kernels the
+`cifar_resnet_b1/cuda/tuned/exact · sc1x1s2`: the summed kernel times (each the median of its
+timing calls since gh-ocannl-1694, a min-of-20 before) of the kernels the
 step shipped that write the family's names, as `gh1161_sites.py <cell-log-dir>` prints them from
 a sweep run with `BENCH_KERNEL_TABLE=1 BENCH_CELL_LOG_DIR=<cell-log-dir>`. The families:
 `pad3x3` (the padded 3×3 stride-1 convs: `stem`, `s<i>c1`, `s<i>c2`), `resadd` (the residual
@@ -320,9 +321,10 @@ single-threaded segments that sum to the serial step
   exits; `BENCH_NO_SGD=1` compiles the gradient update without the SGD step (mlp);
   `BENCH_NO_SLICE=1` skips `@|` batch slicing (mlp, single-batch fixture);
   `BENCH_KERNEL_TABLE=1` (all three runners, gh-ocannl-1002) prints on stderr every kernel the
-  dominant-kernel instrument timed -- per shipped segment its min-of-20 time, launch geometry,
-  tensorization census and written nodes -- the per-kernel attribution of the step as shipped,
-  after the timed steps and the memory reading (off with `BENCH_DOMINANT_KERNEL=0`);
+  dominant-kernel instrument timed -- per shipped segment its median time with its range
+  (gh-ocannl-1694; *Per-kernel tables* under Methodology notes), launch geometry, tensorization census and
+  written nodes -- the per-kernel attribution of the step as shipped, after the timed steps and
+  the memory reading (off with `BENCH_DOMINANT_KERNEL=0`);
   `BENCH_TWIN_PLACEMENT=materialized|virtual` (mlp, reduced precision) pins the master weights'
   cast twins instead of leaving them to the virtualization heuristics
   (`Mixed_prec.Twin_materialized`). The twins' placement decides whether a tensorized candidate is
@@ -672,7 +674,8 @@ single-threaded segments that sum to the serial step
   the census with fission's Local promotion disabled.
   `BENCH_SEG_TIMES=1` (**both runners**) adds per-segment (≈ per-layer) wall times: each fission
   segment is compiled as its own routine (hermetic substitution through the `lowered_transform`
-  seam) and timed min-of-N with a sync per run, labeled by the nodes it writes — the per-layer
+  seam) and timed as the median of its timing calls with their range (gh-ocannl-1694), labeled by
+  the nodes it writes — the per-layer
   breakdown that identifies which conv sites dominate a step, diffable across schedule
   changes (the acceptance instrument for the gh-500 blocking decision). On `bench_gpt_diag` the
   same instrument attributes the transformer blocks: it is what showed gpt2_mini's step to be
@@ -687,9 +690,10 @@ single-threaded segments that sum to the serial step
   Both GPT modes enumerate `Context.routine.segments` as shipped; training includes gradient zeroing
   and optimizer work. Census and timing use identical segment IDs and geometry. `BENCH_STEPS=1`
   prints three full-step controls and losses **before** isolated timings: timing a backward or
-  optimizer segment repeatedly changes gradients and weights. The isolated minima include one
-  launch + sync per kernel; their sum is not a step latency. Classified standalone compilation
-  refusals retain a `DECLINED` row and the total states how many segments were timed.
+  optimizer segment repeatedly changes gradients and weights. Each kernel is timed alone, so the
+  sum of their medians is not a step latency. Classified standalone compilation refusals retain a
+  `DECLINED` row, a kernel none of whose timing calls was admitted an `UNTIMED` one, and the total
+  states how many segments were timed.
   The row format and timing loop are shared with `BENCH_KERNEL_TABLE=1`; `BENCH_PROMOTE=0`
   retains the inference-only reconstructed census experiment. The diagnostic includes both compiled
   host-gated routines even before a step runs, while benchmark reporting includes conditional SGD
@@ -708,7 +712,9 @@ single-threaded segments that sum to the serial step
   time: each cell is a step cell run under `nsys profile --trace=cuda --cuda-graph-trace=node`,
   so every segment of the replayed graph is a trace record, and
   `benchmarks/kernel_attribution.py` joins each segment's median device time over the timed steps
-  with the same compile's isolated minimum. Rows are flagged `ISO` (isolated more than 10% off
+  with the same compile's isolated minimum (a kprof cell re-times its isolated kernels as
+  synchronized singles, `--ocannl_autotune_timing=isolated`, so the trace holds a few hundred of
+  them per kernel; gh-ocannl-1694). Rows are flagged `ISO` (isolated more than 10% off
   in-step) or `SPREAD` (in-step p90/p10 above 1.10), and cells of one kernel list get a cross-cell
   repeatability table. Each cell also states its common in-step/isolated factor F, the median ratio
   over its kernels of at least 0.5 ms with the per-step factor's p10..p90, and flags `OWN` a
@@ -760,9 +766,11 @@ single-threaded segments that sum to the serial step
   `BENCH_FIXTURE=fixtures/gpt2_mini_train_b256.safetensors BENCH_TUNE=0 BENCH_KERNEL_TABLE=1
   ../_build/default/benchmarks/runners/ocannl/bench_gpt.exe --ocannl_backend=hip 2>cell.err`,
   or take the `.err` of any `gh1133_cells.sh` step cell, where the table is on by default. Each
-  `bench: kernel i/n <ms> ms grid=[..] block=[..] io:<read>/<written> mma:.. vol:.. w: <nodes>`
-  row is one shipped segment in step order: its isolated min-of-20 host time (a launch and sync in
-  it), geometry, cost-model bytes, tensorization and written nodes. Sort by the time to find the
+  `bench: kernel i/n <ms> ms ms_lo=.. ms_hi=.. ms_retimed=a/c grid=[..] block=[..]
+  io:<read>/<written> mma:.. vol:.. w: <nodes>`
+  row is one shipped segment in step order: its isolated time -- the median of its timing calls,
+  with their range and how many the admission gate kept (*Per-kernel tables* under Methodology notes) --
+  geometry, cost-model bytes, tensorization and written nodes. Sort by the time to find the
   dominant kernels (`benchmarks/gh1002_cells.py`'s `kernels()` reads a complete table), and compare
   two builds by written nodes, not by index. It is what found gh-ocannl-1412's 197 ms split first
   pass on minix. What it cannot give is a share of the step: isolated times run 0.6x-2.3x off
@@ -1225,14 +1233,18 @@ fixtures still on neither box.
   column), `Bench_harness.dominant_kernel` compiles every kernel the step **shipped** — the
   routine's own `Context.routine.segments`, so a tuned cell's searched winner is what gets timed,
   not the default pipeline a re-lowering would produce — as a routine of its own through the
-  `?prelowered` seam, times each min-of-20 with a device sync per run, and takes the slowest. The
+  `?prelowered` seam, times each as the median of its timing calls (*Per-kernel tables* under Methodology notes),
+  and takes the slowest by median; the result line carries that kernel's range beside it
+  (`seg_ms_lo`, `seg_ms_hi`; `null` below four admitted readings). The
   cell reads `41.3% f32 memory · k3/12 0.412 ms w1.grad`: the attainment, its ceiling, the roofline
-  leg that binds, then the kernel's launch position, its own time and the nodes it writes. Four
+  leg that binds, then the kernel's launch position, its own median time and the nodes it writes. Four
   decisions, each stated in the section header where the numbers are read:
   - *Which kernel.* By **measured** time, not by the cost model's own roofline bound — the column
     exists partly to check the model's counts, and choosing by its prediction would be circular.
     A kernel the backend refuses to compile on its own (the gh-ocannl-533 scratch validator on a
-    hermetic segment) is counted as `+N untimed`, and the dominant one is dominant among the rest.
+    hermetic segment), or none of whose timing calls the admission gate kept, is counted as `+N
+    untimed`, and the dominant one is dominant among the rest. Two kernels whose ranges overlap
+    are not resolved apart: which of them is named can change between processes.
   - *What number.* The roofline lower bound over the measured time — `max(ops / peak FLOP/s, bytes
     / peak bandwidth)` on `Ir.Cost_model.analyze`'s counts — so a memory-bound kernel is scored
     against bandwidth and a compute-bound one against arithmetic. The bytes are global memory's
@@ -1255,11 +1267,11 @@ fixtures still on neither box.
     ranks with, and the header names each ceiling's constants and whose they are.
   - *Whose ceiling.* These are CLASS constants (or one machine's override), not this device's
     peak: the column ranks before/after on one box and certifies nothing about the hardware. A
-    number above 100% says the constant is below this card. A small kernel's launch overhead counts
-    against it, since the kernel is timed with its launch.
+    number above 100% says the constant is below this card. A small kernel's per-launch dispatch
+    cost counts against it, since the kernel is timed with its launches.
   The Python runners carry `"dominant_kernel": null` (they expose no per-kernel counts), printed
   `—`. `BENCH_DOMINANT_KERNEL=0` turns the instrument off for an OCANNL cell — it costs one compile
-  per kernel of the step — and its row then prints `—` too. The instrument has a wall-clock budget
+  and four timing calls per kernel of the step — and its row then prints `—` too. The instrument has a wall-clock budget
   of its own, `BENCH_DOMINANT_KERNEL_BUDGET_S` (default 600 s; gh-ocannl-1260): past it the column
   is `no-kernel`, "instrument over budget", and the cell keeps its result line instead of losing it
   to the cell's cap. On POSIX a kernel still compiling or timing is interrupted at the budget; on
@@ -1503,6 +1515,44 @@ fixtures still on neither box.
   (each arm prints a `bench-result:` line, variant `<site>/<arm>`, the median), whose paired
   rounds carry the between-process variance, and read each process's own range beside it.
   `test/operations/bench_retime_spread` pins the summaries on scripted readings.
+- **Per-kernel tables report a median and range too** (gh-ocannl-1694). Every per-kernel time the
+  harness prints -- the dominant-kernel instrument and its `BENCH_KERNEL_TABLE=1` rows
+  (`Bench_harness.time_shipped_kernels`), `BENCH_SEG_TIMES=1`'s tables (`time_segments`,
+  `time_shipped_segments`), `bench_wgrad`'s shipped kernels -- was one min-of-20 of synchronized
+  launches, a launch-and-sync floor plus noise on the many kernels under ~50 us. Each kernel alone
+  is now re-timed by `Bench_retime` as a shipped routine is above: `BENCH_RETIME_CALLS` independent
+  `Autotune.time_routine` calls (default 4 for a kernel, the fewest that state a range -- see *The
+  cost*) under the configured `autotune_timing`, at
+  `Autotune.set_test_bindings`' representative values, as the tuner times. What changed for a
+  driver or a reader:
+  - *The quantity.* Under the default `queued` timing a row is a per-launch time with the
+    submit/sync round trip amortized over a calibrated batch -- the number a search ranks
+    candidates by -- not a host wall time with one launch and sync in it, so small kernels read
+    lower than they did, and a number on either side of the change is not comparable with the
+    other. Every table's header states the count and the timing mode.
+  - *The row.* `bench: kernel i/n <median> ms ms_lo=<ms> ms_hi=<ms> ms_retimed=<admitted>/<calls>
+    grid=..` (`Bench_retime.bounds_fields`' spelling; `nan` bounds below four admitted readings),
+    and a kernel that compiled and ran but none of whose calls the admission gate kept (host
+    contention, an unbatched CUDA/HIP calibration) prints `UNTIMED (..)` where a refused compile
+    prints `DECLINED (..)`. The diagnostics' totals sum medians.
+  - *The result line.* `dominant_kernel`'s `seg_ms` is the dominant kernel's median, chosen by
+    median, with `seg_ms_lo`/`seg_ms_hi` beside it; `segments_ms` sums the medians.
+  - *The readers.* `gh1002_cells.KERNEL` (and through it `kernel_attribution.py`) and
+    `gh1161_sites.py` parse both the new row and the old one, an old row carrying no range;
+    an `UNTIMED` row leaves a table incomplete exactly as a `DECLINED` one does.
+  - *The cost.* Each call is a warmup, a calibration and a window of at least 16 batches (up to 64
+    of ~10 ms on a fast kernel), about half a second whatever the kernel's size, against 21 runs
+    before. At six calls a kernel, `gpt2_mini_train` on Metal (178 kernels) took the instrument 3 s
+    per kernel, about 545 s of its 600 s `BENCH_DOMINANT_KERNEL_BUDGET_S`, hence the kernel default
+    of four. With the table on, its
+    closing `bench: per-kernel table:` line states the instrument's wall time. A kprof cell pins
+    `--ocannl_autotune_timing=isolated`, whose synchronized singles keep its trace to a few hundred
+    isolated records per kernel.
+  - *Retired.* `bench_wgrad`'s `BENCH_REPEATS` (the per-kernel min-of-N) is refused.
+  - *The spread is the process's.* An A/A of three processes (Metal, `gpt2_mini_train`) spread a
+    row's medians 5.5% at p50 and up to 29%, more than a row's own range in a quarter of the rows
+    (the agent note has the numbers): compare per-kernel times across builds over repeated
+    processes, as `ab.py` pairs a routine's.
 - **A report states the fixture digest its numbers are on, whose bytes those are, and the declared
   measurement-box set.**
   `orchestrate.py` puts both in each workload section of `results/report.md` and in every

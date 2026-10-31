@@ -4272,8 +4272,13 @@ class Gh1161SitesTest(unittest.TestCase):
             if row[1] is None:
                 lines += [f"bench: kernel {row[0]} grid=[1;1;1] block=[32;1;1] DECLINED (codegen",
                           "failed: duplicate parameter) w: n1"]
+            elif row[1] == "untimed":
+                lines.append(f"bench: kernel {row[0]} grid=[1;1;1] block=[32;1;1] UNTIMED (none of "
+                             "its 6 timing calls was admitted) w: n1")
             else:
-                lines.append(f"bench: kernel {row[0]} {row[1]:.4f} ms grid=[1;1;1] block=[1;1;1] "
+                # The row as gh-ocannl-1694 prints it: the median, then its range.
+                lines.append(f"bench: kernel {row[0]} {row[1]:.4f} ms ms_lo={row[1]:.6f} "
+                             f"ms_hi={row[1]:.6f} ms_retimed=6/6 grid=[1;1;1] block=[1;1;1] "
                              f"mma:not-requested vol:0 w: {' '.join(row[2])}")
         lines.append(json.dumps(result, separators=(",", ":")))
         (self.dir / orchestrate.cell_log_name(label)).write_text("\n".join(lines) + "\n")
@@ -4321,6 +4326,16 @@ class Gh1161SitesTest(unittest.TestCase):
     def test_declined_kernels_are_untimed_but_keep_the_table_complete(self):
         self.log("cifar_resnet_b1 ocannl/cuda/default", [
             ("0/2", None, None), ("1/2", 2.0, ["kernel_s2sc.grad"])])
+
+        _, out, _ = self.run_sites()
+
+        self.assertEqual(self.rows(out)["cifar_resnet_b1/cuda/default/exact"][2:4], ["1/2", "2.000"])
+
+    def test_an_untimed_kernel_keeps_the_table_complete_too(self):
+        # gh-ocannl-1694: a kernel whose every timing call the admission gate refused has a row,
+        # and no time, exactly as a declined one.
+        self.log("cifar_resnet_b1 ocannl/cuda/default", [
+            ("0/2", "untimed", None), ("1/2", 2.0, ["kernel_s2sc.grad"])])
 
         _, out, _ = self.run_sites()
 

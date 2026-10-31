@@ -389,14 +389,16 @@ files.
   rebuilding fission from a forward graph omits the very gradient segment the table is for.
   `BENCH_STEPS=1` runs BEFORE `BENCH_SEG_TIMES=1`: isolated backward/SGD runs mutate gradients and
   weights, so controls taken afterwards do not follow the fixture trajectory. Each isolated time
-  includes a launch + sync floor, and their sum is not step latency. `gh1133_cells.sh`'s `trainseg`
+  is the median of its `Bench_retime` timing calls (gh-ocannl-1694; see the next entries), and
+  their sum is not step latency. `gh1133_cells.sh`'s `trainseg`
   step appends those tables to `summary` beside the step matrix and refuses an older forward-only
   diagnostic. The driver records per-cell exit statuses; its shared validator excludes forward-only
   and failed/partial cells from the report. A census inventories both compiled host-gated routines
   before any execution; the benchmark-window filter is only for the dominant-kernel column.
   `BENCH_PROMOTE=0` is still a forward-only reconstructed census experiment.
 - **An isolated per-kernel time is repeatable but is no attribution of step time** (gh-ocannl-1347).
-  At a fixed revision a kernel's isolated min-of-20 repeats within about 1% across processes. What
+  At a fixed revision a kernel's isolated min-of-20 repeated within about 1% across processes on
+  rog (the protocol before gh-ocannl-1694's medians). What
   moves it between rows and runs is code: per-layer kernels with identical geometry inline
   different-length recomputations of the Virtual residual stream (`l0_ffn_b2.grad` re-derives
   every later layer's layer-norm backward), so 4.4 ms vs 18.5 ms between layers is work, and a
@@ -405,15 +407,25 @@ files.
   kernel's share of the step. The in-step device durations (`gh1133_cells.sh ... kprof`,
   `--cuda-graph-trace=node`: the step replays one CUDA graph, so without it nsys sees no
   segments) sum to the step; read step shares from them only. A shared-box co-tenant can double a
-  whole isolated window, since 20 back-to-back runs fit in under a second; GPU counters (`ncu`)
+  whole isolated window, since one fits in well under a second; GPU counters (`ncu`)
   need admin on rog. The laptop clock hops between 1.8 and 2.8 GHz under the power cap, so b8
   kernels below 1 ms carry about 10% step-to-step spread, and a per-kernel difference below the
   `SPREAD` it shows is not one.
+- **A per-kernel median's own range does not bound another process's** (gh-ocannl-1694). The A/A
+  at `53850274` (Metal, mac-studio M4 Max, `gpt2_mini_train`, 178 kernels, three processes of four
+  timing calls a kernel): the three medians of a row spread 5.5% at p50, 12.9% at p90 and 29% at
+  worst, against a within-process range of 9.2% at p50; 48 of 178 rows spread wider than their
+  own typical range, and in only 36 do all three medians sit inside every process's range. The dominant kernel (`l0_ffn_b2.grad`) stayed k138 in all three
+  but read 7.33, 8.32 and 8.86 ms, with the third process's whole step 11% slower too. Compare
+  kernels across builds through repeated processes, never one table each. The instrument cost
+  371-381 s of the cell's 377-386 s (about 2.1 s a kernel; the 21-run protocol cost an estimated
+  0.15 s, mostly the compile).
 - **What separates an isolated time from the in-step one on rog, and what does not**
   (gh-ocannl-1391). Not the buffers: the isolated compile is a child of the step's context and
   links against the step's own buffers (a probe of every kernel of gpt2_mini_train_b256 found
   none fresh and no non-finite input; a node new to a context is zero-filled at link anyway). Not
-  state drift: running each kernel 21 times in census order compounds the accumulators later
+  state drift: running each kernel 21 times in census order (the protocol then) compounds the
+  accumulators later
   kernels read (gradients reach ~1e5), yet restoring every kernel's outputs after its window moved
   no row, including gh-ocannl-1347's 2.3x `gamma_ln2_l1.grad` at its own revision `d90f69c2b`.
   That row belonged to the single-kernel layer-norm parameter gradient that gh-ocannl-1325's split
