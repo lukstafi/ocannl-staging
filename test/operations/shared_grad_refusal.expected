@@ -1,0 +1,38 @@
+the first consumer zeroes and accumulates into the shared gradient: true
+the second only accumulates into it: true
+the term owns no backprop fragment, and the second loss requires nothing of it: true
+the first consumer zeroes exactly its own and the image's gradient: true
+zero_params_grads zeroes the leaf and accumulates nothing: true
+grad_update ~accum_steps strips the leaf's zeroing from the first consumer: true
+grad_update ~accum_steps over the second consumer has no zeroing of it to strip: true
+with accum_steps, the first consumer zeroes only its own gradient: true
+content alone: x.grad = 2x: true
+style compiled after content is refused, naming x's gradient and both routines: true
+the refusal left content's gradient: true
+the same context still compiles a common reset: true
+style alone: x.grad = 3: true
+content compiled after style is refused: it zeroes the gradient itself: true
+two runs: x.grad = 2x + 3, no carry-over: true
+one input-optimization step: x - 0.5 (2x + 3): true
+a reset compiled before both, carried by neither: true
+reset, content, style: x.grad = 2x + 3: true
+a second cycle: the same: true
+a cycle without the reset carries over (the control): true
+a zeroing compiled after the first accumulation is no common reset: true
+two accumulations with no reset at all are refused: true
+a reset compiled in a sibling does not count: true
+style's plain update, as a sibling of content's: true
+content's update: true
+style's accumulating update, as a sibling of content's: true
+content's sibling: x.grad = 2x: true
+style's sibling, over the reset: x.grad = 3: true
+a parameter owns no backprop fragment: true
+the second update is refused, naming the parameter's gradient: true
+the refusal left a's gradient: true
+a common reset, then both: true
+two cycles: w.grad = 2 + 2w: true
+l2 after l1's update is refused: l1 already propagates from h's gradient: true
+l1's update after l2's is refused: it zeroes h's gradient itself: true
+a contribution compiled after the zero-free propagation is refused: true
+contributor first, zero-free owner last, over a common reset: true
+two cycles: w.grad = 10 w: true

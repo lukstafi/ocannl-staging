@@ -131,13 +131,16 @@ let stepped_params_for ~fn_name ?params loss =
     a same-routine reset) while the {e leaf} gradients (parameters' and [Require_grad] leaves', see
     [trained_leaves]) accumulate across micro-steps.
 
-    The match is by [Fetch] constructor and tnode identity, so a change to how zeroing is emitted (a
-    different constructor, or a leaf gradient dropping out of the tree) would silently keep zeroing
-    leaf gradients — corrupting the accumulation. A gradient that the backprop writes is accumulated
-    into, so it is zeroed in the tree: we raise when such a [grads] member had nothing removed
-    rather than let the drift through. Pass only the gradients backprop reaches — a parameter
-    detached from the loss (behind {!Operation.stop_gradient}, say) stays in [loss.params] while its
-    gradient is neither zeroed nor accumulated. *)
+    Only the members of [grads] the computation zeroes ({!Ir.Assignments.field-zeroes}) are
+    stripped: a leaf shared with an earlier-constructed loss had its zeroing carried by that loss
+    (gh-ocannl-1744), so this one has none to strip -- its reset is a separate routine's, which is
+    the common reset two accumulating routines need. The match is by [Fetch] constructor and tnode
+    identity, and the [Fetch]es removed must be exactly [grads ∩ zeroes]: a change to how zeroing is
+    emitted (a different constructor, a gradient dropping out of the tree) or to the metadata that
+    describes it raises here rather than silently keep zeroing leaf gradients -- corrupting the
+    accumulation -- or leave a stated reset that no longer runs. Pass only the gradients backprop
+    reaches — a parameter detached from the loss (behind {!Operation.stop_gradient}, say) stays in
+    [loss.params] while its gradient is neither zeroed nor accumulated. *)
 let filter_out_grad_zeroing ~grads (comp : Asgns.comp) =
   let removed = Hash_set.create (module Tn) in
   let rec loop = function
@@ -150,14 +153,21 @@ let filter_out_grad_zeroing ~grads (comp : Asgns.comp) =
     | (Asgns.Accum_op _ | Asgns.Set_vec_unop _ | Asgns.Fetch _) as t -> t
   in
   let result = loop comp.asgns in
-  let missing = Set.filter grads ~f:(fun g -> not (Hash_set.mem removed g)) in
-  if not (Set.is_empty missing) then
-    invalid_arg @@ "Train.filter_out_grad_zeroing: no zeroing found for accumulated gradient(s): "
-    ^ String.concat ~sep:", " (List.map (Set.to_list missing) ~f:Tn.debug_name)
-    ^ " -- the shape of the zero_grads code changed, gradient accumulation would be corrupted";
+  let stated = Set.inter grads comp.Asgns.zeroes in
+  let removed = Set.of_list (module Tn) (Hash_set.to_list removed) in
+  let drift what nodes =
+    invalid_arg @@ "Train.filter_out_grad_zeroing: " ^ what ^ ": "
+    ^ String.concat ~sep:", " (List.map (Set.to_list nodes) ~f:Tn.debug_name)
+    ^ " -- the shape of the zero_grads code changed, gradient accumulation would be corrupted"
+  in
+  let missing = Set.diff stated removed in
+  if not (Set.is_empty missing) then drift "no zeroing found for accumulated gradient(s)" missing;
+  let unstated = Set.diff removed stated in
+  if not (Set.is_empty unstated) then
+    drift "zeroing found for gradient(s) the computation does not state it zeroes" unstated;
   (* The leaf gradients stay embedded: the surrounding {!grad_update} backprop accumulates into them
      regardless, and they are materialized so they persist across micro-steps. *)
-  { comp with Asgns.asgns = result }
+  { comp with Asgns.asgns = result; zeroes = Set.diff comp.Asgns.zeroes removed }
 
 let grad_update ?(setup_for_parallel = false) ?accum_steps ?accum_loss ?loss_scale loss =
   Option.iter accum_steps ~f:(fun k ->

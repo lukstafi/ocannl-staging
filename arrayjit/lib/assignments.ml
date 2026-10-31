@@ -115,16 +115,24 @@ type comp = {
   requires : Set.M(Fragment).t;
       (** The backprop fragments this computation's gradient writes flow into, which it does not
           carry itself: some routine of the lineage must own each one. *)
+  zeroes : Set.M(Tn).t;
+      (** The gradients whose tensor-generated zeroing this computation carries (gh-ocannl-1744). *)
+  accumulates : Set.M(Tn).t;
+      (** The gradients its tensor-generated backprop accumulates into (gh-ocannl-1744). *)
 }
 [@@deriving sexp_of]
 (** Computations based on assignments. Note: the [arrayjit] library makes use of, but does not
-    produce the {!field-embedded_nodes}, {!field-owned} and {!field-requires} associated to some
-    given {!field-asgns}; [Context] checks [owned] and [requires] per compilation lineage. *)
+    produce the {!field-embedded_nodes}, {!field-owned}, {!field-requires}, {!field-zeroes} and
+    {!field-accumulates} associated to some given {!field-asgns}; [Context] checks [owned] and
+    [requires] per compilation lineage, and [zeroes] and [accumulates] for the gradients two
+    routines of a lineage share. *)
 
 let no_fragments = Set.empty (module Fragment)
+let no_nodes = Set.empty (module Tn)
 
-let comp ?(owned = no_fragments) ?(requires = no_fragments) ~embedded asgns =
-  { asgns; embedded_nodes = embedded; owned; requires }
+let comp ?(owned = no_fragments) ?(requires = no_fragments) ?(zeroes = no_nodes)
+    ?(accumulates = no_nodes) ~embedded asgns =
+  { asgns; embedded_nodes = embedded; owned; requires; zeroes; accumulates }
 
 let to_comp asgns = comp ~embedded:(Set.empty (module Tnode)) asgns
 let empty_comp = to_comp Noop
@@ -282,6 +290,8 @@ let sequence l =
     embedded_nodes = Set.union_list (module Tn) (List.map l ~f:(fun c -> c.embedded_nodes));
     owned;
     requires = Set.union_list (module Fragment) (List.map l ~f:(fun c -> c.requires));
+    zeroes = Set.union_list (module Tn) (List.map l ~f:(fun c -> c.zeroes));
+    accumulates = Set.union_list (module Tn) (List.map l ~f:(fun c -> c.accumulates));
   }
 
 let collect_neutral_elem (asgns : t) : float option =

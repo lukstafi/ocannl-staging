@@ -81,14 +81,32 @@ type comp = {
       (** The backprop fragments its gradient writes flow into that it does not carry itself.
           [Context.run] refuses the routine unless a routine of its own lineage (never a sibling)
           owns each one. *)
+  zeroes : Set.M(Tnode).t;
+      (** The gradients whose tensor-generated zeroing this computation carries (gh-ocannl-1744): a
+          tensor's [zero_grads] and whatever is sequenced from it. *)
+  accumulates : Set.M(Tnode).t;
+      (** The gradients its tensor-generated backprop accumulates into (gh-ocannl-1744): the
+          operands' gradients a tensor's own gradient code writes, and its embedded children's.
+          [Context.compile] refuses a computation accumulating into a gradient that another routine
+          of its lineage accumulates into, unless a zeroing compiled before both, and carried by
+          neither, resets it; and one accumulating into a gradient whose propagation (its [Bprop]
+          fragment) an earlier routine of the lineage already carries. *)
 }
 [@@deriving sexp_of]
-(** Computations based on assignments. [Tensor] construction fills in all three sets; zeroing,
-    initialization and hand-written [%cd] assignments own and require nothing. *)
+(** Computations based on assignments. [Tensor] construction fills in all five sets; zeroing owns
+    and requires nothing (it fills [zeroes] only), and initialization and hand-written [%cd]
+    assignments fill none: a hand-written write to a gradient neither contributes nor resets. *)
 
 val comp :
-  ?owned:Set.M(Fragment).t -> ?requires:Set.M(Fragment).t -> embedded:Set.M(Tnode).t -> t -> comp
-(** The computation constructor; [owned] and [requires] default to empty. *)
+  ?owned:Set.M(Fragment).t ->
+  ?requires:Set.M(Fragment).t ->
+  ?zeroes:Set.M(Tnode).t ->
+  ?accumulates:Set.M(Tnode).t ->
+  embedded:Set.M(Tnode).t ->
+  t ->
+  comp
+(** The computation constructor; [owned], [requires], [zeroes] and [accumulates] default to empty.
+*)
 
 val no_fragments : Set.M(Fragment).t
 val to_comp : t -> comp
@@ -98,10 +116,10 @@ val collect_nodes_guess_output : t -> Tnode.t_set * Tnode.t_set
 val collect_written : t -> Tnode.t_set
 
 val sequence : comp list -> comp
-(** Runs the computations in order, uniting their nodes and fragments. Raises [Utils.User_error],
-    naming the fragment, when two members own the same fragment (gh-ocannl-1746): [owned] is a set,
-    so the copy would otherwise run twice unseen -- for a backprop fragment, a double-counted
-    gradient. *)
+(** Runs the computations in order, uniting their nodes, fragments and gradient sets. Raises
+    [Utils.User_error], naming the fragment, when two members own the same fragment
+    (gh-ocannl-1746): [owned] is a set, so the copy would otherwise run twice unseen -- for a
+    backprop fragment, a double-counted gradient. *)
 
 val collect_neutral_elem : t -> float option
 val to_low_level : ?static_indices:Indexing.static_symbol list -> t -> Low_level.t

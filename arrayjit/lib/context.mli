@@ -229,7 +229,24 @@ val compile :
     double-count a gradient. Re-running the earlier routine is {!run}'s job; an alternative compile
     (another [lowered_transform], a placement arm) is compiled as a sibling, from a context that
     does not descend from the owner. The lineage records a routine's fragments only once its link
-    succeeds. *)
+    succeeds.
+
+    Also refuses, the same way, a [comp] whose tensor-generated backprop accumulates into a gradient
+    ({!Ir.Assignments.field-accumulates}) that the lineage cannot keep correct (gh-ocannl-1744),
+    naming the gradient and both routines: [Tensor] gives a shared operand's gradient zeroing (and
+    its backprop) to the operand's first-constructed consumer only, while every consumer accumulates
+    into it -- so two [Train.grad_update]s over one [Require_grad] input, parameter or trunk give
+    neither loss's gradient. Refused when another routine of the lineage accumulates into the
+    gradient, unless neither of the two zeroes it ({!Ir.Assignments.field-zeroes}) and every zeroing
+    of it in the lineage -- at least one, accumulating nothing into it -- was compiled before the
+    first accumulation; and when an earlier routine of the lineage already carries the backprop
+    propagating FROM the gradient (its contribution would never propagate: compile contributors
+    first, the propagating routine last). The supported spellings: one routine over the objectives'
+    sum, or [Train.zero_params_grads ~params] compiled first and then
+    [Train.grad_update ~accum_steps] per objective. Hand-written [%cd] writes to a gradient neither
+    contribute nor reset, siblings are alternatives and never collide, and the check is compile-time
+    compatibility only: the order of later {!run}s stays the caller's. [Context.join]
+    (gh-ocannl-1742) is to lift the refusal by hoisting the zeroing. *)
 
 type retained
 (** Compiled code that a successful {!compile_outcome} handed to its [retain] callback: the

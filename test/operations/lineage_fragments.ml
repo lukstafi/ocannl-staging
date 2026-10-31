@@ -10,8 +10,9 @@
    w], [loss = t *. 3], so [d loss / d w = 6 w] -- exact by construction, compared bitwise. With the
    once-contract retired, [forward_once t] leaves [t]'s backprop to a later loss (B, G1, G2, and the
    virtual-intermediate leg, held to fresh graphs). Owner presence is NOT proof of a correct
-   gradient: the shared-trunk legs only assert the checks' verdicts (the zeroing order between two
-   routines over one trunk is a separate hazard). *)
+   gradient: the shared-trunk legs only assert the checks' verdicts. The zeroing and propagation
+   order between two routines over one trunk or term is [Context.compile]'s shared-gradient check
+   (gh-ocannl-1744, [shared_grad_refusal.ml]), which refuses the owner-first compositions here. *)
 open Base
 open Ocannl
 open Nn_blocks.DSL_modules
@@ -271,13 +272,22 @@ let () =
       let msg = refusal "trunk, sibling owner" (fun () -> Train.update_once ctx0 l2) in
       p "an owner compiled -- and run -- in a sibling does not count, and is named"
         (unpropagated msg (grad_of h) && has msg "compiled outside this lineage");
-      ignore
-        (accepted "l2 compiled in l1's lineage is accepted (no claim on the gradient values)"
-           (fun () -> Train.update_once ctx_l1 l2)));
+      let msg = refusal "trunk, owner first" (fun () -> Train.update_once ctx_l1 l2) in
+      p "l2 compiled after its owner in l1's lineage is refused: the propagation precedes it"
+        (has msg "already propagates from it" && has msg (Ir.Tnode.label_name (grad_of h))));
   case "late owner" (fun () ->
       let h, l1, l2, base = trunk "lf_lo" in
       let ctx = base () in
-      let l1_update = Train.grad_update l1 in
+      (* The owner zeroes nothing: [base]'s [h_zero], compiled before both, is the common reset of
+         [h.grad] (gh-ocannl-1744) -- [Train.grad_update l1] would zero it itself, and is
+         refused. *)
+      let l1_update =
+        [%cd
+          ~~(l1 "lf_lo propagation";
+             l1.forward;
+             l1.grad =: 1;
+             l1.backprop)]
+      in
       let ctx_a, r2 = Train.to_routine ctx IDX.empty (Train.grad_update l2) in
       let ctx_b, _r1 = Train.to_routine ctx_a IDX.empty l1_update in
       let msg = refusal "late owner, run before it" (fun () -> Context.run ctx_a r2) in
@@ -303,11 +313,12 @@ let () =
       p "a non-root parameter child generates no requirement"
         (Set.is_empty (Option.value_exn ~here:[%here] b.diff).backprop.requires);
       let ctx = Train.update_once (Context.auto ()) a in
-      (* No value claim: [b]'s construction found [pw] no longer a backprop root and skipped its
-         zeroing too, so [pw.grad] accumulates both losses' contributions -- the zeroing-order
-         hazard the checks do not address. *)
-      ignore
-        (accepted "two losses over one parameter, one lineage" (fun () -> Train.update_once ctx b));
+      (* [b]'s construction found [pw] no longer a backprop root and skipped its zeroing too, so
+         [pw.grad] would accumulate both losses' contributions with [a]'s routine zeroing it: the
+         shared-gradient check refuses it (gh-ocannl-1744, [shared_grad_refusal.ml]). *)
+      let msg = refusal "two losses, one parameter" (fun () -> Train.update_once ctx b) in
+      p "two losses over one parameter, one lineage, are refused"
+        (has msg "zeroes it itself" && has msg (Ir.Tnode.label_name (grad_of pw)));
       let pv = TDSL.param ~values:[| 1.; 2. |] "lf_acc_w" ~output_dims:[ 2 ] () in
       let%op loss = pv *. pv in
       let ctx = Train.init_params (Context.auto ()) IDX.empty loss in

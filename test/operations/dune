@@ -10410,6 +10410,22 @@
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
+; gh-ocannl-1744: two routines of a lineage accumulating into one shared gradient (an input, a
+; parameter, a trunk) without a common zeroing are refused at compile, naming both; the supported
+; spellings (one routine over the sum, a common reset compiled first) run with exact values.
+
+(test
+ (name shared_grad_refusal)
+ (package neural_nets_lib)
+ (locks ocannl_training_test)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules shared_grad_refusal)
+ (libraries base ocannl stdio arrayjit.verdict)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
 (test
  (name fragment_sequenced_twice)
  (package neural_nets_lib)

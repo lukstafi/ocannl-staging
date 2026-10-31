@@ -869,7 +869,12 @@ let%track7_sexp op ~(label : string list) ?(ternary_op = Shape.Pointwise_tern)
          {!Train.zero_params_grads} does) must be able to allocate them rather than require them of
          a prior context. *)
       Asgns.sequence @@ zeros
-      @ [ Asgns.comp ~embedded:(Set.singleton (module Tn) g) (fetch_zeros g shape) ]
+      @ [
+          Asgns.comp
+            ~embedded:(Set.singleton (module Tn) g)
+            ~zeroes:(Set.singleton (module Tn) g)
+            (fetch_zeros g shape);
+        ]
     in
     let embedded_nodes = ref @@ Set.singleton (module Tn) g in
     (* The code needs to be included in the reverse order to which it was computed. This guarantees
@@ -943,9 +948,18 @@ let%track7_sexp op ~(label : string list) ?(ternary_op = Shape.Pointwise_tern)
        (gh-ocannl-1301). *)
     let own_grad_asn = Shape.with_construction_window (fun () -> grad_asn ~t ~g ~projections) in
     let backprop = Asgns.sequence (own_grad_asn :: bcks) in
+    let written = Asgns.collect_written own_grad_asn.asgns in
     let requires =
-      let written = Asgns.collect_written own_grad_asn.asgns in
       Set.filter !requires ~f:(fun ((grad, _) : Asgns.Fragment.t) -> Set.mem written grad)
+    in
+    (* The operands' gradients this operation's own gradient code writes (gh-ocannl-1744), whether
+       or not the operand is still a backprop root: a non-root's zeroing was skipped above together
+       with its backprop, so [Context.compile] needs to know who else accumulates into it. The
+       embedded children's come through [Asgns.sequence]. *)
+    let accumulates =
+      List.filter_map ordered_ts ~f:(fun ti ->
+          Option.bind ti.diff ~f:(fun diff -> Option.some_if (Set.mem written diff.grad) diff.grad))
+      |> Set.of_list (module Tn)
     in
     (* The backprop fragment of [t]: [(g, Bprop)] plus the embedded children's fragments. *)
     let backprop =
@@ -955,6 +969,7 @@ let%track7_sexp op ~(label : string list) ?(ternary_op = Shape.Pointwise_tern)
         owned =
           (if terminal_backprop then backprop.owned else Set.add backprop.owned (g, Asgns.Bprop));
         requires = Set.union backprop.requires requires;
+        accumulates = Set.union backprop.accumulates accumulates;
       }
     in
     (* As in the forward-only branch: the root changes below count, and nothing after them fails. *)
@@ -1168,7 +1183,11 @@ let force_param_diff t =
   let diff =
     {
       grad = g;
-      zero_grads = Asgns.comp ~embedded:(Set.singleton (module Tn) g) (fetch_zeros g t.shape);
+      zero_grads =
+        Asgns.comp
+          ~embedded:(Set.singleton (module Tn) g)
+          ~zeroes:(Set.singleton (module Tn) g)
+          (fetch_zeros g t.shape);
       backprop = Asgns.empty_comp;
     }
   in
