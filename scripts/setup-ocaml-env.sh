@@ -23,6 +23,31 @@
 # no longer exists, so that path is gone; docs/fast-setup.md describes the
 # abandoned design.
 
+# --- sourced, or read by zsh ---------------------------------------------
+# This is a bash program meant to be RUN, as the hook runs it; it exports
+# nothing to its caller. Sourced, its `exit` would close the caller's shell, and
+# its `set -u` / `set -m`, functions and variables would land in it; read by zsh
+# (sourced from zsh, or `zsh scripts/setup-ocaml-env.sh`) its bash-isms would
+# misbehave besides. So in every case but bash executing it, it hands itself to
+# a bash child, which is exactly the hook's run, and then returns that child's
+# status to the caller (sourced) or ends with it (executed by zsh). zsh tells
+# the two apart by ZSH_EVAL_CONTEXT, whose `file` element is a `source`/`.` in
+# progress, and names the file being read as `%x` (eval'd: the expansion is
+# zsh's own syntax); bash names a sourced file in BASH_SOURCE, which differs
+# from $0 only when the file was sourced. The whole block is one command, read
+# before anything below it, so neither shell parses past the hand-off.
+if [ -n "${ZSH_VERSION:-}" ]; then
+  case "${ZSH_EVAL_CONTEXT:-}" in
+    *file*)
+      echo "setup-ocaml-env.sh: sourced, so run in a bash child -- nothing is set in this shell" >&2
+      eval 'bash "${(%):-%x}" "$@"'; return $? ;;
+    *) eval 'exec bash "${(%):-%x}" "$@"' ;;
+  esac
+elif [ -n "${BASH_VERSION:-}" ] && [ "${BASH_SOURCE[0]}" != "$0" ]; then
+  echo "setup-ocaml-env.sh: sourced, so run in a bash child -- nothing is set in this shell" >&2
+  bash "${BASH_SOURCE[0]}" "$@"; return $?
+fi
+
 set -u
 
 MODE_DEPS=0
@@ -37,11 +62,11 @@ done
 # Only cloud sessions may install things unattended.
 if [ "${CLAUDE_CODE_REMOTE:-}" = "true" ]; then MAY_INSTALL=1; else MAY_INSTALL=0; fi
 
-status=0
+setup_status=0
 ok()   { printf '  ok    %s\n' "$*"; }
 fixed(){ printf '  fixed %s\n' "$*"; }
-todo() { printf '  todo  %s\n' "$*"; status=1; }
-fail() { printf '  FAIL  %s\n' "$*" >&2; status=1; }
+todo() { printf '  todo  %s\n' "$*"; setup_status=1; }
+fail() { printf '  FAIL  %s\n' "$*" >&2; setup_status=1; }
 
 script_dir="$(cd "$(dirname "$0")" 2>/dev/null && pwd || true)"
 if [ -z "$script_dir" ] || [ ! -r "$script_dir/process-group.sh" ]; then
@@ -258,7 +283,7 @@ else
   todo "opam is not on PATH — see https://opam.ocaml.org/doc/Install.html"
 fi
 
-command -v opam >/dev/null 2>&1 || { echo "=== stopped: opam required ==="; exit $status; }
+command -v opam >/dev/null 2>&1 || { echo "=== stopped: opam required ==="; exit $setup_status; }
 
 # --- opam root -----------------------------------------------------------
 OPAM_ROOT_RAW="$(opam var root 2>/dev/null || true)"
@@ -428,6 +453,6 @@ if [ -n "${CLAUDE_ENV_FILE:-}" ]; then
   opam env --shell=sh >>"$CLAUDE_ENV_FILE" 2>/dev/null && ok "environment persisted"
 fi
 
-if [ "$status" = 0 ]; then echo "=== ready ==="; else echo "=== incomplete (see 'todo' above) ==="; fi
+if [ "$setup_status" = 0 ]; then echo "=== ready ==="; else echo "=== incomplete (see 'todo' above) ==="; fi
 # A hook must not fail the session; report state through the summary instead.
 exit 0

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Tests for the "staleness against origin/master" section of
-# scripts/setup-ocaml-env.sh (the SessionStart hook).
+# scripts/setup-ocaml-env.sh (the SessionStart hook), and for the hand-off that
+# keeps a shell sourcing it alive.
 #
 #   scripts/test-setup-ocaml-env.sh          # run every leg
 #   scripts/test-setup-ocaml-env.sh --keep   # keep the temp dir for inspection
@@ -35,6 +36,9 @@
 #      ref-ambiguity, FETCH_HEAD untouched, no-origin silence.
 #   3. SSH launcher gating — which program git ends up invoking and whether the
 #      OpenSSH options were appended to it.
+#   4. sourcing — sourced from bash or zsh (or executed by zsh), the hook runs
+#      in a bash child: the caller survives its exit and no read-only `status`
+#      error appears; mutants without the hand-off are the negative controls.
 
 set -u
 
@@ -939,6 +943,118 @@ fi
 fi
 }
 harness_leg_run '3: SSH launcher gating' leg_3
+
+# ---------------------------------------------------------------------------
+# Leg 4: sourcing
+# ---------------------------------------------------------------------------
+# Workers `source` the hook from zsh, where `status` is a read-only special
+# parameter, and a sourced `exit` closes the caller's shell. The hook hands
+# itself to a bash child whenever bash is not executing it; this leg sources it
+# from zsh and bash and executes it with zsh, each time on the opam-free PATH,
+# so the run ends at the opam stop -- `exit 1`, the very exit that would close a
+# sourcing shell -- and asserts that the caller ran on, saw that status, and
+# printed no read-only error. Two mutants of the hook, with the hand-off
+# removed and with `status` also restored, are the negative controls: each
+# fails the same check the shipping hook passes. zsh runs with -f, so the
+# fake home's absent startup files are not what the leg depends on.
+leg_4() {
+local SRC_BIN="$TMP/bin-source" zsh_bin control
+mkdir -p "$SRC_BIN"
+cp -R "$BIN/." "$SRC_BIN/"
+# The hand-off finds bash on PATH, as it would anywhere.
+ln -sf "$BASH_BIN" "$SRC_BIN/bash"
+zsh_bin="$(command -v zsh 2>/dev/null || true)"
+[ -z "$zsh_bin" ] || ln -sf "$zsh_bin" "$SRC_BIN/zsh"
+
+# One fixture per hook variant: an origin-less repository, so the staleness
+# section fetches nothing, holding the variant and the helpers it sources.
+src_fixture() { # NAME HOOK_FILE -> path
+  local d="$TMP/src-$1"
+  rm -rf "$d"; mkdir -p "$d/scripts"
+  git_q -C "$d" init -q
+  cp "$2" "$d/scripts/setup-ocaml-env.sh"
+  stage_sourced "$2" "$d" || exit 2
+  printf '%s\n' "$d"
+}
+# src_run FIXTURE OUTFILE SHELL_ARGV... -- run in FIXTURE with the sanitised
+# environment; OUTFILE gets stdout+stderr and then `outer rc=N`.
+src_run() {
+  local d="$1" out="$2" rc=0
+  shift 2
+  ( cd "$d" && env -i HOME="$FAKEHOME" PATH="$SRC_BIN" \
+      GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
+      "$@" ) >"$out" 2>&1 || rc=$?
+  printf 'outer rc=%s\n' "$rc" >>"$out"
+}
+SURVIVE='source scripts/setup-ocaml-env.sh; echo "survived rc=$?"'
+# src_ok OUTFILE -> 0 when the caller survived, saw the opam stop's status 1,
+# and nothing complained of a read-only variable.
+src_ok() {
+  has "$1" '=== stopped: opam required ===' && has "$1" 'survived rc=1' &&
+    ! grep -qi 'read-only variable\|readonly variable' "$1"
+}
+src_report() { # LABEL OUTFILE
+  if src_ok "$2"; then report 0 "$1"
+  else report 1 "$1" "output was: $(tr '\n' '|' <"$2")"; fi
+}
+# src_control LABEL OUTFILE EXTRA_GREP -- a mutant must fail src_ok, and for
+# the reason named (EXTRA_GREP present in its output; empty: no `survived`).
+src_control() {
+  if src_ok "$2"; then
+    report 1 "negative control: $1" "the mutant passed: $(tr '\n' '|' <"$2")"
+  elif [ -n "$3" ] && ! grep -qi -- "$3" "$2"; then
+    report 1 "negative control: $1" "failed without printing /$3/: $(tr '\n' '|' <"$2")"
+  elif [ -z "$3" ] && grep -qF 'survived' "$2"; then
+    report 1 "negative control: $1" "failed, but the caller survived: $(tr '\n' '|' <"$2")"
+  else
+    report 0 "negative control: $1"
+  fi
+}
+
+ship="$(src_fixture ship "$HOOK_SRC")"
+# The mutants. Each must really differ from the hook, or its control would
+# pass vacuously.
+sed '/^# --- sourced, or read by zsh/,/^fi$/d' "$HOOK_SRC" >"$TMP/hook-noguard.sh"
+sed 's/setup_status/status/g' "$TMP/hook-noguard.sh" >"$TMP/hook-status.sh"
+if grep -q 'ZSH_EVAL_CONTEXT' "$TMP/hook-noguard.sh" || ! grep -q 'ZSH_EVAL_CONTEXT' "$HOOK_SRC" ||
+   ! grep -q '^status=0$' "$TMP/hook-status.sh"; then
+  report 1 "sourcing: the mutants remove the hand-off (and restore \`status\`)" \
+    "the hook's hand-off block or its setup_status counter is no longer spelled as this leg expects"
+  return 0
+fi
+noguard="$(src_fixture noguard "$TMP/hook-noguard.sh")"
+statusv="$(src_fixture status "$TMP/hook-status.sh")"
+
+src_run "$ship" "$TMP/out-src-bash" bash -c "$SURVIVE"
+src_report "sourcing (a): sourced from bash, the caller survives the hook's exit" "$TMP/out-src-bash"
+src_run "$noguard" "$TMP/out-src-bash-noguard" bash -c "$SURVIVE"
+src_control "sourcing (a): without the hand-off, bash's caller dies" "$TMP/out-src-bash-noguard" ""
+
+if [ -z "$zsh_bin" ]; then
+  skip "sourcing (b-d): zsh legs" "no zsh on PATH"
+  return 0
+fi
+src_run "$ship" "$TMP/out-src-zsh" zsh -f -c "$SURVIVE"
+src_report "sourcing (b): sourced from zsh, the caller survives with no read-only error" "$TMP/out-src-zsh"
+src_run "$noguard" "$TMP/out-src-zsh-noguard" zsh -f -c "$SURVIVE"
+src_control "sourcing (b): without the hand-off, zsh's caller dies" "$TMP/out-src-zsh-noguard" ""
+src_run "$statusv" "$TMP/out-src-zsh-status" zsh -f -c "$SURVIVE"
+src_control "sourcing (b): with \`status\` restored too, zsh reports a read-only variable" \
+  "$TMP/out-src-zsh-status" 'read-only variable'
+# Sourced from inside a function, the other context zsh can source in.
+src_run "$ship" "$TMP/out-src-zsh-fn" zsh -f -c "f() { $SURVIVE; }; f"
+src_report "sourcing (c): sourced from a zsh function, the caller survives" "$TMP/out-src-zsh-fn"
+# Executed by zsh: no caller to keep alive, but the run must be bash's.
+src_run "$ship" "$TMP/out-src-zsh-exec" zsh -f scripts/setup-ocaml-env.sh
+if has "$TMP/out-src-zsh-exec" '=== stopped: opam required ===' && has "$TMP/out-src-zsh-exec" 'outer rc=1' &&
+   ! grep -qi 'read-only variable' "$TMP/out-src-zsh-exec"; then
+  report 0 "sourcing (d): executed by zsh, it runs as bash and keeps the hook's status"
+else
+  report 1 "sourcing (d): executed by zsh, it runs as bash and keeps the hook's status" \
+    "output was: $(tr '\n' '|' <"$TMP/out-src-zsh-exec")"
+fi
+}
+harness_leg_run '4: sourcing from zsh and bash' leg_4
 
 # ---------------------------------------------------------------------------
 finish

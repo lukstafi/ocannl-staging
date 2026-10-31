@@ -1723,6 +1723,12 @@ in the `tools/*.sh` scripts (gh-ocannl-1111) and in the string literals of the O
   reaper is a PID 1 that does not reap — the ordinary container case — the zombie is PERMANENT, so
   the first attempt at this, a short retry loop around the same `kill -0`, would not have helped;
   that is the shape to keep in mind before reaching for a timing fix here again.
+  The hook is RUN, never sourced: it sets nothing in its caller's shell. Sourced (workers did, from
+  zsh, where `status` is a read-only special parameter and the hook's `exit` closed the caller), or
+  read by zsh at all, it hands itself to a bash child and returns that child's status, after one
+  stderr line saying so; the harness's leg 4 pins it from bash and zsh, with mutants lacking the
+  hand-off (and restoring `status`) as its negative controls. CI's `harnesses` job installs zsh for
+  that leg, since the image ships none; a Linux box without zsh reports it as an unlisted skip.
 - **A merged session worktree retires with `--regenerable _build`.** ship-pr's
   `post-merge-cleanup.sh` (lukstafi/ludics-lite) archives a merged session worktree out of the way
   and refuses one carrying ignored data the base checkout lacks, since an archive would put that
