@@ -122,20 +122,37 @@ let with_stream { override; _ } on f =
           Stdlib.Domain.DLS.set override on;
           f ())
 
+(* Config [autotune_log]'s level, read once per process: [`Off], [`Crown] (gh-ocannl-1718: only the
+   one crown-and-finals line per call, see {!log_crown}) or [`Full] (every diagnostic, the crown
+   line included). *)
+let log_level =
+  lazy
+    (match
+       String.lowercase
+         (String.strip (Utils.get_global_arg ~arg_name:"autotune_log" ~default:"false"))
+     with
+    | "true" | "1" -> `Full
+    | "crown" -> `Crown
+    | _ -> `Off)
+
 (* Per-candidate search diagnostics on stderr, gated by config [autotune_log] -- or, for the
    duration of one call, by its [?log] argument. Kept above the timing policy because a cap-bound
    queued batch reports the target wall it could not reach. *)
 let log_switch =
-  stream_switch
-    (lazy
-      (match
-         String.lowercase
-           (String.strip (Utils.get_global_arg ~arg_name:"autotune_log" ~default:"false"))
-       with
-      | "true" | "1" -> true
-      | _ -> false))
+  stream_switch (lazy (match Lazy.force log_level with `Full -> true | `Crown | `Off -> false))
 
 let log_enabled () = stream_enabled log_switch
+
+(* The crown line's switch: the [?log] override is [log_switch]'s own, so a call's [~log:true] adds
+   the line to its full diagnostics and [~log:false] silences both; without an override, either
+   level of the config turns it on. *)
+let crown_switch =
+  {
+    setting = lazy (match Lazy.force log_level with `Full | `Crown -> true | `Off -> false);
+    override = log_switch.override;
+  }
+
+let crown_enabled () = stream_enabled crown_switch
 
 let logf fmt =
   Printf.ksprintf (fun s -> if log_enabled () then Stdio.eprintf "autotune: %s\n%!" s) fmt
@@ -566,6 +583,23 @@ let terminal_failure (r : report) =
   | Searched | Cache_replay | Abandonment_replay _ | Search_disabled | Abandoned _
   | Lineage_refused _ ->
       None
+
+(* gh-ocannl-1718 (moved from the test-support [Tune_crown], gh-ocannl-1498): what a call crowned
+   and how the beam finals decided it, as one line of fields. One renderer, so the
+   [autotune_log=crown] line, a test's stderr line and a bench's line spell the same report the same
+   way. *)
+let finals_fields (r : report) =
+  Printf.sprintf "finals=%s finals_contenders=%d"
+    (String.substr_replace_all ~pattern:" " ~with_:"_" (finals_outcome_name r.finals_outcome))
+    (List.length r.finals)
+
+let crown_fields (r : report) =
+  Printf.sprintf "outcome=%s crowned=%S best_ms=%.4f %s" (outcome_name r.outcome) r.best_label
+    r.best_ms (finals_fields r)
+
+let log_crown ~routine (r : report) =
+  if crown_enabled () then
+    Stdio.eprintf "autotune-crown: routine=%S %s\n%!" routine (crown_fields r)
 
 (* gh-ocannl-1110: the flip chain's early abandonment. *)
 exception Search_abandoned of abandonment
@@ -7716,6 +7750,7 @@ let tune_in_stream_scope ~timing_state ~defer ~substituted ?name ?search ?beam_w
            (Option.is_some r.baseline_refusal)
            (List.sum (module Int) r.privatize_drops ~f:(fun d -> d.count))
            (progress_costs ()) (progress_ms r.best_ms) r.best_label);
+      log_crown ~routine:(Lazy.force routine_name) r;
       Option.iter report ~f:(fun f -> f r))
   in
   (* [tune] reports exactly once per call, on every path (gh-ocannl-550). The failures that happen

@@ -21,15 +21,7 @@
  (name bench_harness)
  (package neural_nets_lib)
  (modules bench_harness)
- (libraries
-  base
-  bench_json
-  ocannl
-  stdio
-  tune_crown
-  unix
-  mtime
-  mtime.clock.os)
+ (libraries base bench_json ocannl stdio unix mtime mtime.clock.os)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -120,7 +112,6 @@
   bench_splice
   ocannl
   stdio
-  tune_crown
   unix
   mtime
   mtime.clock.os)

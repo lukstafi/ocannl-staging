@@ -319,7 +319,7 @@ let () =
       which r.Autotune.best_label (ms r.Autotune.best_ms) (ms r.Autotune.mma_best_ms)
       (r.Autotune.mma_best_ms -. r.Autotune.best_ms)
       r.Autotune.best_tensorized r.Autotune.best_mma_scalar_fallbacks r.Autotune.best_mma_statements
-      (Tune_crown.finals_fields r);
+      (Autotune.finals_fields r);
     Verdict.pass_fail
       (which ^ " labels a winner exactly when it has a winning time")
       (Bool.equal (String.is_empty r.Autotune.best_label) (Float.is_inf r.Autotune.best_ms))

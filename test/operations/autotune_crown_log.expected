@@ -1,0 +1,14 @@
+the crown level leaves the full diagnostics off: true
+a search: exactly one crown line, the report's own fields: true
+a search: no full autotune_log line: true
+the search was searched: true
+a cache replay: exactly one crown line, the report's own fields: true
+a cache replay: no full autotune_log line: true
+the second call replayed the cache: true
+a search-less call: exactly one crown line, the report's own fields: true
+a search-less call: no full autotune_log line: true
+a deferred call, its compile included: exactly one crown line, the report's own fields: true
+a deferred call, its compile included: no full autotune_log line: true
+~log:false silences the crown line: true
+~log:true keeps exactly the one crown line: true
+~log:true prints the full diagnostics too: true

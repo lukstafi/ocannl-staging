@@ -5947,14 +5947,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules autotune_smoke)
- (libraries
-  base
-  ocannl
-  stdio
-  arrayjit.verdict
-  arrayjit.ll_builders
-  ll_test
-  tune_crown)
+ (libraries base ocannl stdio arrayjit.verdict arrayjit.ll_builders ll_test)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -10563,6 +10556,21 @@
  (libraries base ocannl stdio arrayjit.verdict ll_test)
  (preprocess
   (pps ppx_here ppx_ocannl)))
+
+(test
+ ; cc-vector-width: independent -- its claims are which stderr lines each call writes and that each
+ ; matches the call's own report; a pointwise add has a candidate at every width.
+ ; ocannl-backend: cc -- every call tunes on an explicit Context.cpu (); the property is the report path's, not a backend's.
+ ; gh-ocannl-1718: autotune_log=crown prints exactly one crown-and-finals line per tune call.
+ (name autotune_crown_log)
+ (package neural_nets_lib)
+ (deps ocannl_config)
+ (modules autotune_crown_log)
+ (libraries base ocannl stdio stderr_capture arrayjit.verdict)
+ (preprocess
+  (pps ppx_here ppx_ocannl))
+ (action
+  (run %{test} "--ocannl_autotune_log=crown")))
 
 ; gh-ocannl-1199: the BENCH_TIMING_TRACE decision line, formatted by Bench_harness from
 ; each Autotune.timing_call record on an injected clock, agrees with the decision each call took.

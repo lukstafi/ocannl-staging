@@ -712,15 +712,15 @@ let named_arms t =
       List.mapi reports ~f:(fun i r -> (Printf.sprintf "%c" (Char.of_int_exn (65 + i)), r))
 
 (** One stderr line per placement arm: its crowned candidate and how the beam finals decided it
-    ({!Tune_crown.fields}), then which placement shipped. The result line's [tune] object carries
-    each arm's [best_label] but not the finals, and a flip refinement that shipped is no arm, so the
-    [shipped] name is printed beside them. Prints nothing for an untuned cell. *)
+    ({!Autotune.crown_fields}), then which placement shipped. The result line's [tune] object
+    carries each arm's [best_label] but not the finals, and a flip refinement that shipped is no
+    arm, so the [shipped] name is printed beside them. Prints nothing for an untuned cell. *)
 let trace_crowns t =
   match named_arms t with
   | [] -> ()
   | named ->
       List.iter named ~f:(fun (name, r) ->
-          Stdio.eprintf "bench: tune arm %s %s\n%!" name (Tune_crown.fields r));
+          Stdio.eprintf "bench: tune arm %s %s\n%!" name (Autotune.crown_fields r));
       Option.iter t.shipped ~f:(Stdio.eprintf "bench: tune shipped=%s\n%!")
 
 (** The [tune] JSON object, or [None] when no arm reported (an untuned cell). Times are

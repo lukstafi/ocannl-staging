@@ -2975,6 +2975,13 @@ files.
   turns either stream on for one call with `~log`/`~progress` on `Autotune.tune` or
   `Train.tune_placements` (domain-local, inherited by nested searches, restored on return) and
   reads it from captured stderr; `autotune_composite_playoff` claims both.
+- **Which seed won is read from `autotune_log=crown`, not the full stream** (gh-ocannl-1718). A
+  golden diff on another box is often a different crowned seed, and in 3 of 4 `rounds:0` training
+  tests the beam finals swapped the crown; the `crown` level prints one `autotune-crown:` line per
+  `tune` call (every arm and flip of `Train.tune_placements` included), from the report as it is
+  delivered, and adds no work (no untuned control). A caller rendering its own `~report` uses
+  `Autotune.crown_fields`, so a test's or bench's line spells the same fields. A call's `~log`
+  still decides its own line: `false` silences it, `true` keeps it beside the rest.
 - **Seeding refusals are invisible to the decline census; `autotune_log_seeding=true` shows them**
   (gh-ocannl-1407). A refused seed never becomes a candidate, so neither the search report's
   `declines` nor `schedule_log_declines` (render and compile declines) can hold it. The census
