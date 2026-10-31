@@ -32,7 +32,8 @@ effect splits the repeats of one cell -- three repeats on Metal, two on cc. Peak
 result line's peak_memory_bytes: Alloc_census.reset_peak after the warmup, peak_pool_bytes after the
 timed steps (the harness's allocation window; requested bytes at the allocator seam). On Metal every
 cell also prints the per-kernel table (BENCH_KERNEL_TABLE=1): every kernel the step shipped, timed
-alone min-of-20 after the timed steps -- the per-segment attribution. cc runs no kernel table (one
+alone after the timed steps (the median of its timing calls with their range since gh-ocannl-1694,
+a min-of-20 before) -- the per-segment attribution. cc runs no kernel table (one
 C compile per kernel would dominate the cell); its attribution is Metal's.
 
 Phases, in order: preflight (revision, fixture identities against fixtures/DIGESTS.txt -- a
@@ -483,8 +484,12 @@ def run(args):
 # The kernel table's row (Bench_harness.time_shipped_kernels). `io:<read>/<written>` (global-memory
 # bytes by the cost model; a `~` marks an upper bound, a `?` code the model cannot see) is
 # gh-ocannl-1444's and absent from older rows; the groups are named so that a field added to the row
-# renumbers nothing.
+# renumbers nothing. Since gh-ocannl-1694 `ms` is the median of the kernel's timing calls and
+# `ms_lo=.. ms_hi=.. ms_retimed=<admitted>/<calls>` (Bench_retime.bounds_fields; `nan` below its
+# min_readings) its range; an older row's `ms` is a min-of-20 and carries no range.
 KERNEL = re.compile(r"^bench: kernel (?P<i>\d+)/(?P<n>\d+) (?P<ms>[0-9.]+) ms "
+                    r"(?:ms_lo=(?P<lo>-?nan|[0-9.]+) ms_hi=(?P<hi>-?nan|[0-9.]+) "
+                    r"ms_retimed=(?P<admitted>\d+)/(?P<calls>\d+) )?"
                     r"grid=\[(?P<grid>[0-9;]+)\] block=\[(?P<block>[0-9;]+)\] "
                     r"(?:io:(?P<read>\d+)/(?P<written>\d+)(?P<io_flags>[~?]*) )?"
                     r"mma:(?P<mma>.*?) (?:vol:.*?)?w: (?P<writes>.*)$")
@@ -492,15 +497,19 @@ KERNEL = re.compile(r"^bench: kernel (?P<i>\d+)/(?P<n>\d+) (?P<ms>[0-9.]+) ms "
 
 def kernels(base):
     """The cell's per-kernel table, or None when it is incomplete: a kernel that declined to compile
-    on its own has no row, and summing the rest would under-report the step."""
+    on its own (DECLINED), or none of whose timing calls was admitted (UNTIMED), has no time, and
+    summing the rest would under-report the step. `lo`/`hi` are the row's range (None on a row
+    without one, NaN where the row states none)."""
     ks, totals = [], set()
     try:
         for line in open(str(base) + ".err"):
             m = KERNEL.match(line.rstrip("\n"))
             if m:
                 totals.add(int(m["n"]))
-                ks.append({"i": int(m["i"]), "ms": float(m["ms"]), "grid": m["grid"],
-                           "block": m["block"], "w": m["writes"].split()})
+                ks.append({"i": int(m["i"]), "ms": float(m["ms"]),
+                           "lo": None if m["lo"] is None else float(m["lo"]),
+                           "hi": None if m["hi"] is None else float(m["hi"]),
+                           "grid": m["grid"], "block": m["block"], "w": m["writes"].split()})
     except OSError:
         return None
     if len(totals) != 1 or [k["i"] for k in ks] != list(range(next(iter(totals)))):
@@ -668,8 +677,9 @@ def summarize(args):
 
             if backend != "metal":
                 continue
-            print(f"\n### Attribution, {backend}, {title} (per-kernel min-of-20, summed over the four "
-                  "layers; median over repeats)\n")
+            print(f"\n### Attribution, {backend}, {title} (per-kernel isolated time -- the row's "
+                  "median, a min-of-20 in a row without a range -- summed over the four layers; "
+                  "median over repeats)\n")
             table = []
             for fx in fixtures:
                 for t in NAMES:

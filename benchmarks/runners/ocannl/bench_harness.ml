@@ -1146,49 +1146,97 @@ let writes_of (llc : Ir.Low_level.t) =
   code llc;
   List.dedup_and_sort ~compare:Tn.compare !writes
 
-(** One kernel timed on its own: [compile ()] compiles it as a routine of its own, which is then run
-    once and timed min-of-[repeats] with a device sync per run — so the number is one kernel's wall
-    time including its launch — in the context that compile returned, and that context is released
-    afterwards (it is a leaf: nothing is compiled from it). [bind] sets the routine's static indices
-    before it runs.
+(** Why a kernel timed on its own has no time: its compile alone was refused ([Declined], the
+    classified refusal's detail), or it compiled and ran but none of its timing calls was admitted
+    ([Untimed], with the session's {!Bench_retime.spread}: host contention or an unbatched
+    calibration, {!Autotune.admitted_timing_ms}). The rows say which, so a refused reading is never
+    reported as a compile that failed, nor ranked. *)
+type hermetic_failure = Declined of string | Untimed of Bench_retime.spread
+
+let hermetic_failure_detail = function
+  | Declined detail -> detail
+  | Untimed s ->
+      Printf.sprintf "none of its %d timing calls was admitted" (s.Bench_retime.admitted + s.refused)
+
+(** The timing calls per kernel: [calls]; else [BENCH_RETIME_CALLS] when set
+    ({!Bench_retime.calls_of_env}, which refuses a malformed count); else
+    {!Bench_retime.min_readings} (4), the fewest that state a range. Not a shipped routine's default
+    6: a call costs a calibrated window of at least 16 batches whatever the kernel's size (up to 64
+    of ~10 ms on a fast one), so on a 178-kernel [gpt2_mini_train] step on Metal six calls a kernel
+    took the instrument 3 s per kernel, about 545 s of its 600 s budget (gh-ocannl-1694). *)
+let kernel_calls calls =
+  match calls with
+  | Some c -> c
+  | None -> (
+      match Stdlib.Sys.getenv_opt "BENCH_RETIME_CALLS" with
+      | Some _ -> Bench_retime.calls_of_env ()
+      | None -> Bench_retime.min_readings)
+
+(** How a per-kernel table states its numbers, for its header: the median of [calls] timing calls
+    with their range, in per-launch milliseconds under the configured [autotune_timing]. *)
+let kernel_timing_legend ~calls =
+  Printf.sprintf "median of %d timing calls with their range, ms per launch, autotune_timing=%s"
+    calls
+    (Autotune.timing_string (Bench_retime.configured_timing ()))
+
+(** One kernel timed on its own (gh-ocannl-1694): [compile ()] compiles it as a routine of its own,
+    which is run once and then re-timed by {!Bench_retime.retime} -- [calls] independent
+    {!Autotune.time_routine} calls under the configured [autotune_timing] (queued by default: a
+    calibrated batch of launches per synchronization, so the reading is a per-launch time with the
+    submit/sync round trip amortized, the quantity a search ranks candidates by), summarized as
+    their median and range ({!Bench_retime.spread}) -- in the context that compile returned, and
+    that context is released afterwards (it is a leaf: nothing is compiled from it). [bind] sets the
+    routine's static indices before it runs; the timing calls then measure it at
+    {!Autotune.set_test_bindings}' representative values, as the tuner does, and restore [bind]'s.
+    Until gh-ocannl-1694 this was one min-of-20 of synchronized launches, a single minimum whose
+    launch and sync floor dominated the many kernels under ~50 us.
 
     A segment compiled hermetically is not the segment as the full routine runs it: alone it keeps
     the whole per-thread working set that the full pipeline's promotions relieve, and on HIP the
     gh-ocannl-533 scratch validator declines it (gpt2_mini's cross-entropy head asks for 163,856 B
     per work-item). That is a limitation of the instrument, not of the workload, so a classified
-    refusal comes back as [Error] with its detail and the caller carries on with the other segments.
-    An untyped failure still propagates: [User_schedule] provenance keeps the instrument honest
-    about compiler bugs. *)
-let time_hermetic ~repeats ~bind compile =
+    refusal comes back as [Error (Declined detail)] and the caller carries on with the other
+    segments; so does a kernel no timing call of which was admitted, as [Error (Untimed spread)]. A
+    kernel with fewer than {!Bench_retime.min_readings} admitted readings keeps its median, with its
+    range unstated (NaN). An untyped failure still propagates: [User_schedule] provenance keeps the
+    instrument honest about compiler bugs. *)
+let time_hermetic ?calls ~bind compile =
   match compile () with
   | Error (Ir.Schedule_outcome.Fatal _ as failure) -> Ir.Schedule_outcome.raise_failure failure
   | Error (Ir.Schedule_outcome.Classified classified) ->
-      Error (Ir.Schedule_outcome.detail_of_cause classified.Ir.Schedule_outcome.cause)
+      Error (Declined (Ir.Schedule_outcome.detail_of_cause classified.Ir.Schedule_outcome.cause))
   | Ok (ctx, routine) ->
-      let elapsed_ms c0 = Mtime.Span.to_float_ns (Mtime_clock.count c0) /. 1e6 in
       Exn.protect
         ~finally:(fun () -> Context.release ctx)
         ~f:(fun () ->
           bind routine;
           Train.run ctx routine;
           Context.sync ctx;
-          let best = ref Float.infinity in
-          for _ = 1 to repeats do
-            let c0 = Mtime_clock.counter () in
-            Train.run ctx routine;
-            Context.sync ctx;
-            best := Float.min !best (elapsed_ms c0)
-          done;
-          Ok (!best, routine))
+          let _timing, readings =
+            Bench_retime.retime ~calls:(kernel_calls calls) [ (ctx, routine) ]
+          in
+          let spread = Bench_retime.spread_of (List.hd_exn readings) in
+          if spread.Bench_retime.admitted = 0 then Error (Untimed spread) else Ok (spread, routine))
 
-(** Diagnostic: per-segment (approximately per-layer) wall times of the default fission pipeline,
-    each by {!time_hermetic}. Run the full step once before calling so segment inputs are populated;
-    timing mutates segment outputs (and re-accumulates accumulators), so restore any state that
-    matters afterwards. [bind] binds the routine's static indices (e.g. the batch index). Used by
-    the [bench_*_diag] runners; the benchmark protocol's counterpart, over the kernels a cell
-    actually shipped, is {!dominant_kernel}. *)
-let time_segments ?promote_locals ?(repeats = 20) ~backend ~limits ~static_indices ~ctx ~comp
-    ~bindings ~bind opt =
+(** A per-kernel row's time: the median, then {!Bench_retime.bounds_fields}' range and admission
+    count, the spelling every runner's re-timed line uses ([ms_lo=.. ms_hi=.. ms_retimed=a/c]). *)
+let kernel_time_fields (s : Bench_retime.spread) =
+  Printf.sprintf "%.4f ms %s" s.Bench_retime.ms (Bench_retime.bounds_fields ~name:"ms" s)
+
+(** The row label of a kernel with no time: [DECLINED] for a refused compile, [UNTIMED] for a
+    refused reading. *)
+let hermetic_failure_label = function Declined _ -> "DECLINED" | Untimed _ -> "UNTIMED"
+
+(** Diagnostic: per-segment (approximately per-layer) times of the default fission pipeline, each by
+    {!time_hermetic} ([calls] timing calls per segment, default {!kernel_calls}). Run the full step
+    once before calling so segment inputs are populated; timing mutates segment outputs (and
+    re-accumulates accumulators), so restore any state that matters afterwards. [bind] binds the
+    routine's static indices (e.g. the batch index). Used by the [bench_*_diag] runners; the
+    benchmark protocol's counterpart, over the kernels a cell actually shipped, is
+    {!dominant_kernel}. *)
+let time_segments ?promote_locals ?calls ~backend ~limits ~static_indices ~ctx ~comp ~bindings ~bind
+    opt =
+  let calls = kernel_calls calls in
   let module LL = Ir.Low_level in
   let module Sched = Ir.Schedule in
   let gpu = Ir.Backend_intf.binds_hardware_grid (Context.backend_facts_of_name backend) in
@@ -1200,7 +1248,7 @@ let time_segments ?promote_locals ?(repeats = 20) ~backend ~limits ~static_indic
   let segs =
     Sched.fission_scheduled ~promote_locals ?keep_mapping ~preset ~zero_sched ~static_indices opt
   in
-  Stdio.printf "segment times (min of %d runs, ms):\n" repeats;
+  Stdio.printf "segment times (%s):\n" (kernel_timing_legend ~calls);
   let total = ref 0. in
   let declined = ref 0 in
   (* Per-segment tensorization, straight off each compiled routine (gh-ocannl-626): this table is
@@ -1219,24 +1267,28 @@ let time_segments ?promote_locals ?(repeats = 20) ~backend ~limits ~static_indic
           ~lowered_transform:(fun _ -> [ post ])
           ~provenance:Ir.Schedule_outcome.User_schedule ctx comp bindings
       in
-      match time_hermetic ~repeats ~bind compile with
-      | Error detail ->
+      match time_hermetic ~calls ~bind compile with
+      | Error failure ->
           Int.incr declined;
-          Stdio.printf "  seg%-3d %s DECLINED (%s)  w:%s\n" i kind_s detail ws
-      | Ok (best, routine) ->
-          total := !total +. best;
+          Stdio.printf "  seg%-3d %s %s (%s)  w:%s\n" i kind_s (hermetic_failure_label failure)
+            (hermetic_failure_detail failure) ws
+      | Ok (spread, routine) ->
+          total := !total +. spread.Bench_retime.ms;
           censuses := routine.Context.mma :: !censuses;
           (* The volatility census beside the tensorization one (gh-ocannl-782/820): on Metal the
              compiler-bug workaround uses volatile device reads inside a serial accumulation. A
              segment timing that looks unexpectedly slow should therefore be read together with how
              many accumulation sites carry those reads. *)
-          Stdio.printf "  seg%-3d %s %8.4f ms  mma:%s  vol:%s  w:%s\n" i kind_s best
+          Stdio.printf "  seg%-3d %s %s  mma:%s  vol:%s  w:%s\n" i kind_s
+            (kernel_time_fields spread)
             (Ir.C_syntax.mma_summary_string routine.Context.mma)
             (Ir.C_syntax.volatility_summary_string routine.Context.volatility)
             ws);
-  Stdio.printf "  total (sum of per-segment minima): %.4f ms%s\n" !total
+  Stdio.printf "  total (sum of per-segment medians): %.4f ms%s\n" !total
     (if !declined = 0 then ""
-     else Printf.sprintf " (INCOMPLETE: %d of %d segments declined)" !declined (List.length segs));
+     else
+       Printf.sprintf " (INCOMPLETE: %d of %d segments declined or untimed)" !declined
+         (List.length segs));
   let all = Ir.C_syntax.merge_mma_summaries !censuses in
   if all.Ir.C_syntax.scalar_fallbacks > 0 then
     Stdio.printf
@@ -1256,10 +1308,12 @@ let time_segments ?promote_locals ?(repeats = 20) ~backend ~limits ~static_indic
     bound: the column exists partly to check the model, and choosing by its prediction would be
     circular.
 
-    What the instrument costs and why it is still on for every cell: one compile per kernel and 21
-    runs of each, after the timed steps (so none of it is in the step times or the memory column),
-    which on a many-kernel workload is a visible share of a cell's wall time.
-    [BENCH_DOMINANT_KERNEL=0] turns it off, and the result line then carries [null]. *)
+    What the instrument costs and why it is still on for every cell: one compile per kernel, one
+    run, and {!kernel_calls} timing calls of it (each a warmup, a calibration and a window of at
+    least 16 batches, about half a second per call whatever the kernel's size; gh-ocannl-1694),
+    after the timed steps (so none of it is in the step times or the memory column), which on a
+    many-kernel workload is a visible share of a cell's wall time -- {!dominant_kernel_budget_s}
+    bounds it. [BENCH_DOMINANT_KERNEL=0] turns it off, and the result line then carries [null]. *)
 
 let dominant_kernel_enabled () =
   match Stdlib.Sys.getenv_opt "BENCH_DOMINANT_KERNEL" with Some "0" -> false | _ -> true
@@ -1289,8 +1343,9 @@ let dominant_kernel_budget_s () =
       )
 
 (** [BENCH_KERNEL_TABLE=1] (gh-ocannl-1002): {!dominant_kernel} also prints every kernel it timed on
-    stderr -- one line per shipped segment with its min-of-N time, launch geometry, tensorization
-    census and written nodes. *)
+    stderr -- one line per shipped segment with its median time and range ({!time_hermetic}), launch
+    geometry, tensorization census and written nodes -- and a closing line with the instrument's own
+    wall time. *)
 let kernel_table_enabled () = env_flag "BENCH_KERNEL_TABLE"
 
 (** A shipped segment, copied before it is compiled again: the codegen settles placements in the
@@ -1377,9 +1432,11 @@ let print_shipped_census ?(out = Stdio.stdout) routines =
 
     [stop], asked before each kernel, ends the loop there: the rows returned are then the kernels
     timed before it said so, fewer than the census. [time_kernel ~i timing] runs kernel [i]'s
-    compile-and-time [timing] (default: just runs it) -- the seam a test stands a slow kernel in. *)
-let time_shipped_kernels ?out ?(repeats = 20) ?(stop = fun () -> false)
+    compile-and-time [timing] (default: just runs it) -- the seam a test stands a slow kernel in.
+    [calls] is {!time_hermetic}'s. *)
+let time_shipped_kernels ?out ?calls ?(stop = fun () -> false)
     ?(time_kernel = fun ~i:_ timing -> timing ()) ~ctx ~bindings routines =
+  let calls = kernel_calls calls in
   let kernels = shipped_kernels routines in
   let n = List.length kernels in
   let rec attempted i = function
@@ -1390,7 +1447,7 @@ let time_shipped_kernels ?out ?(repeats = 20) ?(stop = fun () -> false)
         row :: attempted (i + 1) rest
   and time_one i (shipped, seg) =
     let bind, compile = compile_shipped_kernel ~ctx ~bindings ~i shipped seg in
-    let result = time_kernel ~i (fun () -> time_hermetic ~repeats ~bind compile) in
+    let result = time_kernel ~i (fun () -> time_hermetic ~calls ~bind compile) in
     let row_out =
       match (out, result) with
       | Some out, _ -> Some out
@@ -1402,12 +1459,13 @@ let time_shipped_kernels ?out ?(repeats = 20) ?(stop = fun () -> false)
           String.concat ~sep:" " (List.map (writes_of seg.Ir.Low_level.llc) ~f:Tn.debug_name)
         in
         (match result with
-        | Error detail ->
-            Stdio.Out_channel.fprintf out "bench: kernel %d/%d %s DECLINED (%s) w: %s\n" i n
-              (segment_geometry seg) detail ws
-        | Ok (ms, routine) ->
-            Stdio.Out_channel.fprintf out "bench: kernel %d/%d %.4f ms %s %s mma:%s vol:%s w: %s\n"
-              i n ms (segment_geometry seg) (segment_io seg)
+        | Error failure ->
+            Stdio.Out_channel.fprintf out "bench: kernel %d/%d %s %s (%s) w: %s\n" i n
+              (segment_geometry seg) (hermetic_failure_label failure)
+              (hermetic_failure_detail failure) ws
+        | Ok (spread, routine) ->
+            Stdio.Out_channel.fprintf out "bench: kernel %d/%d %s %s %s mma:%s vol:%s w: %s\n" i n
+              (kernel_time_fields spread) (segment_geometry seg) (segment_io seg)
               (Ir.C_syntax.mma_summary_string routine.Context.mma)
               (Ir.C_syntax.volatility_summary_string routine.Context.volatility)
               ws);
@@ -1416,19 +1474,20 @@ let time_shipped_kernels ?out ?(repeats = 20) ?(stop = fun () -> false)
   in
   attempted 0 kernels
 
-(** Full-step controls precede this: isolated backward/SGD mutates gradients/weights. Minima include
-    a launch/sync floor per kernel and their sum is not step latency. *)
-let time_shipped_segments ?(out = Stdio.stdout) ?(repeats = 20) ~ctx ~bindings routines =
-  Stdio.Out_channel.fprintf out "segment times (min of %d runs, ms; isolated launch + sync):\n"
-    repeats;
+(** Full-step controls precede this: isolated backward/SGD mutates gradients/weights. Each kernel is
+    timed alone ({!time_hermetic}), so the sum of their medians is not step latency. *)
+let time_shipped_segments ?(out = Stdio.stdout) ?calls ~ctx ~bindings routines =
+  let calls = kernel_calls calls in
+  Stdio.Out_channel.fprintf out "segment times (%s; each kernel alone):\n"
+    (kernel_timing_legend ~calls);
   let outcomes =
-    time_shipped_kernels ~out ~repeats ~ctx ~bindings routines
+    time_shipped_kernels ~out ~calls ~ctx ~bindings routines
     |> List.map ~f:(fun (_, _, result) -> Result.map result ~f:fst)
   in
   let timed = List.filter_map outcomes ~f:Result.ok in
   Stdio.Out_channel.fprintf out
-    "  total (sum of per-segment minima, not step latency): %.4f ms (%d/%d timed)\n"
-    (List.sum (module Float) timed ~f:Fn.id)
+    "  total (sum of per-segment medians, not step latency): %.4f ms (%d/%d timed)\n"
+    (List.sum (module Float) timed ~f:(fun s -> s.Bench_retime.ms))
     (List.length timed) (List.length outcomes);
   Stdio.Out_channel.flush out;
   outcomes
@@ -1453,7 +1512,8 @@ let label_writes = 3
     kernel's; [bytes] and [bytes_exact] are global memory's only ({!global_counts}, gh-ocannl-1520),
     the traffic the bandwidth ceiling it is scored against moves -- the same count as the kernel
     table's [io:] field. *)
-let dominant_kernel_record ~segment ~segments ~declined ~seg_ms ~segments_ms ~tensorization seg =
+let dominant_kernel_record ~segment ~segments ~declined ~seg_ms ?(seg_ms_lo = Float.nan)
+    ?(seg_ms_hi = Float.nan) ~segments_ms ~tensorization seg =
   let module CM = Ir.Cost_model in
   let s = CM.analyze seg.Ir.Low_level.llc in
   let g = global_counts seg s in
@@ -1471,6 +1531,8 @@ let dominant_kernel_record ~segment ~segments ~declined ~seg_ms ~segments_ms ~te
       declined;
       writes;
       seg_ms;
+      seg_ms_lo;
+      seg_ms_hi;
       segments_ms;
       tensorization;
       flops = s.CM.flops;
@@ -1494,10 +1556,15 @@ let dominant_kernel_record ~segment ~segments ~declined ~seg_ms ~segments_ms ~te
     budget has passed. A kernel that started inside the budget and is not interrupted (Windows, or a
     long foreign call) may finish past it; when that was the last one, every kernel was timed and
     the column is the full answer, so it is reported -- the budget bounds the instrument's cost, and
-    discarding a completed measurement would recover none of it. [time_kernel] is
-    {!time_shipped_kernels}'. *)
-let dominant_kernel ?(repeats = 20) ?budget_s ?(time_kernel = fun ~i:_ timing -> timing ()) ~ctx
-    ~bindings routines =
+    discarding a completed measurement would recover none of it. [calls] and [time_kernel] are
+    {!time_shipped_kernels}'.
+
+    Dominance is by median ({!time_hermetic}); the record carries the dominant kernel's range beside
+    it. Two kernels whose ranges overlap are not resolved apart, so on a step whose two slowest
+    kernels are that close, which one is named can change between processes. *)
+let dominant_kernel ?calls ?budget_s ?(time_kernel = fun ~i:_ timing -> timing ()) ~ctx ~bindings
+    routines =
+  let calls = kernel_calls calls in
   let budget_s = Option.value_or_thunk budget_s ~default:dominant_kernel_budget_s in
   let clock = Mtime_clock.counter () in
   let elapsed_s () = Mtime.Span.to_float_ns (Mtime_clock.count clock) /. 1e9 in
@@ -1531,11 +1598,23 @@ let dominant_kernel ?(repeats = 20) ?budget_s ?(time_kernel = fun ~i:_ timing ->
        budget (BENCH_DOMINANT_KERNEL_BUDGET_S)"
       (elapsed_s ()) !started n budget_s
   in
+  let table = kernel_table_enabled () in
+  if table then
+    Stdio.eprintf "bench: per-kernel table (%s; each kernel alone)\n%!"
+      (kernel_timing_legend ~calls);
+  let rows_of rows =
+    if table then
+      Stdio.eprintf "bench: per-kernel table: %d of %d kernels timed in %.1f s\n%!"
+        (List.count rows ~f:(fun (_, _, result) -> Result.is_ok result))
+        n (elapsed_s ());
+    rows
+  in
   match
     with_deadline ~seconds:budget_s (fun () ->
-        time_shipped_kernels
-          ?out:(if kernel_table_enabled () then Some Stdio.stderr else None)
-          ~repeats ~stop:over_budget ~time_kernel ~ctx ~bindings routines)
+        rows_of
+          (time_shipped_kernels
+             ?out:(if table then Some Stdio.stderr else None)
+             ~calls ~stop:over_budget ~time_kernel ~ctx ~bindings routines))
   with
   | exception Instrument_over_budget -> no_kernel (over_budget_note ())
   | exception exn -> no_kernel ("instrument failed: " ^ Exn.to_string exn)
@@ -1544,21 +1623,32 @@ let dominant_kernel ?(repeats = 20) ?budget_s ?(time_kernel = fun ~i:_ timing ->
       match
         List.filter_map rows ~f:(fun (i, seg, result) ->
             Result.ok result
-            |> Option.map ~f:(fun (ms, routine) -> (i, seg, ms, routine.Context.mma)))
+            |> Option.map ~f:(fun (spread, routine) -> (i, seg, spread, routine.Context.mma)))
       with
       | [] when n = 0 -> no_kernel "the step shipped no kernel segments"
-      | [] -> no_kernel (Printf.sprintf "all %d kernels declined to compile on their own" n)
+      | [] ->
+          let untimed =
+            List.count rows ~f:(fun (_, _, r) ->
+                match r with Error (Untimed _) -> true | Ok _ | Error (Declined _) -> false)
+          in
+          no_kernel
+            (Printf.sprintf
+               "none of the %d kernels was timed on its own: %d declined to compile alone, %d had \
+                no timing call admitted"
+               n (n - untimed) untimed)
       | timed ->
-          let segments_ms = List.sum (module Float) timed ~f:(fun (_, _, ms, _) -> ms) in
-          let i, seg, seg_ms, mma =
-            List.max_elt timed ~compare:(fun (_, _, a, _) (_, _, b, _) -> Float.compare a b)
+          let median (_, _, s, _) = s.Bench_retime.ms in
+          let segments_ms = List.sum (module Float) timed ~f:median in
+          let i, seg, spread, mma =
+            List.max_elt timed ~compare:(fun a b -> Float.compare (median a) (median b))
             |> Option.value_exn ~here:[%here]
           in
           let tensorization = Ir.C_syntax.tensorization_name mma.Ir.C_syntax.tensorization in
           let kernel, s =
             dominant_kernel_record ~segment:i ~segments:n
               ~declined:(n - List.length timed)
-              ~seg_ms ~segments_ms ~tensorization seg
+              ~seg_ms:spread.Bench_retime.ms ~seg_ms_lo:spread.lo_ms ~seg_ms_hi:spread.hi_ms
+              ~segments_ms ~tensorization seg
           in
           let ceiling =
             Bench_json.choose_ceiling ~gpu ~tensorization ~narrow_native:(narrow_native ~limits s)
@@ -1669,8 +1759,10 @@ let measure_and_emit ~routines ~protocol ~backend ~variant ?(precision = "f32") 
   let { workload; parity_steps; warmup_steps; timed_steps; fixture } = protocol in
   Stdio.eprintf "bench: compiled in %.1fs, starting %d parity steps\n%!" compile_s parity_steps;
   let dominant_kernel = if dominant_kernel_enabled () then dominant_kernel else None in
-  (* Read now, so a malformed budget fails the cell before it measures anything. *)
-  if Option.is_some dominant_kernel then ignore (dominant_kernel_budget_s () : float);
+  (* Read now, so a malformed budget or call count fails the cell before it measures anything. *)
+  if Option.is_some dominant_kernel then (
+    ignore (dominant_kernel_budget_s () : float);
+    ignore (kernel_calls None : int));
   let profile = Option.map Utils.active_profile ~f:(fun (_, name, _) -> name) in
   (* Resolved once, so every checkpoint and the result line carry the same record of the regime. *)
   let regime_knobs =
@@ -1822,12 +1914,14 @@ let self_test_leg =
     [checkpoint_out] is {!measure_and_emit}'s. [late_probe], when given, runs in place of the
     dominant-kernel instrument — the protocol's last stage — and its result stands in for that
     column: it is how a test stands a stalled or killed diagnostic where the real one runs.
-    [dominant_kernel_budget_s] and [time_kernel] are {!dominant_kernel}'s [budget_s] and
-    [time_kernel], for the real instrument; [before_instrument] runs right before it, after every
-    measured stage -- where a test arms what the instrument must meet on entry (a timer), so that
-    how long compiling and the timed steps took on the box cannot decide the outcome. *)
+    [dominant_kernel_budget_s], [dominant_kernel_calls] and [time_kernel] are {!dominant_kernel}'s
+    [budget_s], [calls] and [time_kernel], for the real instrument; [before_instrument] runs right
+    before it, after every measured stage -- where a test arms what the instrument must meet on
+    entry (a timer), so that how long compiling and the timed steps took on the box cannot decide
+    the outcome. *)
 let run_self_test ?(out = Stdio.stdout) ?checkpoint_out ?(leg = self_test_leg) ?late_probe
-    ?dominant_kernel_budget_s ?time_kernel ?before_instrument ?inspect_compiled ?inspect_step () =
+    ?dominant_kernel_budget_s ?dominant_kernel_calls ?time_kernel ?before_instrument
+    ?inspect_compiled ?inspect_step () =
   let module TDSL = Operation.DSL_modules.TDSL in
   let module IDX = Train.IDX in
   let n_samples = 8 and n_features = 4 and n_hidden = 5 and n_classes = 3 in
@@ -1895,8 +1989,8 @@ let run_self_test ?(out = Stdio.stdout) ?checkpoint_out ?(leg = self_test_leg) ?
       ~dominant_kernel:
         (Option.value late_probe ~default:(fun () ->
              Option.iter before_instrument ~f:(fun f -> f ());
-             dominant_kernel ?budget_s:dominant_kernel_budget_s ?time_kernel ~ctx:!ctx_ref ~bindings
-               (step_routines routines)))
+             dominant_kernel ?budget_s:dominant_kernel_budget_s ?calls:dominant_kernel_calls
+               ?time_kernel ~ctx:!ctx_ref ~bindings (step_routines routines)))
       ~run_step
       ~read_loss:(fun () -> (!ctx_ref, loss).@[0])
       ~sync:(fun () -> Context.sync !ctx_ref)

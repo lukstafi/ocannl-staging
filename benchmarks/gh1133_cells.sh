@@ -41,7 +41,9 @@
 #                 probe (bin/device_props) runs first, and every cell states its one device's memory
 #                 model, unified or discrete, and the GPU co-tenants seen at its start and end
 #                 (benchmarks/gpu_cotenants.py, gh-ocannl-1521). Every shipped segment's device duration over the timed steps is
-#                 joined with the same compile's isolated minimum (benchmarks/kernel_attribution.py,
+#                 joined with the same compile's isolated minimum -- its per-kernel table re-timed
+#                 as synchronized singles, --ocannl_autotune_timing=isolated (gh-ocannl-1694)
+#                 (benchmarks/kernel_attribution.py,
 #                 which refuses a cell it cannot map), and rows where the two disagree, or the
 #                 in-step spread is wide, are flagged: only the in-step column attributes step
 #                 time. The step time of a kprof cell carries the tracer's overhead (2-3% on rog);
@@ -241,6 +243,11 @@ capped() {
 cell() {
   local fixture=$1 treatment=$2 tag=$3 exe=${4:-bench_gpt} profile=${5:-} flags r st smi=
   flags=$(flags_of "$treatment") || { failed=1; return 1; }
+  # A traced cell re-times its isolated kernels as synchronized singles (gh-ocannl-1694): the
+  # queued default dispatches up to thousands of launches per batch, every one a trace record, and
+  # kernel_attribution.py reads the isolated runs as single launches. The cells search nothing
+  # (--ocannl_autotune_search=false), so the setting reaches only the per-kernel table.
+  [ -z "$profile" ] || flags="$flags --ocannl_autotune_timing=isolated"
   r=$(runner_root "$treatment")
   local name="$backend-$fixture-$treatment-$tag" wrap=()
   echo "backend=$backend fixture=$fixture treatment=$treatment runner=$r flags=[$flags]" >"$out/$name.err"

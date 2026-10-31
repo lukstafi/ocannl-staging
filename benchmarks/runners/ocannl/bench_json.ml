@@ -234,11 +234,11 @@ let ambient_resolved_object entries =
 (** {1 The dominant kernel's %-of-peak (gh-ocannl-1006, the report's second column)}
 
     One kernel per cell: the one that takes longest when every kernel the step SHIPPED is timed on
-    its own ([Bench_harness.dominant_kernel] — min-of-N, a device sync per run). Chosen by measured
-    time rather than by the model's own roofline bound, because checking the model is the point:
-    ranking by its prediction would pick the kernel the model already agrees with. Its attainment is
-    the roofline lower bound over the measured time —
-    [max (flops / peak_flops, bytes / peak_memory_bandwidth)] over [seg_ms] — so a memory-bound
+    its own ([Bench_harness.dominant_kernel] — the median of [Bench_retime]'s timing calls, with
+    their range, gh-ocannl-1694). Chosen by measured time rather than by the model's own roofline
+    bound, because checking the model is the point: ranking by its prediction would pick the kernel
+    the model already agrees with. Its attainment is the roofline lower bound over the measured time
+    — [max (flops / peak_flops, bytes / peak_memory_bandwidth)] over [seg_ms] — so a memory-bound
     kernel is scored against bandwidth and a compute-bound one against arithmetic, and [bound] names
     which leg decided.
 
@@ -300,11 +300,17 @@ type kernel = {
   segment : int;  (** Its position among the step's kernels, in launch order. *)
   segments : int;  (** How many kernels the step shipped. *)
   declined : int;
-      (** Kernels that could not be timed on their own (a hermetic compile the backend refused): the
-          dominant one is dominant among the others only. *)
+      (** Kernels that could not be timed on their own (a hermetic compile the backend refused, or a
+          kernel none of whose timing calls was admitted): the dominant one is dominant among the
+          others only. *)
   writes : string;  (** The nodes it writes, the label a reader finds it by. *)
-  seg_ms : float;  (** Its min-of-N time on its own, launch and sync included. *)
-  segments_ms : float;  (** The same, summed over the kernels that were timed. *)
+  seg_ms : float;
+      (** Its per-launch time on its own: the median of its timing calls under the configured
+          [autotune_timing] (gh-ocannl-1694; a min-of-20 of synchronized launches before). *)
+  seg_ms_lo : float;
+      (** The least of those readings; NaN ([null]) below [Bench_retime.min_readings] of them. *)
+  seg_ms_hi : float;  (** The greatest, likewise. *)
+  segments_ms : float;  (** The medians, summed over the kernels that were timed. *)
   tensorization : string;  (** [Ir.C_syntax.tensorization_name] of its own compile. *)
   flops : int;
   bytes : int;
@@ -374,12 +380,13 @@ let dominant_kernel_object ?note ~ceiling (kernel : kernel option) =
   let kernel_fields =
     match kernel with
     | None ->
-        {|"segment":null,"segments":null,"declined":null,"writes":null,"seg_ms":null,"segments_ms":null,"tensorization":null,"flops":null,"bytes":null,"flops_exact":null,"bytes_exact":null,"opaque":null|}
+        {|"segment":null,"segments":null,"declined":null,"writes":null,"seg_ms":null,"seg_ms_lo":null,"seg_ms_hi":null,"segments_ms":null,"tensorization":null,"flops":null,"bytes":null,"flops_exact":null,"bytes_exact":null,"opaque":null|}
     | Some k ->
         Printf.sprintf
-          {|"segment":%d,"segments":%d,"declined":%d,"writes":%s,"seg_ms":%s,"segments_ms":%s,"tensorization":%s,"flops":%d,"bytes":%d,"flops_exact":%b,"bytes_exact":%b,"opaque":%b|}
-          k.segment k.segments k.declined (str k.writes) (num k.seg_ms) (num k.segments_ms)
-          (str k.tensorization) k.flops k.bytes k.flops_exact k.bytes_exact k.opaque
+          {|"segment":%d,"segments":%d,"declined":%d,"writes":%s,"seg_ms":%s,"seg_ms_lo":%s,"seg_ms_hi":%s,"segments_ms":%s,"tensorization":%s,"flops":%d,"bytes":%d,"flops_exact":%b,"bytes_exact":%b,"opaque":%b|}
+          k.segment k.segments k.declined (str k.writes) (num k.seg_ms) (num k.seg_ms_lo)
+          (num k.seg_ms_hi) (num k.segments_ms) (str k.tensorization) k.flops k.bytes k.flops_exact
+          k.bytes_exact k.opaque
   in
   Printf.sprintf {|{%s,"verdict":"%s",%s,"bound":%s,"pct_of_peak":%s,"note":%s}|} kernel_fields
     verdict ceiling_fields (opt str bound)

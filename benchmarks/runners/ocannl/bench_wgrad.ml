@@ -9,16 +9,17 @@
    batch 256). BENCH_TUNE=1 times the tuned schedule (Autotune.tune, no disk cache) instead of the
    untuned default, which goes through Bench_harness.compile_default (Autotune.untuned_compile) and
    so honours the model_default_schedule and gpu_default_sketch_min_reduction settings.
-   BENCH_REPEATS is the number of timed runs per shipped kernel, min taken (default 20);
-   BENCH_RETIME_CALLS the number of timing calls the whole routine is re-timed over ([Bench_retime],
-   gh-ocannl-1524: default 6). BENCH_WGRAD_REQUIRE_SEEDED=1 compiles the untuned arm through
+   BENCH_RETIME_CALLS is the number of timing calls the whole routine, and each shipped kernel, is
+   re-timed over ([Bench_retime], gh-ocannl-1524 and gh-ocannl-1694: default 6 for the routine, 4
+   for a kernel, [Bench_harness.kernel_calls]); the retired BENCH_REPEATS (a min-of-N per shipped
+   kernel) is refused. BENCH_WGRAD_REQUIRE_SEEDED=1 compiles the untuned arm through
    Autotune.seeded_default and exits 1, timing nothing, when it seeds no segment or falls back to
    the default.
 
    Prints one [wgrad:] line -- the arm, the dims, the w.grad nest's lowered loop extents, the whole
    routine's re-timing (the median [ms] of [Autotune.time_routine] calls under the configured
    [autotune_timing], with its range [ms_lo]/[ms_hi]), and for a tuned arm the search's crowned
-   label and counters -- then the shipped kernels' isolated times
+   label and counters -- then the shipped kernels' isolated times, each a median with its range
    ([Bench_harness.time_shipped_segments]), where the [w: wg_w.grad] row is the weight gradient's.
    Inputs are small positive dyadics, so the gradient's checksum is exact whatever the schedule and
    must agree across arms.
@@ -51,9 +52,12 @@ let () =
   let require_seeded =
     Option.equal String.equal (Stdlib.Sys.getenv_opt "BENCH_WGRAD_REQUIRE_SEEDED") (Some "1")
   in
-  let repeats =
-    Option.value_map (Stdlib.Sys.getenv_opt "BENCH_REPEATS") ~default:20 ~f:Int.of_string
-  in
+  (* gh-ocannl-1694: the per-kernel min-of-BENCH_REPEATS is gone; a stale setting is refused rather
+     than silently ignored. *)
+  if Option.is_some (Stdlib.Sys.getenv_opt "BENCH_REPEATS") then
+    failwith
+      "bench_wgrad: BENCH_REPEATS is retired; every shipped kernel is re-timed by Bench_retime \
+       (BENCH_RETIME_CALLS timing calls per kernel, gh-ocannl-1694)";
   let cyc n m stride = Array.init n ~f:(fun c -> Float.of_int (1 + (c % m)) *. stride) in
   (* The layer as the training step has it: [y = w * x] with a weight of input [i] and output [o]
      over activations of batch [b] and sequence [s]; the loss [sum (y *. dy)] makes [dy] the
@@ -206,5 +210,5 @@ let () =
     (Bench_retime.spread_fields ~name:"ms" spread)
     (Autotune.timing_string timing) checksum tuned;
   ignore
-    (H.time_shipped_segments ~repeats ~ctx ~bindings:Ir.Indexing.Empty [ routine ]
-      : (float, string) Result.t list)
+    (H.time_shipped_segments ~ctx ~bindings:Ir.Indexing.Empty [ routine ]
+      : (Bench_retime.spread, H.hermetic_failure) Result.t list)

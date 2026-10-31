@@ -9,10 +9,14 @@ included. Its trace holds both instruments, from the same compile:
 
   in-step   every shipped segment's device duration inside the timed steps, as the step ran it:
             `<routine>__seg<j>` nodes of the replayed graph (one instance per step);
-  isolated  the same segment recompiled as a routine of its own and run 21 times back to back
-            after the timed steps: `<routine>__kernel<i>`, i being the kernel table's index (the
-            table's min-of-20 is a host wall time with a launch + sync in it; the trace gives the
-            device time of the same runs).
+  isolated  the same segment recompiled as a routine of its own and re-timed after the timed
+            steps: `<routine>__kernel<i>`, i being the kernel table's index. Since gh-ocannl-1694
+            the table re-times it through Bench_retime (BENCH_RETIME_CALLS timing calls under the
+            configured autotune_timing, the table's time their median with their range; a kprof
+            cell pins `--ocannl_autotune_timing=isolated`, so every isolated run is a synchronized
+            single and the trace stays a few hundred records per kernel); before, it ran 21 times
+            back to back and the table printed their host min-of-20. The trace gives the device
+            time of the same runs either way.
 
 Only the in-step durations attribute step time: their per-step sum is the step's device time.
 The isolated minimum is a statement about the kernel alone (gh-ocannl-1347: within 1% between
@@ -31,8 +35,8 @@ step, in every repeat, with identical code and launch geometry). Each row says w
 The common factor F is the median in-step/isolated ratio over the kernels of at least
 FACTOR_FLOOR_MS in-step. It is a property of the step, not of a kernel: on rog's power-capped laptop
 GPU a b256 step runs every sizeable kernel ~6.5% slower than its isolated minimum, and the per-step
-slowdowns of kernels adjacent in time move together (gh-ocannl-1391), while a 21-run isolated burst
-draws too little for long enough to be capped. ISO therefore flags most of a capped step; OWN flags
+slowdowns of kernels adjacent in time move together (gh-ocannl-1391), while an isolated burst
+(21 runs when this was measured) draws too little for long enough to be capped. ISO therefore flags most of a capped step; OWN flags
 what remains once the step's clock is accounted for.
 
 A HIP cell also states the memory model of the device it ran on -- unified (an integrated part
@@ -127,8 +131,9 @@ def result_line(path):
 
 
 def table(path):
-    """The kernel table's rows {i: (host_min_ms, geometry, writes, io)}, refusing an incomplete one:
-    a declined kernel has no isolated run to compare and no row to label its in-step time. io is
+    """The kernel table's rows {i: (table_ms, geometry, writes, io)}, refusing an incomplete one: a
+    declined or untimed kernel has no isolated time to compare and no row to label its in-step
+    time. table_ms is the row's own time (a median since gh-ocannl-1694, a min-of-20 before). io is
     (bytes read, bytes written, flags) by the cost model, or None on a row from before
     gh-ocannl-1444."""
     rows, totals = {}, set()
@@ -244,14 +249,14 @@ def attribute(out, name):
         med = statistics.median(steps)
         p10, p90 = percentile(steps, 10), percentile(steps, 90)
         iso_min = min(runs)
-        host_min, geometry, writes, io = rows[i]
+        table_ms, geometry, writes, io = rows[i]
         flags = []
         if abs(iso_min - med) >= ABS_FLOOR_MS and abs(iso_min / med - 1) > ISO_TOLERANCE:
             flags.append("ISO")
         if p10 > 0 and p90 / p10 > SPREAD_TOLERANCE:
             flags.append("SPREAD")
         attributed.append({"i": i, "med": med, "p10": p10, "p90": p90, "iso_min": iso_min,
-                           "host_min": host_min, "geometry": geometry, "writes": writes, "io": io,
+                           "table_ms": table_ms, "geometry": geometry, "writes": writes, "io": io,
                            "flags": flags, "steps": steps})
     factor = common_factor(attributed)
     if factor is not None:
@@ -412,11 +417,12 @@ def render_cell(out, name, rec, rows):
     print("\n### Kernel attribution: %s\n" % stem)
     print("In-step: device time of each shipped segment over the %d timed steps (median, p10..p90;"
           " traced by %s)." % (2 * int(rec["timed_steps"]), rec["tracer"]))
-    print("Isolated: the same segment recompiled alone, device minimum of 20 runs (the kernel"
-          " table's host minimum beside it). Only the in-step column attributes step time.\n")
+    print("Isolated: the same segment recompiled alone, the device minimum of its isolated runs (the"
+          " kernel table's own time beside it: the median of its timing calls, a host min-of-20 in"
+          " a table from before gh-ocannl-1694). Only the in-step column attributes step time.\n")
     print("- step p50 %.2f ms; sum of in-step medians %.2f ms; sum of isolated minima %.2f ms"
-          " (host table %.2f ms)" % (rec["step_ms"]["p50"], total, sum(r["iso_min"] for r in rows),
-                                     sum(r["host_min"] for r in rows)))
+          " (table %.2f ms)" % (rec["step_ms"]["p50"], total, sum(r["iso_min"] for r in rows),
+                                sum(r["table_ms"] for r in rows)))
     iso = [r for r in rows if "ISO" in r["flags"]]
     spread = [r for r in rows if "SPREAD" in r["flags"]]
     print("- ISO (isolated off in-step by >%d%%): %d kernels, %.2f ms in-step (%.1f%%)"
@@ -460,11 +466,11 @@ def render_cell(out, name, rec, rows):
         io, bandwidth = io_cells(r)
         listed.append(("%d" % r["i"], "%.3f" % r["med"], "%.3f..%.3f" % (r["p10"], r["p90"]),
                        "%.3f" % r["iso_min"], "%.2f" % (r["iso_min"] / r["med"]),
-                       "%.3f" % r["host_min"], io, bandwidth, " ".join(r["flags"]),
+                       "%.3f" % r["table_ms"], io, bandwidth, " ".join(r["flags"]),
                        label(r["writes"])))
     print()
     print("\n".join(table_lines(
-        ["kernel", "in-step median", "p10..p90", "isolated min", "iso / in-step", "table min",
+        ["kernel", "in-step median", "p10..p90", "isolated min", "iso / in-step", "table ms",
          "MB read/written", "in-step GB/s", "flags", "writes"], listed)))
     rest = sorted(rows, key=lambda r: -r["med"])[shown:]
     if rest:

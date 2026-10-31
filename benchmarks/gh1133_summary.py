@@ -133,8 +133,10 @@ def summary(out, treatments, ref_treatment, ref_all="", step_stage=True):
                 incomplete = True
                 continue
             print("\n" + log_line("### Training segments: %s" % display_value(name[:-4])) + "\n")
-            print("Isolated min-of-20 launch + sync times; their sum is not a step latency, and a row"
-                  " is not that kernel's share of the step: the kprof step's in-step column is"
+            print("Isolated per-kernel times, as the table's header states them (the median of each"
+                  " kernel's timing calls with their range since gh-ocannl-1694, a min-of-20 launch +"
+                  " sync before); their sum is not a step latency, and a row is not that kernel's"
+                  " share of the step: the kprof step's in-step column is"
                   " (benchmarks/kernel_attribution.py).\n")
             print("```text")
             print(content.rstrip())

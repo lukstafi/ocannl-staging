@@ -64,6 +64,18 @@ let read_and_remove path =
    flush the very buffer under test. An argv marker rather than an environment variable, so nothing
    ambient can put a run into this mode (as in atomic_file_race). The kill is deterministic: no
    deadline races the compile. *)
+(* gh-ocannl-1694: the real instrument's timing calls per kernel here. Two -- the fewest the mirrored
+   design takes -- state a median and no range, which is all these protocol claims read. *)
+let dominant_kernel_calls = 2
+
+(* A [no-kernel] dominant kernel that says none declined: every kernel compiled and ran alone, and
+   the admission gate refused every reading -- a loaded host, which these claims are not about
+   (gh-ocannl-1694). *)
+let all_readings_refused dk =
+  is_str dk "verdict" "no-kernel"
+  && Option.value_map (string_field dk "note") ~default:false ~f:(fun note ->
+      String.is_substring note ~substring:": 0 declined to compile alone")
+
 let killed_in_diagnostics_arg = "--killed-in-diagnostics"
 let late_probe_marker = "bench_self_test: late probe reached; ending this process unflushed"
 
@@ -188,14 +200,23 @@ let () =
         && Option.value_map p.Ocannl.Tensor.diff ~default:false ~f:(fun d ->
             writes_node d.Ocannl.Tensor.grad));
     H.print_shipped_census ~out:Stdio.stderr routines;
-    let outcomes = H.time_shipped_segments ~out:Stdio.stderr ~repeats:1 ~ctx ~bindings routines in
-    Verdict.p_all "every tiny training segment executes with a positive standalone time" outcomes
-      ~f:(fun result -> match result with Ok ms -> Float.(ms > 0.) | Error _ -> false)
+    let outcomes = H.time_shipped_segments ~out:Stdio.stderr ~calls:2 ~ctx ~bindings routines in
+    (* gh-ocannl-1694: a segment whose timing calls the admission gate refused (a loaded host) still
+       executed alone; it has no time to be positive, and is counted on stderr. *)
+    Stdio.eprintf "bench_self_test: %d of %d segments untimed (not part of the golden)\n%!"
+      (List.count outcomes ~f:(function Error (H.Untimed _) -> true | _ -> false))
+      (List.length outcomes);
+    Verdict.p_all "every tiny training segment executes alone, with a positive time where admitted"
+      outcomes ~f:(fun result ->
+        match result with
+        | Ok s -> Float.(s.Bench_retime.ms > 0.)
+        | Error (H.Untimed _) -> true
+        | Error (H.Declined _) -> false)
   in
   let checkpoint_path = capture_file ".checkpoints" in
   let line =
     Stdio.Out_channel.with_file checkpoint_path ~f:(fun checkpoint_out ->
-        H.run_self_test ~out:Stdio.stderr ~checkpoint_out ~inspect_step
+        H.run_self_test ~out:Stdio.stderr ~checkpoint_out ~inspect_step ~dominant_kernel_calls
           ~inspect_compiled:(fun _ routines -> expected_mma := Some (H.step_census routines))
           ())
   in
@@ -310,13 +331,18 @@ let () =
          number agree. *)
       let dk = Option.value (field j "dominant_kernel") ~default:`Null in
       Stdio.eprintf "bench_self_test: dominant kernel %s\n%!" (Yojson.Safe.to_string dk);
-      Verdict.p "dominant_kernel names a kernel timed on its own, with a positive time"
+      let all_untimed = all_readings_refused dk in
+      Verdict.p
+        "dominant_kernel names a kernel timed on its own, with a positive time (or every reading \
+         was refused)"
         ((match field dk "segment" with Some (`Int i) -> i >= 0 | _ -> false)
-        && Option.value_map (number dk "seg_ms") ~default:false ~f:(fun t -> Float.(t > 0.)));
+         && Option.value_map (number dk "seg_ms") ~default:false ~f:(fun t -> Float.(t > 0.))
+        || all_untimed);
       Verdict.p "its verdict is one the report renders, and a number is printed exactly when exact"
         (match (string_field dk "verdict", field dk "pct_of_peak") with
         | Some "exact", Some (`Float _ | `Int _) -> true
         | Some ("approximate" | "opaque" | "no-ceiling"), Some `Null -> true
+        | Some "no-kernel", Some `Null -> all_untimed
         | _ -> false);
       Verdict.p "timed_steps is the count the protocol asked for"
         (match field j "timed_steps" with
@@ -356,8 +382,8 @@ let () =
     in
     let t0 = Unix.gettimeofday () in
     let line =
-      H.run_self_test ~out:Stdio.stderr ~dominant_kernel_budget_s:budget_s ~time_kernel
-        ?before_instrument
+      H.run_self_test ~out:Stdio.stderr ~dominant_kernel_budget_s:budget_s ~dominant_kernel_calls
+        ~time_kernel ?before_instrument
         ~inspect_compiled:(fun _ routines ->
           kernels := List.length (H.shipped_kernels (H.compiled_step_routines routines)))
         ()
@@ -456,8 +482,9 @@ let () =
   let j, started, kernels, _ = run ~budget_s:3600. ~stall_s:0. () in
   Verdict.p "under a budget nothing reaches, the instrument starts every kernel"
     (kernels >= 1 && List.equal Int.equal started (List.init kernels ~f:Fn.id));
-  Verdict.p "and names a dominant kernel"
-    (Option.value_map
-       (field (Option.value (field j "dominant_kernel") ~default:`Null) "segment")
-       ~default:false
-       ~f:(function `Int i -> i >= 0 | _ -> false))
+  let dk = Option.value (field j "dominant_kernel") ~default:`Null in
+  Verdict.p "and names a dominant kernel (or says every reading was refused)"
+    (Option.value_map (field dk "segment") ~default:false ~f:(function
+       | `Int i -> i >= 0
+       | _ -> false)
+    || all_readings_refused dk)

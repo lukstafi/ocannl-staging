@@ -9274,6 +9274,7 @@
   yojson
   bench_harness
   bench_json
+  bench_retime
   ocannl
   arrayjit.verdict))
 

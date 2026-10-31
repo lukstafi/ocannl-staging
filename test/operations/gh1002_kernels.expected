@@ -1,6 +1,8 @@
 legacy rows preserve timing, launch dimensions and writes: true
 multiword mma text with vol preserves the write labels: true
 an io field parses into bytes read/written and leaves the other fields as they were: true
+a range parses beside the median, nan where it is unstated, and leaves the rest as it was: true
+a table with an untimed kernel is incomplete: true
 a complete zero-based table is accepted: true
 missing, duplicate, reordered and inconsistent rows are refused: true
 a missing kernel-table file is refused: true

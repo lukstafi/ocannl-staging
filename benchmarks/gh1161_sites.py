@@ -4,7 +4,7 @@
 `orchestrate.py` with `BENCH_KERNEL_TABLE=1` and `BENCH_CELL_LOG_DIR=<dir>` leaves, per OCANNL
 cell, the kernel table of the step as shipped on stderr (`bench: kernel i/n <ms> ms ... w: <written
 nodes>`) and the cell's result line on stdout. This reads every such log and prints, per cell,
-the step p50 beside the sum of the kernel minima attributed to each site of the reduced ResNet.
+the step p50 beside the sum of the kernel times attributed to each site of the reduced ResNet.
 
 A kernel belongs to every site whose names it writes (`Bench_conv_model.resnet`'s names):
   conv site X (stem, s<i>c1, s<i>c2, s<i>sc)   kernel_X, bias_X (their .grad), relu_Xout (.grad)
@@ -16,8 +16,10 @@ the cell names the dependent issues cite:
   pad3x3    the padded 3x3 stride-1 convs (stem, s<i>c1, s<i>c2)
   resadd    the residual adds (s<i>res)
   sc1x1s2   the stride-2 1x1 shortcut convs (s<i>sc)
-Each kernel minimum includes a launch and device sync, and a kernel that could not be compiled on
-its own (DECLINED) has no time: the `timed` column says how many were. A table missing any of its
+Each kernel time is its row's: since gh-ocannl-1694 the median of its timing calls, a per-launch
+time under the configured autotune_timing (before, a min-of-20 with a launch and device sync in
+it). A kernel that could not be compiled on its own (DECLINED), or none of whose timing calls was
+admitted (UNTIMED), has no time: the `timed` column says how many were. A table missing any of its
 declared kernels is INCOMPLETE and attributes nothing. A tuned cell's search-pass log is skipped:
 only its measured replay is a cell.
 
@@ -32,7 +34,7 @@ from pathlib import Path
 from display_safe import display_value, log_line, table_lines
 from strict_json import loads
 
-KERNEL = re.compile(r"^bench: kernel (\d+)/(\d+) (?:([0-9.]+) ms .*? w: (.*)|.*DECLINED.*)$")
+KERNEL = re.compile(r"^bench: kernel (\d+)/(\d+) (?:([0-9.]+) ms .*? w: (.*)|.*(?:DECLINED|UNTIMED).*)$")
 PARAM = re.compile(r"^(?:kernel|bias)_(stem|s\d+(?:c[12]|sc))(?:\.grad)?$")
 RELU = re.compile(r"^relu_(stem|s\d+(?:c1)?)out(?:\.grad)?$")
 RES = re.compile(r"^(s\d+res)(?:\.grad)?$")
@@ -69,6 +71,7 @@ def read_cell(path):
         m = KERNEL.match(line)
         if m:
             # A DECLINED row's detail runs over several lines before its `w:`: no time, no names.
+            # Nor has an UNTIMED one (gh-ocannl-1694: no timing call admitted), on one line.
             ms = float(m.group(3)) if m.group(3) else None
             kernels.append((int(m.group(1)), ms, (m.group(4) or "").split()))
             declared = int(m.group(2))
@@ -90,7 +93,7 @@ def complete(kernels, declared):
 
 
 def attribute(kernels):
-    """Per site and per family, the summed minima of the kernels naming it: a kernel counts once
+    """Per site and per family, the summed times of the kernels naming it: a kernel counts once
     toward each site it names and once toward each family those sites belong to."""
     sites, families, unattributed = {}, {}, 0.0
     for _, ms, written in kernels:
@@ -137,7 +140,7 @@ def main(argv=None):
         all_sites |= set(sites)
         rows.append((label(result), result, kernels, declared, whole, sites, families, unattributed))
     per_site = sorted(all_sites, key=lambda s: (s != "stem", s)) if args.per_site else []
-    head = ["cell", "step p50 ms", "kernels timed", "sum of minima ms",
+    head = ["cell", "step p50 ms", "kernels timed", "sum of kernel ms",
             *(name for name, _ in FAMILIES), "unattributed", *per_site]
     table = []
     for name, result, kernels, declared, whole, sites, families, unattributed in sorted(

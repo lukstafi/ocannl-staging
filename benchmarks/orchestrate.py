@@ -2348,7 +2348,8 @@ def dominant_kernel_cell(result):
 
     `41.3% f32 memory · k3/12 0.412 ms w1.grad`: the attainment, the ceiling it was scored against
     and the roofline leg that binds, then which kernel it is -- its launch position among the
-    kernels the cell shipped, its own measured time and the nodes it writes. The number is printed
+    kernels the cell shipped, its own measured time (the median of its timing calls; the result
+    line carries their range beside it, gh-ocannl-1694) and the nodes it writes. The number is printed
     only for an `exact` verdict; every other verdict prints its mark in its place, keeping the
     kernel's identity beside it so a reader can still see which kernel dominated. A cell whose
     runner did not run the instrument -- every Python row, and an OCANNL row under
@@ -2793,10 +2794,13 @@ def report(
             lines.append(
                 "`kernel %peak` is the attainment of the cell's DOMINANT KERNEL (gh-ocannl-1006): "
                 "of the kernels the cell shipped -- a tuned cell's searched winner included -- the "
-                "one that takes longest when each is timed on its own (min of 20 runs, launch and "
-                "device sync included, after the timed steps; chosen by measured time, not by the "
-                "cost model's own bound, which the column exists partly to check). `kN/M` is its "
-                "launch position among M kernels, then its time and the nodes it writes. The "
+                "one that takes longest when each is timed on its own (after the timed steps, the "
+                "median of `BENCH_RETIME_CALLS` timing calls under the tuner's `autotune_timing` "
+                "protocol -- a per-launch time, queued by default -- whose range rides on the "
+                "result line as `seg_ms_lo`/`seg_ms_hi`, gh-ocannl-1694; chosen by measured time, "
+                "not by the cost model's own bound, which the column exists partly to check). "
+                "`kN/M` is its launch position among M kernels, then its median time and the nodes "
+                "it writes. The "
                 "number is its roofline lower bound over that time -- max(ops / peak FLOP/s, "
                 "bytes / peak bandwidth) on the cost model's counts -- and `compute` / `memory` "
                 "names the leg that binds. Ceilings, matched to the kernel's precision and mma "
@@ -2816,7 +2820,8 @@ def report(
                 "override), not this device's measured peak: the column ranks before/after on one "
                 "box and certifies nothing about the device -- a number above 100% says the "
                 "constant is below this card, not that the kernel beat physics. A small kernel's "
-                "launch overhead counts against it. Printed only on an exact count: `approx` is a "
+                "per-launch dispatch cost counts against it. Printed only on an exact count: "
+                "`approx` is a "
                 "kernel whose BINDING leg's op or byte count is an upper bound (the calibration "
                 "fit's per-leg rule; an upper bound on the leg that does not bind cannot overtake "
                 "the exact one, so it leaves the number exact), "
