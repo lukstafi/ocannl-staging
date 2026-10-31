@@ -225,10 +225,27 @@ single-threaded segments that sum to the serial step
     report's origin field joins every agreeing box, so it is no thing to grep). `--check` also
     prints, per fixture, the declared measurement boxes with no entry (the reports' MISSING DIGEST
     RECORD line); `--expect-recorded <box>` (repeatable) makes "the record is complete for
-    `<box>`" an exit status, whether or not that box's entry is the bytes on disk. Both tools refuse an origin they cannot
+    `<box>`" an exit status, whether or not that box's entry is the bytes on disk.
+    `--check-names` asks the same per fixture NAME and reads no bytes (gh-ocannl-1356): positional
+    arguments are names (`gpt2_mini_b1`, `gpt2_mini_b1.safetensors` or a path to one, which need
+    not exist), and by default every name with a row or a workload spec in `workloads/` — so
+    `python3 benchmarks/fixture_digest.py --check-names --expect-recorded rog-nv` confirms from
+    any checkout that rog-nv's rows landed, fixtures held there or not. A name with no row and no
+    spec is refused as the misspelling it most likely is. Both tools refuse an origin they cannot
     trust rather than inventing one: an explicitly empty `--origin` (how `--origin "$BOX"`
     fails when `$BOX` is unset) and a host that reports no name at all, since a shared
     placeholder would let the next such box overwrite this one's entry under it.
+  - **Recording a box's copy of bytes already on record**: `python3 benchmarks/fixture_digest.py
+    --record-matching --origin <box> <copies>` records each copy as `<box>`'s bytes only when its
+    canonical digest equals an existing `content-v1` row, so the row says this box measures a
+    workload some box already measures and nothing more. It refuses bytes that match no
+    `content-v1` row (an unrecorded name, a regenerated copy, a match against a `raw-v1` row
+    alone), a fixture `<box>` already has a different row for (a content change or a new content
+    baseline, which redefine what the box's past reports were on, or a raw-v1 migration — plain
+    `--record` performs and announces each), and a `<box>` the header does not declare. It
+    judges every fixture before writing, so one refusal records nothing; a copy `<box>` already
+    has this row for is reported as already recorded. Run it on the box against the bytes it
+    holds, and `--check --expect-origin <box>` the copies afterwards.
   - **Regeneration is a cross-box event.** `gen_fixtures.py` draws from *this* box's numpy, so
     regenerating here does not give the other measuring boxes the same workload — it gives this
     box a new one and leaves theirs behind. Coordinate it across every origin in the header's
