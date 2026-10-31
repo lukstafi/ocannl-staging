@@ -7921,7 +7921,10 @@ let tune_in_stream_scope ~timing_state ~defer ~substituted ?name ?search ?beam_w
      elsewhere. As in {!seeded_default}, a classified failure of a compile that seeded, split or
      sank something recompiles the plain default; any other failure goes to [raise_pre_search].
      [Context.compile] is the plain form plus [raise_failure], which is what [raise_pre_search] ends
-     with, so the caller sees the same exception either way. *)
+     with, so the caller sees the same exception either way. Every call lies in a [not search]
+     branch or, on a path that tests no flag, carries [[@searchless "<why it does not search>"]]:
+     [test/operations/limits_field_classes] refuses any other caller, since this compile reads
+     [Untimed] fields the cache key cannot see (gh-ocannl-1570). *)
   let compile_untuned_default ?base () =
     progress_stage "untuned_default_compile";
     let plain () =
@@ -8840,6 +8843,8 @@ let tune_in_stream_scope ~timing_state ~defer ~substituted ?name ?search ?beam_w
                                (Outcome.detail_of_cause classified.cause);
                              substituted := true;
                              compile_untuned_default ~base:(census ()) ()
+                             [@searchless
+                               "a cache hit's relink: no search ran, and nothing is timed or stored"]
                          | Error (Outcome.Fatal _ as failure) ->
                              raise_pre_search ~base:(census ()) failure)))
             | Error (Outcome.Classified classified) ->
@@ -8892,7 +8897,9 @@ let tune_in_stream_scope ~timing_state ~defer ~substituted ?name ?search ?beam_w
         let reached =
           { (census ()) with outcome = Lineage_refused { caller_digest; timing_digest } }
         in
-        finish reached (fun () -> compile_untuned_default ~base:reached ())
+        finish reached (fun () ->
+            (compile_untuned_default ~base:reached ()
+             [@searchless "a refused lineage: no search runs, and nothing is timed or stored"]))
     | None, Some result, _ ->
         release_baseline ();
         result
