@@ -165,7 +165,8 @@ end
 type session_state = {
   mutable next_id : int;
       [@mutation_serial.exempt
-        "a fresh-id counter: ids are never reused, so a rewind need not restore it"]
+        "a fresh-id counter: ids are never reused, so a rewind need not restore it (an id-neutral \
+         window, Scheme.with_id_neutral, allocates from a reserved range and restores it)"]
   mutable forward_roots : t Map.M(Int).t;
   mutable backprop_roots : Weak_root.map;
 }
@@ -583,14 +584,17 @@ let%track7_sexp op ~(label : string list) ?(ternary_op = Shape.Pointwise_tern)
     ?shape_logic ?(terminal_backprop = false) ~op_asn ~grad_asn ?(grad_spec = If_needed)
     ?(top_down_prec = false) make_shape (orig_ts : t list) : t =
   List.iter orig_ts ~f:(fun t ->
-      if t.value.id >= session_state.next_id then
+      if t.value.id >= session_state.next_id then (
+        (* A trace's tensors have ids from a reserved range above every session id (gh-ocannl-1751):
+           a handle that outlived its trace is reported as the discarded node it is. *)
+        check_not_discarded ~what:"Tensor.op: operand" t;
         raise
         @@ Session_error
              ( [%string
                  "Tensor #%{t.value.id#Int} %{Tn.debug_name t.value} has an id greater than the \
                   last id #%{session_state.next_id - 1#Int} -- check your uses of \
                   Tensor.unsafe_reinitialize, if all your uses are valid, report this as a bug."],
-               Some t ));
+               Some t )));
   Shape.check_untainted ();
   List.iter orig_ts ~f:(check_not_discarded ~what:"Tensor.op: operand");
   let entry_id = session_state.next_id in
@@ -1618,6 +1622,7 @@ let with_rewind ?label f =
 (** {2 Shape schemes (gh-ocannl-404)} *)
 
 module Scheme = struct
+  type tensor = t
   type t = Shape.Scheme.t
 
   let label = Shape.Scheme.label
@@ -1627,16 +1632,59 @@ module Scheme = struct
   let applications = ref 0
   [@@mutation_serial.exempt "a counter naming default application labels, not inference state"]
 
+  (* Id neutrality (gh-ocannl-1751). A rewind does not restore the tensor id counter: ids are never
+     reused. So a window that is always rewound -- a trace, a definition check -- allocates its
+     tensors' ids from a reserved range above every session id, with a counter of its own that is
+     never reused either, and restores the session counter on exit. Ids the session hands out are
+     then the same whether or not the window ran: printed ids, generated identifiers, cache identity
+     and [Embed_self_id]-seeded random draws do not move. Both id invariants hold: a checkpoint's
+     [id_mark] orders pre-existing shapes before later ones within either range, and [op]'s [id >=
+     next_id] check catches a handle that outlived its window. *)
+  let reserved_id_base = 1 lsl 40
+
+  let reserved_next_id = ref reserved_id_base
+  [@@mutation_serial.exempt
+    "a fresh-id counter of the id-neutral windows: never reused, so never restored"]
+
+  let id_neutral_depth = ref 0
+  [@@mutation_serial.exempt "the nesting of id-neutral windows, restored by their own finally"]
+
+  let id_neutral_sabotaged = ref false
+  [@@mutation_serial.exempt "a negative control's switch, set by tests only"]
+
+  let with_id_neutral f =
+    if !id_neutral_depth > 0 || !id_neutral_sabotaged then f ()
+    else (
+      assert (session_state.next_id < reserved_id_base);
+      let saved = session_state.next_id in
+      session_state.next_id <- !reserved_next_id;
+      Int.incr id_neutral_depth;
+      Exn.protect ~f ~finally:(fun () ->
+          Int.decr id_neutral_depth;
+          reserved_next_id := max !reserved_next_id session_state.next_id;
+          assert (!reserved_next_id < Int.max_value / 2);
+          session_state.next_id <- saved))
+
+  (* The trace proper, to run inside a rewound window. *)
+  let trace_core ?sabotage ~label arity f =
+    let var_mark = Row.var_mark () in
+    let tracers =
+      List.init arity ~f:(fun i ->
+          term ~grad_spec:Prohibit_grad ~label:[ [%string "%{label}.arg%{i#Int}"] ] ())
+    in
+    Shape.Scheme.trace ?sabotage ~var_mark ~label
+      ~args:(List.map tracers ~f:(fun t -> t.shape))
+      (fun () -> List.map (f tracers) ~f:(fun t -> t.shape))
+
   let trace_impl ?sabotage ~label arity f =
-    with_rewind ~label:[%string "the trace of the shape scheme %{label}"] (fun () ->
-        let var_mark = Row.var_mark () in
-        let tracers =
-          List.init arity ~f:(fun i ->
-              term ~grad_spec:Prohibit_grad ~label:[ [%string "%{label}.arg%{i#Int}"] ] ())
-        in
-        Shape.Scheme.trace ?sabotage ~var_mark ~label
-          ~args:(List.map tracers ~f:(fun t -> t.shape))
-          (fun () -> List.map (f tracers) ~f:(fun t -> t.shape)))
+    try
+      with_id_neutral (fun () ->
+          with_rewind ~label:[%string "the trace of the shape scheme %{label}"] (fun () ->
+              trace_core ?sabotage ~label arity f))
+    with Shape.Untraceable_scheme msg ->
+      (* The explicit layer keeps its contract: every refusal is a shape error. *)
+      let bt = Stdlib.Printexc.get_raw_backtrace () in
+      Stdlib.Printexc.raise_with_backtrace (Row.Shape_error (msg, [])) bt
 
   let trace ~label arity f = trace_impl ~label arity f
 
@@ -1651,6 +1699,169 @@ module Scheme = struct
     Shape.Scheme.instantiate ?sabotage s ~application ~args ~results
 
   let instantiate ?application s ~args ~results = instantiate_impl ?application s ~args ~results
+
+  (* {3 Automatic schemes for [%op] functions (gh-ocannl-1751)} *)
+
+  type event = Traced of string | Unschemed of string * string | Checked of string
+
+  (* Observers of the automatic schemes' events, innermost first: [check_definition] collects the
+     traces its trial makes, and tests read the log. *)
+  let observers : (event -> unit) list ref = ref []
+  [@@mutation_serial.exempt "observers of scheme events, restored by their installers' finally"]
+
+  let emit ev = List.iter !observers ~f:(fun f -> f ev)
+
+  let observing f ~on_event =
+    observers := on_event :: !observers;
+    Exn.protect ~f ~finally:(fun () ->
+        match !observers with _ :: rest -> observers := rest | [] -> ())
+
+  (* Session resets so far: a scheme traced before one is traced again. *)
+  let generation = ref 0
+  [@@mutation_serial.exempt "a count of session resets, which only retires schemes"]
+
+  type mode = Check | Off
+
+  let mode =
+    lazy
+      (match
+         String.lowercase (Utils.get_global_arg ~default:"check" ~arg_name:"op_shape_schemes")
+       with
+      | "check" -> Check
+      | "off" -> Off
+      | other ->
+          raise
+          @@ Utils.User_error
+               [%string "Invalid op_shape_schemes setting %{other}: expected check or off"])
+
+  let mode_override : mode option ref = ref None
+  [@@mutation_serial.exempt "a test override of a process-lifetime setting"]
+
+  let enabled () =
+    match Option.value !mode_override ~default:(Lazy.force mode) with Check -> true | Off -> false
+
+  type state =
+    | Pending
+    | Schemed of { scheme : t; generation : int }
+    | Unschemed of string  (** The reason. *)
+
+  type handle = { name : string; arity : int; body : tensor list -> unit; mutable state : state }
+
+  let unscheme h reason =
+    h.state <- Unschemed reason;
+    emit (Unschemed (h.name, reason))
+
+  (* A rewind that must succeed for the fallback to be safe: if it fails, [exn] propagates. *)
+  let rewind_or_reraise ck exn bt =
+    match rewind ck with
+    | () -> ()
+    | exception Session_error _ -> Stdlib.Printexc.raise_with_backtrace exn bt
+
+  let trace_handle h =
+    if not (Shape.can_checkpoint ()) then
+      (* Tainted, or mid-construction: the body itself reports what it reports, as without a scheme.
+         Left pending, to trace when a checkpoint is possible. *)
+      ()
+    else
+      with_id_neutral (fun () ->
+          let ck = checkpoint ~label:[%string "the trace of the shape scheme %{h.name}"] () in
+          match
+            trace_core ~label:h.name h.arity (fun ts ->
+                h.body ts;
+                [])
+          with
+          | scheme ->
+              rewind ck;
+              h.state <- Schemed { scheme; generation = !generation };
+              emit (Traced h.name)
+          | exception (Row.Shape_error _ as exn) ->
+              (* A contradiction that does not depend on the arguments: loud, naming the
+                 function. *)
+              let bt = Stdlib.Printexc.get_raw_backtrace () in
+              (try rewind ck with Session_error _ -> ());
+              Stdlib.Printexc.raise_with_backtrace exn bt
+          | exception (Shape.Untraceable_scheme msg as exn) ->
+              let bt = Stdlib.Printexc.get_raw_backtrace () in
+              rewind_or_reraise ck exn bt;
+              unscheme h msg
+          | exception exn ->
+              (* The body cannot run on tracers (it reads concrete dims, say): degrade only once the
+                 session is verifiably back where it was. *)
+              let bt = Stdlib.Printexc.get_raw_backtrace () in
+              rewind_or_reraise ck exn bt;
+              unscheme h
+                [%string
+                  "tracing the shape scheme %{h.name}: the function raised %{Shape.exn_summary exn}"])
+
+  let make ~name ~arity body = { name; arity; body; state = Pending }
+
+  module For_ppx = struct
+    let closure ~name ~arity body =
+      let h = make ~name ~arity body in
+      if not (enabled ()) then h.state <- Unschemed "automatic shape schemes are off"
+      else if Shape.tracing_in_progress () then unscheme h "created inside a shape-scheme trace"
+      else trace_handle h;
+      h
+
+    let deferred ~name ~arity body =
+      let h = make ~name ~arity body in
+      if Shape.tracing_in_progress () then unscheme h "created inside a shape-scheme trace";
+      h
+
+    let application_name args =
+      match args with
+      | [] -> "no arguments"
+      | _ -> String.concat ~sep:", " (List.map args ~f:(fun t -> Tn.debug_name t.value))
+
+    (* The check of one application: the scheme's constraints against the arguments, solved, in a
+       window that is always rewound -- the session afterwards is what the body alone makes. *)
+    let check h scheme args =
+      if Shape.can_checkpoint () then (
+        let ck = checkpoint ~label:[%string "the check of the shape scheme %{h.name}"] () in
+        (match
+           Shape.Scheme.instantiate scheme ~application:(application_name args)
+             ~args:(List.map args ~f:(fun t -> t.shape))
+             ~results:[]
+         with
+        | () -> ()
+        | exception exn ->
+            let bt = Stdlib.Printexc.get_raw_backtrace () in
+            (try rewind ck with Session_error _ -> ());
+            Stdlib.Printexc.raise_with_backtrace exn bt);
+        rewind ck;
+        emit (Checked h.name))
+
+    let apply h args body =
+      if (not (enabled ())) || Shape.tracing_in_progress () then body ()
+      else (
+        (match h.state with
+        | Pending -> trace_handle h
+        | Schemed { scheme; generation = g } when g <> !generation || Shape.Scheme.stale scheme ->
+            trace_handle h
+        | Schemed _ | Unschemed _ -> ());
+        (match h.state with Schemed { scheme; _ } -> check h scheme args | _ -> ());
+        body ())
+  end
+
+  let status h =
+    match h.state with
+    | Pending -> "pending"
+    | Schemed _ -> "schemed"
+    | Unschemed reason -> "unschemed: " ^ reason
+
+  let check_definition ~name f =
+    let traced = ref [] in
+    let on_event = function Traced l -> traced := l :: !traced | _ -> () in
+    (try
+       with_id_neutral (fun () ->
+           with_rewind ~label:[%string "the check of the definition %{name}"] (fun () ->
+               observing ~on_event f))
+     with Row.Shape_error (msg, trace) ->
+       let bt = Stdlib.Printexc.get_raw_backtrace () in
+       Stdlib.Printexc.raise_with_backtrace
+         (Row.Shape_error ([%string "checking the definition %{name}: %{msg}"], trace))
+         bt);
+    List.rev !traced
 end
 
 module For_testing = struct
@@ -1661,6 +1872,15 @@ module For_testing = struct
 
   let instantiate_scheme ~sabotage ?application s ~args ~results =
     Scheme.instantiate_impl ~sabotage ?application s ~args ~results
+
+  let observe_schemes f ~on_event = Scheme.observing f ~on_event
+
+  let set_op_shape_schemes v =
+    Scheme.mode_override := Option.map v ~f:(fun b -> if b then Scheme.Check else Scheme.Off)
+
+  let without_id_neutrality f =
+    Scheme.id_neutral_sabotaged := true;
+    Exn.protect ~f ~finally:(fun () -> Scheme.id_neutral_sabotaged := false)
 
   let rewind_omitting ~omit ck =
     if not (List.mem restore_categories omit ~equal:String.equal) then
@@ -1691,6 +1911,7 @@ end
 let%track5_sexp unsafe_reinitialize ?(namespace = Tn.default_namespace) () : unit =
   Tn.set_current_namespace namespace;
   session_state.next_id <- 0;
+  Int.incr Scheme.generation;
   session_state.forward_roots <- Map.empty (module Int);
   session_state.backprop_roots <- Map.empty (module Int);
   Hashtbl.clear discarded_nodes;

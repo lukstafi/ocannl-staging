@@ -247,6 +247,7 @@ let known_config_keys =
       "default_prec";
       "limit_constant_fill_size";
       "max_shape_error_origins";
+      "op_shape_schemes";
       "checkpoint_load_mmap";
     ]
 
@@ -614,6 +615,11 @@ let config_key_classification : (config_key_class * string * string list) list =
         "max_shape_error_origins";
         "device_init_deadline";
       ] );
+    ( Execution_neutral,
+      "shape-only checking at graph construction (gh-ocannl-1751): a scheme check is rewound and \
+       its traces allocate no session id, so the graph, its tensor ids and the code it lowers to \
+       are the same either way; only where a shape error is reported changes",
+      [ "op_shape_schemes" ] );
     ( Execution_neutral,
       "reuse of compiled kernel code within a process, keyed by the kernel's exact source and \
        compiler options, so a reused kernel was compiled from the same text under the same \

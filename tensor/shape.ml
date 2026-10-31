@@ -2185,6 +2185,13 @@ let tracing : string list ref = ref []
 [@@mutation_serial.exempt
   "the shape-scheme traces in progress, restored by the trace's own finally"]
 
+(* A trace refused by design (gh-ocannl-1751): what the function does is valid, but a scheme cannot
+   carry it. Distinct from [Row.Shape_error], a contradiction, so that an automatic scheme can
+   degrade to an unschemed function on this one and stay loud on the other. *)
+exception Untraceable_scheme of string
+
+let tracing_in_progress () = not (List.is_empty !tracing)
+
 (** {3 Session consistency (gh-ocannl-1301)}
 
     [finish_inference] is the session's only commit point. A construction that fails after mutating
@@ -2291,6 +2298,8 @@ let check_can_rewind ?(what = "Tensor.rewind_to_last_closure") () =
            ^ ": called from within [op_asn], mid-construction of a tensor operation -- not \
               supported; rewind after the construction returns or raises",
            [] )
+
+let can_checkpoint () = !construction_depth = 0 && Option.is_none !taint
 
 (** {3 Checkpoints (gh-ocannl-903)}
 
@@ -4054,13 +4063,12 @@ let finish_inference (() : unit) : unit =
   | [] -> ()
   | label :: _ ->
       raise
-      @@ Row.Shape_error
-           ( [%string
-               "finish_inference: shape inference was finalized while tracing the shape scheme \
-                %{label} (via Shape.to_dims, Shape.to_padding or a projections handle) -- not \
-                supported: a closure would commit the trace's work, which the trace must leave \
-                undone. Do not force dims or projections inside a traced function."],
-             [] ));
+      @@ Untraceable_scheme
+           [%string
+             "finish_inference: shape inference was finalized while tracing the shape scheme \
+              %{label} (via Shape.to_dims, Shape.to_padding or a projections handle) -- not \
+              supported: a closure would commit the trace's work, which the trace must leave \
+              undone. Do not force dims or projections inside a traced function."]);
   if !construction_depth > 0 then
     raise
     @@ Row.Shape_error
@@ -4492,7 +4500,7 @@ module Scheme = struct
       && List.mem (Hashtbl.find_multi frontier sh.id) sh ~equal:phys_equal
       && not (List.mem args sh ~equal:phys_equal)
     in
-    let refuse msg = raise @@ Row.Shape_error (msg, []) in
+    let refuse msg = raise @@ Untraceable_scheme msg in
     try
       tracing := label :: !tracing;
       trace_touches := Some [];
@@ -4648,11 +4656,19 @@ module Scheme = struct
         closure_bound;
         closure_at_trace = !closure_count;
       }
-    with Row.Shape_error (msg, trace) ->
-      let bt = Stdlib.Printexc.get_raw_backtrace () in
-      Stdlib.Printexc.raise_with_backtrace
-        (Row.Shape_error ([%string "tracing the shape scheme %{label}: %{msg}"], trace))
-        bt
+    with
+    | Row.Shape_error (msg, trace) ->
+        let bt = Stdlib.Printexc.get_raw_backtrace () in
+        Stdlib.Printexc.raise_with_backtrace
+          (Row.Shape_error ([%string "tracing the shape scheme %{label}: %{msg}"], trace))
+          bt
+    | Untraceable_scheme msg ->
+        let bt = Stdlib.Printexc.get_raw_backtrace () in
+        Stdlib.Printexc.raise_with_backtrace
+          (Untraceable_scheme [%string "tracing the shape scheme %{label}: %{msg}"])
+          bt
+
+  let stale s = !closure_count <> s.closure_at_trace && Option.is_some s.closure_bound
 
   let instantiate ?sabotage s ~application ~(args : shape list) ~(results : shape list) =
     check_untainted ();

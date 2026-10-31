@@ -41,7 +41,7 @@ tensor/shape.ml: boundary restore_globals -- part of a rewind: puts back the glo
 tensor/shape.ml: boundary rewind -- the rewind: it restores the checkpoint and clears the taint
 tensor/shape.ml: boundary unsafe_reinitialize -- the session reset: it discards all state and clears the taint
 tensor/shape.ml: boundary finish_inference_body -- the commit point: finish_inference taints the session on any failure of this body
-tensor/tensor.ml: session_state.next_id (mutable field) -- exempt: a fresh-id counter: ids are never reused, so a rewind need not restore it
+tensor/tensor.ml: session_state.next_id (mutable field) -- exempt: a fresh-id counter: ids are never reused, so a rewind need not restore it (an id-neutral window, Scheme.with_id_neutral, allocates from a reserved range and restores it)
 tensor/tensor.ml: session_state.forward_roots (mutable field) -- accounted: every write noted or at a boundary; captured by capture_globals
 tensor/tensor.ml: session_state.backprop_roots (mutable field) -- accounted: every write noted or at a boundary; captured by capture_globals
 tensor/tensor.ml: random_seed (ref) -- accounted: every write noted or at a boundary; captured by capture_globals
@@ -56,6 +56,12 @@ tensor/tensor.ml: default_grad_prec (ref) -- exempt: user configuration read whe
 tensor/tensor.ml: max_sublabel_length (ref) -- exempt: user configuration of label printing, not inference state
 tensor/tensor.ml: param_postprocess (ref) -- exempt: a user-installed hook applied to new parameters, not inference state
 tensor/tensor.ml: applications (unread state) -- exempt
+tensor/tensor.ml: reserved_next_id (unread state) -- exempt
+tensor/tensor.ml: id_neutral_depth (unread state) -- exempt
+tensor/tensor.ml: id_neutral_sabotaged (unread state) -- exempt
+tensor/tensor.ml: observers (unread state) -- exempt
+tensor/tensor.ml: generation (unread state) -- exempt
+tensor/tensor.ml: mode_override (unread state) -- exempt
 tensor/tensor.ml: boundary note_external_handout -- a closed-world act: records that work left the session, so a rewind does not resurrect it; not open inference state
 tensor/tensor.ml: boundary record_checkpoint -- the closure's record: run at the commit of a successful finish_inference, and to re-anchor after a rewind or a session reset
 tensor/tensor.ml: boundary finally -- a scoped restore: puts back the roots saved at entry, on return and on a raise alike
