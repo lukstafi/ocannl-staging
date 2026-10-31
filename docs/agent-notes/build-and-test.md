@@ -2361,6 +2361,12 @@ in the `tools/*.sh` scripts (gh-ocannl-1111) and in the string literals of the O
   share a dune `(locks <exe>)`, or one run's `init` sweeps the other's artifacts mid-run: on
   Windows the delete is refused while the kernels are loaded, and elsewhere it succeeds and the
   swept run fails to compile or read (`cc_kept_library`; `schedule_conv_gemm`, gh-ocannl-1720).
+  `generated_lock_scan` holds that across the tree (gh-ocannl-1749): a program whose own modules
+  call `init` and that two or more stanzas run (`Dune_stanza_scan.program_runners`, plus a
+  `(test)` itself) needs one lock every runner names, a relative name resolved per directory as
+  dune resolves it, or its program stanza carries `; generated-lock: none -- <why>` where each run
+  provably writes elsewhere (`cc_march_census`: every piece and emit child `chdir`s into a
+  directory of its own first, and one lock would serialize the pieces gh-ocannl-1502 split).
   Any configured `build_files_prefix`
   is refused outright — a second executable can be given the same prefix, so deleting there is
   unsafe, and without deletion a deterministic compile's re-emitted identical kernel is
