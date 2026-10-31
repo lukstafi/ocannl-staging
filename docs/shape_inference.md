@@ -429,7 +429,7 @@ Construction-time writes on operands' tensor nodes, audited for this contract:
 | memory mode, `host_constant` (literals), `slice_of` (`@\|`) | written on the new node only |
 | `alias_of` | written at lowering, not at construction |
 | `observable` (Train's loss) | only ever turned on; can pessimise placement, never values |
-| static-symbol roles (`used_as_extent` / `used_as_slice`) | claims are deferred to a successful closure, dropped by a rewind |
+| static-symbol roles (`used_as_extent` / `used_as_slice`) | claims are deferred to a successful closure, dropped by a rewind; only `Shape` can write the flags |
 | host-init data and registry entries of discarded nodes | unreachable garbage (memory only) |
 
 ## Projections inference

@@ -99,7 +99,10 @@ val is_used_as_slice : Ir.Indexing.static_symbol -> bool
 val claim_symbol_role : Ir.Indexing.static_symbol -> [ `Extent | `Slice ] -> unit
 (** Records a role claim; it reaches the symbol's flag at the next successful closure. *)
 
-val commit_symbol_roles : unit -> unit
+val commit_symbol_roles : commit:(Ir.Indexing.static_symbol -> [ `Extent | `Slice ] -> unit) -> unit
+(** Hands every pending claim to [commit] -- [Shape]'s [Ir.Indexing.commit_role] -- and empties the
+    pending set. *)
+
 val drop_symbol_roles : unit -> unit
 
 val reset_transient : unit -> unit

@@ -157,7 +157,9 @@ let mutation_serial () = !serial
    [used_as_slice]) is a flag on a caller-retained symbol, so a construction that is later discarded
    by [Tensor.rewind_to_last_closure] must not leave it set: claims are recorded here and committed
    to the symbol by a successful [Shape.finish_inference] (nothing reads the flags before lowering,
-   which closes first), and dropped by a rewind. The conflict checks consult both. *)
+   which closes first), and dropped by a rewind. The conflict checks consult both. The flags are
+   private to [Ir.Indexing] (gh-ocannl-1624): the commit writes them through
+   [Ir.Indexing.commit_role], whose writer [Shape] holds and passes in. *)
 let pending_roles : (Ir.Indexing.static_symbol * [ `Extent | `Slice ]) list ref = ref []
 
 let pending_role sym role =
@@ -177,11 +179,8 @@ let claim_symbol_role sym role =
     note_mutation ();
     pending_roles := (sym, role) :: !pending_roles)
 
-let commit_symbol_roles () =
-  List.iter !pending_roles ~f:(fun (sym, role) ->
-      match role with
-      | `Extent -> sym.Ir.Indexing.used_as_extent <- true
-      | `Slice -> sym.Ir.Indexing.used_as_slice <- true);
+let commit_symbol_roles ~commit =
+  List.iter !pending_roles ~f:(fun (sym, role) -> commit sym role);
   pending_roles := []
 [@@mutation_serial.boundary "part of the commit: only a successful finish_inference calls it"]
 

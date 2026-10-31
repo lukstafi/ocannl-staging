@@ -407,9 +407,8 @@ let next_id = ref 964_000_000
    that covers the whole axis, which is what makes the guard vacuous and the value comparable to the
    unguarded baseline. *)
 let extent_symbol () =
-  let s, bindings = Idx.get_static_symbol ~static_range:cols Idx.Empty in
-  s.Idx.used_as_extent <- true;
-  (s, bindings)
+  let s = Idx.make_static_symbol ~static_range:cols ~used_as:`Extent (Idx.get_symbol ()) in
+  (s, Idx.Bind (s, Idx.Empty))
 
 let make ~(prec : Ops.prec) ~(shape : shape) () : prog =
   let node ?(dims = [| rows; cols |]) label =

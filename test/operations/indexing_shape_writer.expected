@@ -1,0 +1,12 @@
+with no Shape linked, the first claim of the shape writer succeeds: true
+a second claim of the shape writer is refused: true
+Indexing guard: re-setting the held symbol is a no-op: true
+Indexing guard: a size, even the symbol's maximum, is refused on a symbol: true
+Indexing guard: the refused size leaves the symbol alone: true
+Indexing guard: re-setting the held size is a no-op: true
+Indexing guard: a symbol is refused on a size: true
+Indexing guard: the refused symbol leaves the size alone: true
+a fresh static symbol holds no role: true
+committing the extent role sets it, and re-committing it is a no-op: true
+the slice role is refused on an extent symbol, leaving it an extent: true
+a role given at birth holds, and excludes the other: true

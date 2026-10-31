@@ -943,7 +943,7 @@ let () =
     ~static_indices:[ parameter ]
     ~extra:(fun an run surface safe calls ->
       let before = !calls in
-      parameter.Idx.static_range <- Some limit;
+      Idx.set_static_range parameter (Some limit);
       let unsafe = run an in
       p "mutating the active static domain invalidates an exact cached price"
         (!calls = before + 1

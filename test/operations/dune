@@ -3705,6 +3705,8 @@
 
 ; gh-ocannl-1506: Shape.t is a private record behind the closed-shape guard's setters. Real ocamlc
 ; programs against the built interface: reads compile, every write and construction is rejected.
+; gh-ocannl-1573 and gh-ocannl-1624 extended it to the rest of gh-ocannl-903's frontier, Indexing's
+; records and setters among them.
 
 (test
  ; ocannl-backend: none -- invokes ocamlc on snippets against the built Shape interface; it executes no backend.
@@ -3727,6 +3729,17 @@
    %{lib:neural_nets_lib.tensor:ocannl_tensor__Shape.cmi}
    %{lib:arrayjit.ir:ir__Indexing.cmi}
    %{lib:base:base.cmi})))
+
+; gh-ocannl-1624: the shape writer the Indexing setters take, claimed in a process that links no
+; Shape (capture_per_call holds the refusal where Shape holds it).
+
+(test
+ ; ocannl-backend: none -- links no backend: it writes Indexing records.
+ (name indexing_shape_writer)
+ (package neural_nets_lib)
+ (deps ocannl_config)
+ (modules indexing_shape_writer)
+ (libraries base arrayjit.ir arrayjit.utils arrayjit.verdict))
 
 ; How both consistency scanners read a source file, exercised on hostile input rather than only
 ; on whatever the library sources happen to contain today.

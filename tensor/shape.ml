@@ -221,13 +221,19 @@ let check_ref_live ~uid ~label =
                 after %{provenance}; capture it afresh"],
              [] )
 
+(* The process's one [Ir.Indexing.shape_writer], claimed as [Shape] initializes (gh-ocannl-1624):
+   solving an [Ir.Indexing.variable_ref] and committing a static symbol's role take it, so they are
+   [Shape]'s alone -- [Delayed_ref]'s setters below and the commit of [finish_inference]. Not
+   exported. *)
+let shape_writer = Ir.Indexing.claim_shape_writer ()
+
 (** A capture reference: the [Ir.Indexing.variable_ref] an operation's [~capture_dims] fills in, and
     the variable inference bound it to. Private (gh-ocannl-1573): read and matched freely, written
     only through the setters here, each of which refuses a reference a rewind discarded and records
     the write as a session mutation of open work ({!touch_ref}). Rebinding [var] is legitimate --
     every operation the reference is passed to binds it to its own variable, and projection
     derivation rebinds it to projection-local ones -- whereas a solution is reached once
-    ({!Ir.Indexing.set_solved_dim}). *)
+    ({!Ir.Indexing.set_solved_dim}, which only [shape_writer]'s holder can call). *)
 module Delayed_ref : sig
   type t = private {
     var_ref : Ir.Indexing.variable_ref;
@@ -270,13 +276,13 @@ end = struct
   let set_solved_dim r d =
     check_live r;
     if not ([%equal: int option] r.var_ref.solved_dim (Some d)) then (
-      Ir.Indexing.set_solved_dim r.var_ref d;
+      Ir.Indexing.set_solved_dim shape_writer r.var_ref d;
       touch_ref r.uid)
 
   let set_solved_sym r sym =
     check_live r;
     if not ([%equal: Ir.Indexing.static_symbol option] r.var_ref.solved_sym (Some sym)) then (
-      Ir.Indexing.set_solved_sym r.var_ref sym;
+      Ir.Indexing.set_solved_sym shape_writer r.var_ref sym;
       touch_ref r.uid)
 end
 
@@ -884,10 +890,10 @@ let bind_delayed_vars_to_envs ~for_projections ~spec ~dim_var_env ~row_var_env ~
             | `Dim v0 when not (Row.equal_dim_var v0 var) ->
                 [ Row.Dim_eq { d1 = Row.Var var; d2 = Row.Var v0; origin = shared_origin } ]
             | `Row _ when Option.is_some delayed_ref.var_ref.solved_sym ->
-                (* Unreachable through [Shape] (gh-ocannl-1655): [set_sym_dim] refuses a row
-                   reference, a row's publication is a product only, and the row arm below refuses a
-                   symbolic reference before binding it. Kept as the row arm's refusal, not a silent
-                   drop of the row tie. *)
+                (* Unreachable (gh-ocannl-1655): [set_sym_dim] refuses a row reference, a row's
+                   publication is a product only, and the row arm below refuses a symbolic reference
+                   before binding it -- and since gh-ocannl-1624 nothing but [Shape] can solve a
+                   reference. Kept as the row arm's refusal, not a silent drop of the row tie. *)
                 raise
                 @@ Row.Shape_error
                      ( "Variable " ^ label
@@ -3437,7 +3443,8 @@ let compute_row_product env (row : Row.t) : int option =
     [finish_inference] solves before it publishes; a later binding emits it from
     [bind_delayed_vars_to_envs]), so a disagreement is the solver's [Shape_error] before it could
     reach this point. {!Ir.Indexing.set_solved_dim}'s refusal of a second kind of solution is a
-    backstop no inference path reaches. *)
+    backstop no inference path reaches, and since gh-ocannl-1624 no other path either: its
+    [shape_writer] is [Shape]'s. *)
 let update_delayed_var_refs env update_step =
   let update_var_ref_list var_refs =
     List.iter var_refs ~f:(fun delayed_ref ->
@@ -3541,7 +3548,7 @@ let%debug4_sexp finish_inference_body (() : unit) : unit =
   (* The commit: every shape of the applied steps is closed, and the role claims of the open work
      reach their symbols. *)
   List.iter !active_update_steps ~f:(fun update_step -> iter_shapes update_step ~f:close);
-  Row.commit_symbol_roles ();
+  Row.commit_symbol_roles ~commit:(Ir.Indexing.commit_role shape_writer);
   open_refs := [];
   update_mark := !update_uid;
   active_constraints := [];

@@ -1,13 +1,17 @@
 (* gh-ocannl-1506: Shape.t is a private record, so the closed-shape guard's setters are the only way
    to write a shape. gh-ocannl-1573 extended the same to the rest of gh-ocannl-903's frontier: an
    update step (its projections), a capture reference ([var]) and the [Ir.Indexing.variable_ref] it
-   carries ([solved_dim], [solved_sym]). That is a property of the INTERFACE, which nothing executed
-   can observe: this control hands real ocamlc programs against the built Shape interface. Reads and
-   pattern matches must compile; an assignment to each mutable field, a record literal, a record
-   update and the retired [t_of_sexp] must each be rejected with their own diagnostic. Every
-   rejected leg compiled on the base, where the record was public. A failed compiler launch or a
-   missing include directory cannot pass as a rejection: the positive leg runs through the same
-   path, and each negative leg names the diagnostic it expects. *)
+   carries ([solved_dim], [solved_sym]). gh-ocannl-1624 closed the frontier: a static symbol's
+   fields (its roles [used_as_extent] / [used_as_slice] above all), and the Indexing setters, which
+   take the shape writer only [Shape] holds. That is a property of the INTERFACE, which nothing
+   executed can observe: this control hands real ocamlc programs against the built Shape interface.
+   Reads and pattern matches must compile; an assignment to each mutable field, a record literal, a
+   record update and the retired [t_of_sexp] must each be rejected with their own diagnostic. Every
+   rejected leg that writes, builds or calls an existing name compiled on the base, where the record
+   was public; the two that name what the implementation keeps hidden (the writer's constructor) was
+   unbound there too, and pin that they stay so. A failed compiler launch or a missing include
+   directory cannot pass as a rejection: the positive leg runs through the same path, and each
+   negative leg names the diagnostic it expects. *)
 open Base
 open Stdio
 open Verdict.Claims
@@ -55,7 +59,8 @@ let prelude =
   "type shape = Ocannl_tensor.Shape.t\n\
    type step = Ocannl_tensor.Shape.update_step\n\
    type dref = Ocannl_tensor.Shape.delayed_var_ref\n\
-   type vref = Ir.Indexing.variable_ref\n"
+   type vref = Ir.Indexing.variable_ref\n\
+   type ssym = Ir.Indexing.static_symbol\n"
 
 let private_write field = [ "Cannot"; "assign"; "field"; field; "of"; "the"; "private"; "type" ]
 let private_construction = [ "Cannot"; "create"; "values"; "of"; "the"; "private"; "type" ]
@@ -88,12 +93,19 @@ let () =
         let read_vref (v : vref) = v.ref_label\n\
         let fresh_ref : dref = Ocannl_tensor.Shape.get_variable_ref \"d\"\n\
         let fresh_vref : vref = Ir.Indexing.variable_ref \"d\"\n\
-        let make = Ocannl_tensor.Shape.make_update_step\n")
+        let make = Ocannl_tensor.Shape.make_update_step\n\
+        let read_ssym (s : ssym) = s.used_as_extent || s.used_as_slice || Option.is_some \
+        s.static_range\n\
+        let match_ssym (s : ssym) = match s with { used_as_extent = true; _ } -> true | _ -> false\n\
+        let fresh_ssym : ssym =\n\
+       \  Ir.Indexing.make_static_symbol ~static_range:2 ~used_as:`Extent (Ir.Indexing.get_symbol \
+        ())\n\
+        let range (s : ssym) = Ir.Indexing.set_static_range s (Some 3)\n")
   in
   if not (Poly.equal frontier (Unix.WEXITED 0)) then eprintf "%s" frontier_log;
   p
-    "reading and matching an update step, a capture reference and its variable_ref compiles, and \
-     so do their public constructors"
+    "reading and matching an update step, a capture reference and its variable_ref, and a static \
+     symbol compiles, and so do their public constructors"
     (Poly.equal frontier (Unix.WEXITED 0));
   let rejected name code expected =
     let status, log = compile ~compiler ~include_dirs (prelude ^ code) in
@@ -153,6 +165,53 @@ let () =
     private_construction;
   rejected "a record update of a variable_ref is rejected as a private-type construction"
     "let copy (v : vref) : vref = { v with solved_dim = Some 1 }\n" private_construction;
+  (* gh-ocannl-1624: a static symbol's fields, and the shape writer. *)
+  List.iter [ "used_as_extent"; "used_as_slice"; "static_range" ] ~f:(fun field ->
+      rejected
+        (Printf.sprintf "assigning a static symbol's %s is rejected as a private-type write" field)
+        (Printf.sprintf "let write (s : ssym) = s.%s <- s.%s\n" field field)
+        (private_write field));
+  rejected "a record literal of a static symbol is rejected as a private-type construction"
+    "let forge (s : ssym) : ssym =\n\
+    \  { static_symbol = s.static_symbol; static_range = None; used_as_extent = true; \
+     used_as_slice = false }\n"
+    private_construction;
+  rejected "a record update of a static symbol is rejected as a private-type construction"
+    "let copy (s : ssym) : ssym = { s with used_as_extent = true }\n" private_construction;
+  (* The setters' first argument is the writer: a call without it is a type error naming it. The
+     words before the expected type vary across compiler releases, so the run is matched alone. *)
+  let rejected_wanting_writer name code =
+    let status, log = compile ~compiler ~include_dirs (prelude ^ code) in
+    let ok =
+      Poly.equal status (Unix.WEXITED 2)
+      && contains_run log [ "Error" ]
+      && contains_run log
+           [
+             "but";
+             "an";
+             "expression";
+             "was";
+             "expected";
+             "of";
+             "type";
+             "Ir";
+             "Indexing";
+             "shape_writer";
+           ]
+    in
+    if not ok then eprintf "%s:\n%s\n" name log;
+    p name ok
+  in
+  rejected_wanting_writer "solving a variable_ref without the shape writer is a type error"
+    "let write (v : vref) = Ir.Indexing.set_solved_dim v 3\n";
+  rejected_wanting_writer
+    "solving a variable_ref to a symbol without the shape writer is a type error"
+    "let write (v : vref) (s : ssym) = Ir.Indexing.set_solved_sym v s\n";
+  rejected_wanting_writer "committing a role without the shape writer is a type error"
+    "let write (s : ssym) = Ir.Indexing.commit_role s `Extent\n";
+  rejected "the shape writer has no constructor to forge it with"
+    "let forge : Ir.Indexing.shape_writer = Ir.Indexing.Shape_writer\n"
+    [ "Unbound"; "constructor"; "Ir"; "Indexing"; "Shape_writer" ];
   rejected "deserializing a shape is no longer offered"
     "let parse = Ocannl_tensor.Shape.t_of_sexp\n"
     [ "Unbound"; "value"; "Ocannl_tensor"; "Shape"; "t_of_sexp" ]

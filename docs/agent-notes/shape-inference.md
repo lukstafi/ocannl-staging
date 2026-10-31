@@ -209,9 +209,13 @@ files.
   rewound reference and counts the write (its open/discarded tracking is keyed by the reference's
   `uid`, so it stays top-level state the scan reads); and the `Ir.Indexing.variable_ref` it carries
   is private in `indexing.mli`, solved once through `set_solved_dim`/`set_solved_sym` (same value a
-  no-op, a different one or a second kind refused). Those two Indexing setters are public — a write
-  through them skips the session accounting; `Delayed_ref` is their only caller. Reads of committed
-  state
+  no-op, a different one or a second kind refused). Since gh-ocannl-1624 those setters, and
+  `commit_role` (a `static_symbol`'s `used_as_extent`/`used_as_slice`; the record is private too),
+  take an `Ir.Indexing.shape_writer`: one per process, which `Shape` claims as it initializes, so
+  `Delayed_ref` and `finish_inference`'s role commit are their only callers and any other claim
+  raises (`indexing_shape_writer` claims it in a Shape-free process; `capture_per_call` holds the
+  refusal). Hand-built IR gives a symbol its role at birth (`make_static_symbol ~used_as`). Reads
+  of committed state
   (`to_dims`/`to_padding` of a closed shape, `get_projections` of a committed step) skip
   `finish_inference`: a failed closure of OTHER work would otherwise poison a closed tensor's lazies
   (OCaml lazies re-raise their first exception). Tests that deliberately continue after an

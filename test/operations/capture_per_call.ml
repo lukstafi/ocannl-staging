@@ -553,24 +553,11 @@ let () =
           ignore (dims w : int list);
           ignore (dims (capture d w) : int list);
           Shape.set_dim d 6));
-  Verdict.case "the Indexing guard against a second kind of solution" (fun () ->
-      let module Idx = Ir.Indexing in
-      let seq = symbol () in
-      let refused f = match f () with () -> false | exception Utils.User_error _ -> true in
-      let r = Idx.variable_ref "r" in
-      Idx.set_solved_sym r seq;
-      Idx.set_solved_sym r seq;
-      p "Indexing guard: re-setting the held symbol is a no-op" (Option.is_some r.solved_sym);
-      p "Indexing guard: a size, even the symbol's maximum, is refused on a symbol"
-        (refused (fun () -> Idx.set_solved_dim r 6));
-      p "Indexing guard: the refused size leaves the symbol alone"
-        (Option.is_none r.solved_dim && Option.equal Idx.equal_static_symbol r.solved_sym (Some seq));
-      let q = Idx.variable_ref "q" in
-      Idx.set_solved_dim q 6;
-      Idx.set_solved_dim q 6;
-      p "Indexing guard: re-setting the held size is a no-op"
-        (Option.equal Int.equal q.solved_dim (Some 6));
-      p "Indexing guard: a symbol is refused on a size"
-        (refused (fun () -> Idx.set_solved_sym q seq));
-      p "Indexing guard: the refused symbol leaves the size alone"
-        (Option.is_none q.solved_sym && Option.equal Int.equal q.solved_dim (Some 6)))
+  (* The Indexing guard itself is exercised where no Shape is linked: indexing_shape_writer. Here,
+     with the frontend linked, the writer its setters take is Shape's (gh-ocannl-1624). *)
+  Verdict.case "the Indexing setters are Shape's" (fun () ->
+      p "with the tensor frontend linked, claiming the shape writer is refused"
+        (match Ir.Indexing.claim_shape_writer () with
+        | (_ : Ir.Indexing.shape_writer) -> false
+        | exception Utils.User_error msg ->
+            String.is_substring msg ~substring:"the shape writer is already claimed"))
