@@ -155,6 +155,27 @@ let refuse_unplaced ~fail unplaced =
             alias (gh-ocannl-1533)"
            path))
 
+(* gh-ocannl-1581: a route re-running a golden only under a condition no backend's build meets -- a
+   value the configuration reader writes for no backend, or a pform reading no file of the reader's
+   -- names no box to run it on, and the first kind is a golden no run compares at all. *)
+let unselected routes =
+  List.concat_map routes ~f:(fun (path, routes) ->
+      List.filter_map routes ~f:(fun route ->
+          match Rerun.selection route with
+          | Rerun.Every_backend | Rerun.Only (_ :: _) -> None
+          | Rerun.Only [] | Rerun.Unnamed _ -> Some (path, Rerun.render route)))
+
+let refuse_unselected ~fail unselected =
+  List.iter unselected ~f:(fun (path, route) ->
+      fail
+        (Printf.sprintf
+           "%s is re-run by %s, a condition no backend's build is named by: either the \
+            configuration reader (test/config/config_reads.ml) writes that value for no backend, \
+            so no run compares the golden, or the pform reads no file the reader writes, so which \
+            box compares it cannot be said -- rename the golden to a backend's value, or teach \
+            Config_reads the file (gh-ocannl-1581)"
+           path route))
+
 (* gh-ocannl-1294: a test that opens build_files/ itself reads whatever is there -- a previous run's
    artifact, a same-named routine's -- and, where nothing is, passes over zero files. *)
 let refuse_direct_reads ~fail sites =
@@ -283,6 +304,35 @@ let refusal_control ~wrapper =
   refuse_unplaced ~fail (if List.is_empty (Rerun.for_golden stanzas ~path) then [ path ] else []);
   Verdict.p "a golden no rule of its directory diffs reaches the unplaced-member refusal"
     !unplaced_refused;
+  (* gh-ocannl-1581: a snapshot under an extension no backend emits, diffed by the same reader's
+     route as a real one -- so the refusal is reached through [Rerun.selection], and the control
+     fails if the reader starts naming a backend for it. *)
+  let unselected_refused = ref false in
+  let fail _message =
+    unselected_refused := true;
+    Test_utils.Refusal_control_manifest.observe_failure ~source
+      ~format:
+        "%s is re-run by %s, a condition no backend's build is named by: either the configuration \
+         reader (test/config/config_reads.ml) writes that value for no backend, so no run compares \
+         the golden, or the pform reads no file the reader writes, so which box compares it cannot \
+         be said -- rename the golden to a backend's value, or teach Config_reads the file \
+         (gh-ocannl-1581)"
+  in
+  let stanzas =
+    Rerun.stanzas_of
+      [
+        ( "t",
+          "(rule (alias runtest-kept-extension) (action (diff \
+           \"kept.%{read:../config/ocannl_backend_extension.txt}.expected\" kept.actual)))\n" );
+      ]
+  in
+  let path = "t/kept.opencl.expected" in
+  let routes = Rerun.for_golden stanzas ~path in
+  refuse_unselected ~fail (unselected [ (path, routes) ]);
+  Verdict.p
+    "a snapshot under an extension no backend emits reaches the unselected-route refusal, through \
+     the route that diffs it"
+    (!unselected_refused && not (List.is_empty routes));
   Test_utils.Refusal_control_manifest.print source
 
 let () =
@@ -471,6 +521,8 @@ let () =
       ~f:(fun (path, routes) -> if List.is_empty routes then Some path else None)
   in
   refuse_unplaced ~fail:Verdict.fail (unplaced @ exec_unplaced);
+  let unselected = unselected (Map.to_alist golden_routes) in
+  refuse_unselected ~fail:Verdict.fail unselected;
   let site_paths = List.map sites ~f:(fun s -> s.Scan.site_path) in
   let exec_paths = List.map executing ~f:(fun (name, _, _) -> name) in
   Floors.report ~floors:golden_floors ~noun:"golden" ~what:"Goldens holding emitted text"
@@ -554,11 +606,35 @@ let () =
      == the aliases a codegen change runs ==\n\
      Every alias named above, once. Hand them to `tools/test-run.sh run build`; an alias re-running\n\
      a golden only when a pform reads some value covers that golden on the backend that makes it\n\
-     so, and the goldens' families say which backends a change has to be run on.\n";
+     so, listed next, and the goldens' families say which backends a change has to be run on.\n";
   Map.data golden_routes @ Map.data site_routes
   |> List.concat_map ~f:(List.map ~f:(fun (r : Rerun.route) -> r.Rerun.alias))
   |> List.dedup_and_sort ~compare:String.compare
   |> List.iter ~f:print_endline;
+  (* gh-ocannl-1581: the conditional ones, split by the backend each condition's value means -- as
+     the reader writing the file decides it, by running its own code over every backend. *)
+  printf
+    "\n\
+     == of those, the aliases re-running a golden only on one backend ==\n\
+     Each re-runs the goldens above whose condition that backend's build meets, and only there: run\n\
+     a backend's list on a box with OCANNL_BACKEND set to it. Which backend a value means is what\n\
+     test/config/config_reads.ml -- the code the reader writing the file runs -- writes for it.\n";
+  let conditional =
+    List.concat_map (Map.data golden_routes) ~f:(fun routes ->
+        List.concat_map routes ~f:(fun (r : Rerun.route) ->
+            match Rerun.selection r with
+            | Rerun.Only meant -> List.map meant ~f:(fun backend -> (backend, r.Rerun.alias))
+            | Rerun.Every_backend | Rerun.Unnamed _ -> []))
+  in
+  List.iter Rerun.backends ~f:(fun backend ->
+      printf "%s:\n" backend;
+      match
+        List.filter_map conditional ~f:(fun (b, alias) ->
+            if String.equal b backend then Some alias else None)
+        |> List.dedup_and_sort ~compare:String.compare
+      with
+      | [] -> printf "  (none)\n"
+      | aliases -> List.iter aliases ~f:(printf "  %s\n"));
   printf
     "\n\
      == tests compiling or executing kernel text they built themselves ==\n\
@@ -626,6 +702,9 @@ let () =
   Verdict.p_empty "every scanned root meets its floor of tests building their own kernel text"
     ~over:exec_paths exec_violations;
   Verdict.p_empty "every source handed over parsed as OCaml" ~over:source_files !unparsed;
+  Verdict.p_empty "every condition a golden is re-run under names the backend whose build meets it"
+    ~over:(Map.data golden_routes |> List.concat)
+    unselected;
   Verdict.p_empty "every member has an alias that re-runs it"
     ~over:(golden_paths @ List.map sites ~f:(fun s -> s.Scan.site_path) @ exec_paths)
     (unplaced @ exec_unplaced);

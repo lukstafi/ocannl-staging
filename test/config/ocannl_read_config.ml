@@ -21,7 +21,7 @@ let parse_output_destination = function
 
 let output_config config_name value = function
   | File -> (
-      let filename = "ocannl_" ^ config_name ^ ".txt" in
+      let filename = Config_reads.file_of_key config_name in
       try
         Out_channel.write_all filename ~data:value;
         printf "Wrote value of '%s' to %s\n" config_name filename
@@ -36,30 +36,11 @@ let () =
   let output_opt = Array.find_map Stdlib.Sys.argv ~f:extract_output in
   let output_dest = parse_output_destination (Option.value output_opt ~default:"file") in
   match config_opt with
-  | Some "backend_extension" ->
-      let backend = Utils.get_global_arg ~default:"" ~arg_name:"backend" in
-      let extension =
-        match backend with
-        | "cc" | "multidev_cc" | "multicore_cc" | "sync_cc" -> "c"
-        | "cuda" -> "cu"
-        | "hip" -> "hip"
-        | "metal" -> "metal"
-        | _ -> "c" (* Default to C for unknown backends *)
-      in
-      output_config "backend_extension" extension output_dest
-  | Some "backend" ->
-      (* Normalize to the canonical backend name, mirroring [Backends.get_backend]'s deprecated
-         aliases: stream/log file names use the canonical name (e.g.
-         [log_files/micrograd_demo_logging/cc-0-0.log],
-         [micrograd_demo_logging-cc-0-0.log.expected]), so an alias-based run
-         (OCANNL_BACKEND=sync_cc) must not leak the raw string into dune's log paths. *)
-      let backend =
-        match String.lowercase (Utils.get_global_arg ~default:"" ~arg_name:"backend") with
-        | "sync_cc" -> "cc"
-        | "multicore_cc" -> "multidev_cc"
-        | b -> b
-      in
-      output_config "backend" backend output_dest
+  | Some key when List.mem Config_reads.backend_keys key ~equal:String.equal ->
+      (* What the backend setting decides is decided in [Config_reads], where the scans reading
+         these files back find what each value means (gh-ocannl-1581). *)
+      let setting = Utils.get_global_arg ~default:"" ~arg_name:"backend" in
+      output_config key (Option.value_exn (Config_reads.written ~key setting)) output_dest
   | Some config ->
       (* The raw resolved text, or nothing: a registered key's plain read is refused
          (gh-ocannl-1332), and this tool reports what is stated, not a parse of it. *)

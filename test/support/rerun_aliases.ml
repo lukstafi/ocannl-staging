@@ -14,8 +14,10 @@
     - A golden is re-run by the rule whose [(diff …)] (or [(diff? …)]) names it as the expected
       side, matched with each [%{…}] standing for the text the build substitutes there, and the
       substitution is reported -- [%{read:../config/ocannl_backend_extension.txt}] is [cu] for the
-      CUDA snapshot. A [(test)]/[(tests)] stanza re-runs the [<name>.expected] beside it, under
-      dune's own [runtest-<name>].
+      CUDA snapshot -- with the backends whose build makes it so, as the configuration reader
+      writing that file decides it ({!Config_reads}, gh-ocannl-1581): [cu] is CUDA because the
+      reader writes [cu] for CUDA. A [(test)]/[(tests)] stanza re-runs the [<name>.expected] beside
+      it, under dune's own [runtest-<name>].
     - A source is re-run by whatever runs the stanza owning its module: a [(test)] stanza under
       [runtest-<name>], an [(executable)] under the alias of each rule that runs it -- or, for a
       rule that only writes targets, the alias of each rule that reads one -- and an inline-test
@@ -43,13 +45,49 @@ type route = { alias : string; substitutions : (string * string) list }
 (** An alias, spelled as [dune build] takes it ([@dir/name]), with the pform substitutions under
     which it re-runs the member: empty unless the rule's golden path is spelled with a pform. *)
 
+(** Every backend a build can resolve: the [; ocannl-backend:] marker's vocabulary without [none],
+    which [marker_backend_vocabulary] holds equal to [Backends.all_of_backend]. *)
+let backends = List.filter Dune.marker_backends ~f:(Fn.non (String.equal "none"))
+
+(** The backends whose build makes dune substitute [value] for [pform], as the configuration reader
+    that writes the file decides it ({!Config_reads.backends_meant}); [None] for a pform reading no
+    file of that reader's. *)
+let backends_meant (pform, value) = Config_reads.backends_meant ~backends ~pform ~value
+
+(** On which backends a route re-runs its member (gh-ocannl-1581). *)
+type selection =
+  | Every_backend  (** no substitution: whatever the build resolves *)
+  | Only of string list
+      (** the backends every substitution's value means -- possibly none, a golden no run compares
+      *)
+  | Unnamed of string
+      (** a substitution (the pform given) reading no file the configuration reader writes, whose
+          value names no backend *)
+
+let selection { substitutions; _ } =
+  List.fold substitutions ~init:Every_backend ~f:(fun acc substitution ->
+      match (acc, backends_meant substitution) with
+      | Unnamed _, _ -> acc
+      | _, None -> Unnamed (fst substitution)
+      | Every_backend, Some meant -> Only meant
+      | Only so_far, Some meant -> Only (List.filter so_far ~f:(List.mem meant ~equal:String.equal)))
+
+(** A route as the inventory prints it: each substitution followed by the backends its value means,
+    [(no backend)] where it means none, and nothing where it reads no file of the reader's. *)
 let render { alias; substitutions } =
   match substitutions with
   | [] -> alias
   | substitutions ->
+      let meaning substitution =
+        match backends_meant substitution with
+        | None -> ""
+        | Some [] -> " (no backend)"
+        | Some meant -> " (" ^ String.concat ~sep:", " meant ^ ")"
+      in
       alias ^ " when "
       ^ String.concat ~sep:", "
-          (List.map substitutions ~f:(fun (pform, value) -> "%{" ^ pform ^ "} is " ^ value))
+          (List.map substitutions ~f:(fun ((pform, value) as substitution) ->
+               "%{" ^ pform ^ "} is " ^ value ^ meaning substitution))
 
 let at dir alias = "@" ^ Dune.in_subdir dir alias
 let normalize path = Dune.repo_relative [] path

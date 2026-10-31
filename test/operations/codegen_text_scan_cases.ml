@@ -1446,6 +1446,12 @@ let rerun_tree =
    "kernel.%{read:../config/ocannl_backend_extension.txt}.expected"
    "kernel.extension.actual")))
 (rule
+ (alias runtest-kernel-log)
+ (action (diff "kernel-%{read:../config/ocannl_backend.txt}.log.expected" kernel.log)))
+(rule
+ (alias runtest-flavoured)
+ (action (diff "flavoured.%{read:flavour.txt}.expected" flavoured.actual)))
+(rule
  (alias runtest-backwards)
  (action (diff produced.actual reversed.expected)))
 (executable (name tool) (modules tool))
@@ -1477,10 +1483,27 @@ let rerun_cases =
     ("a test stanza's own golden", golden "t/plain.expected", "@t/runtest-plain");
     ( "a pform in the golden path is a substitution, reported",
       golden "t/kernel.cu.expected",
-      "@t/runtest-kernel-extension when %{read:../config/ocannl_backend_extension.txt} is cu" );
+      "@t/runtest-kernel-extension when %{read:../config/ocannl_backend_extension.txt} is cu (cuda)"
+    );
     ( "the shortest backend extension substitutes as well",
       golden "t/kernel.c.expected",
-      "@t/runtest-kernel-extension when %{read:../config/ocannl_backend_extension.txt} is c" );
+      "@t/runtest-kernel-extension when %{read:../config/ocannl_backend_extension.txt} is c (cc, \
+       multidev_cc)" );
+    (* gh-ocannl-1581: the backends a value means, as the reader writing the file decides it. *)
+    ( "an extension no backend emits means no backend",
+      golden "t/kernel.opencl.expected",
+      "@t/runtest-kernel-extension when %{read:../config/ocannl_backend_extension.txt} is opencl \
+       (no backend)" );
+    ( "the backend file's value is the backend itself",
+      golden "t/kernel-multidev_cc.log.expected",
+      "@t/runtest-kernel-log when %{read:../config/ocannl_backend.txt} is multidev_cc (multidev_cc)"
+    );
+    ( "the reader writes a backend under its canonical name, never a deprecated alias",
+      golden "t/kernel-sync_cc.log.expected",
+      "@t/runtest-kernel-log when %{read:../config/ocannl_backend.txt} is sync_cc (no backend)" );
+    ( "a pform reading a file the reader does not write names nothing",
+      golden "t/flavoured.mild.expected",
+      "@t/runtest-flavoured when %{read:flavour.txt} is mild" );
     ("a pform substitutes a file name, never a path", golden "t/kernel.sub/cu.expected", "none");
     ("the produced side of a diff is not re-run by it", golden "t/reversed.expected", "none");
     ("a golden of the same name in another directory is not", golden "u/plain.expected", "none");
@@ -1507,6 +1530,28 @@ let rerun_cases =
     ("a module an exclusion names is not :standard's", source "t/excluded.ml", "none");
     ("a module in a directory of rules alone is run by nothing", source "u/stray.ml", "none");
   ]
+
+(** On which backends a route re-runs its golden (gh-ocannl-1581): what the per-backend lists of the
+    inventory are made of, and what its unselected-route refusal reads. *)
+let selection_cases =
+  let selection path () = List.map (Rerun.for_golden rerun_tree ~path) ~f:Rerun.selection in
+  [
+    ("no substitution is every backend", selection "t/plain.expected", "every backend");
+    ("a CUDA snapshot is CUDA's alone", selection "t/kernel.cu.expected", "only cuda");
+    ("a C snapshot is both CPU backends'", selection "t/kernel.c.expected", "only cc, multidev_cc");
+    ("a value no build writes is no backend's", selection "t/kernel.opencl.expected", "only none");
+    ( "a pform the reader does not write is unnamed",
+      selection "t/flavoured.mild.expected",
+      "unnamed read:flavour.txt" );
+  ]
+
+let render_selections selections =
+  String.concat ~sep:"; "
+    (List.map selections ~f:(function
+      | Rerun.Every_backend -> "every backend"
+      | Rerun.Only [] -> "only none"
+      | Rerun.Only backends -> "only " ^ String.concat ~sep:", " backends
+      | Rerun.Unnamed pform -> "unnamed " ^ pform))
 
 (** Which sources are support modules -- run only inside the tests linking them, so a harness the
     gh-ocannl-1685 census reads and never a member it must re-run by name. *)
@@ -1679,6 +1724,10 @@ let () =
       let found = render_routes (f ()) in
       if String.equal found expected then printf "ok: rerun -- %s\n" name
       else fail "rerun -- %s: expected [%s], found [%s]" name expected found);
+  List.iter selection_cases ~f:(fun (name, f, expected) ->
+      let found = render_selections (f ()) in
+      if String.equal found expected then printf "ok: selection -- %s\n" name
+      else fail "selection -- %s: expected [%s], found [%s]" name expected found);
   List.iter attempt_cases ~f:(fun (name, f, expected) ->
       let found = render_attempt (Attempt.run f) in
       if String.equal found expected then printf "ok: attempt -- %s\n" name
