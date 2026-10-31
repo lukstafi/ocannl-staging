@@ -1424,7 +1424,8 @@ in the `tools/*.sh` scripts (gh-ocannl-1111) and in the string literals of the O
   reproduces at all (a bare `dune promotion apply` in the same scenario commits the stale golden) —
   without it, leg 2 would pass if `git commit` merely picked up the working tree, and the guard
   would be untested. Measured: legs 2, 5 and 6 all fail against the pre-guard script.
-- Formatting is a gate on the PR path, and its mechanics are worth knowing before the first red.
+- Formatting is a gate on the PR path, and its mechanics are worth knowing before the first red:
+  a fmt-fix push costs a CI round AND a review round (gh-ocannl-938).
   `ci.yml`'s `fmt` job is separate from the build matrix on purpose: `ocaml/setup-ocaml` plus an
   explicit install of the ocamlformat release `.ocamlformat` pins, followed by `tools/fmt-check.sh`,
   which runs `dune build @fmt` in a switch WITHOUT the project's dependencies (`@fmt` compiles
@@ -2680,7 +2681,7 @@ in the `tools/*.sh` scripts (gh-ocannl-1111) and in the string literals of the O
   `dune build @test/operations/runtest-verdict_ratchet` runs that one test, applies its diff and is
   promotable, and a misspelling exits 1 (`Alias … is empty`) rather than doing nothing. The
   repo-wide scans additionally share `dune build @test/operations/scans` (gh-ocannl-703): the family
-  runs in seconds, and WHEN to run it is stated once, in `AGENTS.md`'s Testing bullet on the scans,
+  runs in seconds when cached (about half a minute after a source edit), and WHEN to run it is stated once, in `AGENTS.md`'s Testing bullet on the scans,
   with the test-only edits it covers explained under *Repository scans* above. Two properties of dune shape how those aliases are written, and both are silent
   when got wrong:
   - **A rule attached to two aliases makes building EITHER build BOTH.** So a golden-diff rule sits
