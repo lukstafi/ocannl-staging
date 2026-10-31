@@ -552,7 +552,14 @@
  (locks ocannl_training_test)
  (deps ocannl_config)
  (modules resume_checkpoint)
- (libraries base ocannl stdio unix arrayjit.verdict fresh_process)
+ (libraries
+  base
+  ocannl
+  stdio
+  unix
+  arrayjit.verdict
+  fresh_process
+  stderr_capture)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 

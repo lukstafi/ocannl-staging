@@ -36,6 +36,7 @@ tensor/tensor.ml: session_state.next_id (mutable field) -- exempt: a fresh-id co
 tensor/tensor.ml: session_state.forward_roots (mutable field) -- accounted: every write noted or at a boundary
 tensor/tensor.ml: session_state.backprop_roots (mutable field) -- accounted: every write noted or at a boundary
 tensor/tensor.ml: random_seed (ref) -- accounted: every write noted or at a boundary
+tensor/tensor.ml: random_seeds_created (ref) -- accounted: every write noted or at a boundary
 tensor/tensor.ml: checkpoint.ck_mark (mutable field) -- accounted: every write noted or at a boundary
 tensor/tensor.ml: checkpoint.ck_fwd (mutable field) -- accounted: every write noted or at a boundary
 tensor/tensor.ml: checkpoint.ck_bprop (mutable field) -- accounted: every write noted or at a boundary

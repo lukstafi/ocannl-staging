@@ -13,7 +13,13 @@
    parameters but not the momentum, and one that restores everything but the host generator, both
    end on different parameters. [Checkpoint.restore] refuses a state set missing the momentum
    (rather than restoring it partially) and refuses a plain [Persistence] checkpoint, which records
-   no progress. *)
+   no progress.
+
+   The random seeds (gh-ocannl-1727): the checkpoint records them, a program built under the same
+   seeds restores -- the default one above, and a graph's scoped seed below -- and one built under
+   others is refused, naming both sides' seeds, a different scoped seed under the same global one
+   included. A format-1 checkpoint, which predates the recorded seed, restores under any seed with a
+   warning; a format-2 one missing its seed is refused as malformed. *)
 
 open Base
 open Ocannl
@@ -46,8 +52,7 @@ type program = {
 
 (* Built identically by every run: the same construction order gives the same node ids, which is how
    a checkpoint matches its nodes. *)
-let build () =
-  Tensor.unsafe_reinitialize ();
+let build_graph () =
   let xs =
     NTDSL.init ~l:"xs" ~prec:Ir.Ops.single ~b:[ n_batches; batch_size ] ~o:[ 2 ]
       ~f:(function [| b; i; d |] -> x_val ((b * batch_size) + i) d | _ -> assert false)
@@ -92,6 +97,19 @@ let build () =
     params;
     state = Checkpoint.training_state ~routines:[ routine ] loss;
   }
+
+(* The seed is set up front, under every seed alike, so its node takes the same id in every build. A
+   [scoped] seed builds the graph under [Tensor.with_saved_random_seed], as [Parallel.data_parallel]
+   builds its shards: the graph keeps drawing from it after the global singleton is restored. *)
+let build ?seed ?scoped () =
+  Tensor.unsafe_reinitialize ();
+  Tensor.set_random_seed ?seed ();
+  match scoped with
+  | None -> build_graph ()
+  | Some seed ->
+      Tensor.with_saved_random_seed (fun () ->
+          Tensor.set_random_seed ~seed ();
+          build_graph ())
 
 let shuffle rng =
   let a = Array.init n_batches ~f:Fn.id in
@@ -179,23 +197,26 @@ let child path =
     (show_order (order_of_progress progress));
   List.iter fp ~f:print_endline
 
-let raises_failure ~substring f =
+let raises_failure ?(also = "") ~substring f =
   match f () with
   | _ -> false
   | exception Failure msg ->
       eprintf "(refusal, not part of the golden) %s\n" msg;
-      String.is_substring msg ~substring
+      String.is_substring msg ~substring && String.is_substring msg ~substring:also
 
 let parent () =
   let open Verdict.Claims in
   let path = Stdlib.Filename.temp_file "ocannl-resume-" ".ckpt" in
   let plain_path = Stdlib.Filename.temp_file "ocannl-resume-plain-" ".ckpt" in
+  let seeded_path = Stdlib.Filename.temp_file "ocannl-resume-seeded-" ".ckpt" in
+  let malformed_path = Stdlib.Filename.temp_file "ocannl-resume-malformed-" ".ckpt" in
   Exn.protect
     ~finally:(fun () ->
       (* Best effort: a restore may still hold a payload mapped (the default
          [checkpoint_load_mmap]), and Windows refuses to delete a mapped file. The files live in the
          temp directory. *)
-      List.iter [ path; plain_path ] ~f:(fun p -> try Stdlib.Sys.remove p with Sys_error _ -> ()))
+      List.iter [ path; plain_path; seeded_path; malformed_path ] ~f:(fun p ->
+          try Stdlib.Sys.remove p with Sys_error _ -> ()))
     ~f:(fun () ->
       (* The uninterrupted run. *)
       let prog = build () in
@@ -216,6 +237,7 @@ let parent () =
           eprintf "(not part of the golden) interrupted step %d loss %.9g\n" i l);
       let rng_at_save = Stdlib.Random.State.copy (Option.value_exn progress.host_rng) in
       Checkpoint.save ~ctx ~progress prog.state path;
+      let saved_seeds = Tensor.random_seeds () in
       p "the interrupted run stops mid-epoch" (progress.epoch = 1 && progress.position = 2);
       p "the interrupted run's losses are the uninterrupted run's first ones"
         (List.equal String.equal
@@ -275,6 +297,64 @@ let parent () =
       p "a plain Persistence checkpoint is refused as recording no progress"
         (raises_failure ~substring:"is not a training checkpoint" (fun () ->
              Checkpoint.restore ~ctx:prog.ctx prog.state plain_path));
+      (* The random seed. *)
+      let seeds_key = "ocannl.random_seeds" in
+      let metadata = Persistence.metadata path in
+      let show_int = Int.to_string in
+      p "the checkpoint records the one random seed it was saved under"
+        (List.length saved_seeds = 1
+        && Option.equal String.equal
+             (List.Assoc.find metadata seeds_key ~equal:String.equal)
+             (Some (String.concat ~sep:" " (List.map saved_seeds ~f:show_int))));
+      let saved_seed = List.hd_exn saved_seeds in
+      let other_seed = saved_seed + 1 in
+      let prog = build ~seed:other_seed () in
+      p "a resume under a different random seed is refused, naming both seeds"
+        (raises_failure
+           ~substring:("saved under random seed " ^ show_int saved_seed)
+           ~also:("built under random seed " ^ show_int other_seed)
+           (fun () -> Checkpoint.restore ~ctx:prog.ctx prog.state path));
+      (* A graph built under a scoped seed: the global singleton is the default one throughout. *)
+      let scoped_seed = saved_seed + 2 in
+      let prog = build ~scoped:scoped_seed () in
+      let ctx, scoped_at_save, _ = run_steps prog (start ()) ~until:stop_step in
+      Checkpoint.save ~ctx ~progress:scoped_at_save prog.state seeded_path;
+      let prog = build ~scoped:scoped_seed () in
+      let _, scoped_progress = Checkpoint.restore ~ctx:prog.ctx prog.state seeded_path in
+      p "a checkpoint of a graph built under a scoped seed restores under that scoped seed"
+        (scoped_progress.step = stop_step);
+      let prog = build ~scoped:other_seed () in
+      p "a resume whose graph was built under another scoped seed is refused, naming both"
+        (raises_failure
+           ~substring:
+             ("saved under random seeds " ^ show_int saved_seed ^ ", " ^ show_int scoped_seed)
+           ~also:("built under random seeds " ^ show_int saved_seed ^ ", " ^ show_int other_seed)
+           (fun () -> Checkpoint.restore ~ctx:prog.ctx prog.state seeded_path));
+      (* Rewritten from the checkpoint's own header and values: the state, without the seed. *)
+      let prog = build () in
+      let ctx, _ = Checkpoint.restore ~ctx:prog.ctx prog.state path in
+      let without_seed ~version =
+        List.filter_map metadata ~f:(fun (k, v) ->
+            if String.equal k seeds_key then None
+            else if String.equal k "ocannl.training_checkpoint" then Some (k, version)
+            else Some (k, v))
+      in
+      Persistence.save ~ctx ~appending:false ~metadata:(without_seed ~version:"1") prog.state
+        seeded_path;
+      Persistence.save ~ctx ~appending:false ~metadata:(without_seed ~version:"2") prog.state
+        malformed_path;
+      let prog = build ~seed:other_seed () in
+      let (_, legacy_progress), warning =
+        Stderr_capture.capture (fun () -> Checkpoint.restore ~ctx:prog.ctx prog.state seeded_path)
+      in
+      p "a format-1 checkpoint, recording no seed, restores under another seed with a warning"
+        (legacy_progress.step = stop_step
+        && String.is_substring warning ~substring:"records no random seed"
+        && String.is_substring warning
+             ~substring:("this program's (random seed " ^ show_int other_seed ^ ")"));
+      p "a format-2 checkpoint missing its seed is refused as malformed"
+        (raises_failure ~substring:("missing or malformed " ^ seeds_key) (fun () ->
+             Checkpoint.restore ~ctx:prog.ctx prog.state malformed_path));
       (* The header metadata an appending save merges: the named key replaced, the others kept. *)
       Persistence.save ~ctx:prog.ctx ~appending:true
         ~metadata:[ ("ocannl.step", "99") ]

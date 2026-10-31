@@ -23,10 +23,13 @@
     step-dependent inputs (a scheduled learning rate is set from [progress.step], see
     [Train.scheduled_learning_rate]) and the shuffling generator.
 
-    Device-side randomness needs nothing saved: OCANNL's random operations are counter-based
-    (threefry over the random seed, the node and a counter), so a resumed program with the same seed
-    ([fixed_state_for_init], or {!Ocannl_tensor.Tensor.set_random_seed}) whose counters derive from
-    the restored step draws the same numbers as the uninterrupted run.
+    Device-side randomness needs no generator state saved: OCANNL's random operations are
+    counter-based (threefry over the random seed, the node and a counter), so a resumed program with
+    the same seed ([fixed_state_for_init], or {!Ocannl_tensor.Tensor.set_random_seed}) whose
+    counters derive from the restored step draws the same numbers as the uninterrupted run. Under
+    another seed it would not, so the checkpoint records the seeds
+    ({!Ocannl_tensor.Tensor.random_seeds} at {!save}: every one the session created, a graph built
+    under a scoped seed included) and {!restore} refuses a program built under different ones.
 
     {2 A minimal resume}
 
@@ -97,4 +100,9 @@ val restore : ctx:Context.t -> Ir.Tnode.t_set -> string -> Context.t * progress
     progress), and -- before touching [ctx] -- if [state] is not the set of nodes the checkpoint was
     saved from: a smaller set would restore the parameters while silently restarting the rest (say
     the optimizer moments) from their initialization, a different run. The message lists the nodes
-    on either side. Precision and shape mismatches raise as in {!Persistence.restore}. *)
+    on either side. It also refuses, naming both sides' seeds, a program whose random seeds
+    ({!Ocannl_tensor.Tensor.random_seeds}) are not the ones the checkpoint was saved under. A
+    checkpoint from before the seed was recorded (format version 1) is restored with a warning on
+    stderr instead: its seed cannot be checked, and refusing it would strand every such checkpoint
+    although most were saved under the seed the resume uses. Precision and shape mismatches raise as
+    in {!Persistence.restore}. *)
