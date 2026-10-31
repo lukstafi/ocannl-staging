@@ -5,11 +5,11 @@
    checkpoints included. The forward-root map stays strong: a graph dropped unevaluated is pinned,
    because [consume_forward_code]'s conflicting-roots check must not depend on GC timing.
 
-   Witnesses: each dropped graph is built in an [@inline never] function that returns a [Weak]
-   observer on the root record and only what the case keeps. A "reclaimed" claim retries the
-   collection ([Gc.full_major] twice and [Gc.compact]) up to three times; a "kept" claim requires
-   the record to survive three such rounds, so neither rests on a single collection. Leaves are
-   deterministic [term_init] constants, so no seed state is involved. *)
+   Witnesses ([Gc_witness]): each dropped graph is built in an [@inline never] function that returns
+   a [Weak] observer on the root record and only what the case keeps. A "reclaimed" claim retries
+   the collection ([Gc.full_major] twice and [Gc.compact]) up to three times; a "kept" claim
+   requires the record to survive three such rounds, so neither rests on a single collection. Leaves
+   are deterministic [term_init] constants, so no seed state is involved. *)
 open Base
 open Ocannl
 open Nn_blocks.DSL_modules
@@ -27,30 +27,7 @@ let leaf name =
 let not_handed_out (t : Tensor.t) =
   match t.consumption.bprop with Not_handed_out -> true | Taken -> false
 
-let witness (t : Tensor.t) =
-  let w = Stdlib.Weak.create 1 in
-  Stdlib.Weak.set w 0 (Some t);
-  w
-
-let settle () =
-  Stdlib.Gc.full_major ();
-  Stdlib.Gc.full_major ();
-  Stdlib.Gc.compact ()
-
-(* [Weak.check] reads the observer without taking a reference to the record. *)
-let reclaimed w =
-  let rec go rounds =
-    settle ();
-    (not (Stdlib.Weak.check w 0)) || (rounds > 1 && go (rounds - 1))
-  in
-  go 3
-
-let kept w =
-  let rec go rounds =
-    settle ();
-    Stdlib.Weak.check w 0 && (rounds <= 1 || go (rounds - 1))
-  in
-  go 3
+let witness (t : Tensor.t) = Gc_witness.witness t
 
 (* The text of the [User_error] [f] raises; a failed claim when it raises none. *)
 let refusal name f =
@@ -167,25 +144,26 @@ let[@inline never] unevaluated_dropped () =
 let () =
   case "a graph dropped after forward_once is reclaimed" (fun () ->
       let ctx, w = forward_once_dropped () in
-      p "forward_once: the dropped graph is reclaimed" (reclaimed w);
+      p "forward_once: the dropped graph is reclaimed" (Gc_witness.reclaimed w);
       ignore (Stdlib.Sys.opaque_identity ctx : Context.t));
   case "a graph dropped after a reusable forward routine is reclaimed" (fun () ->
       let w = reusable_forward_dropped () in
-      p "Train.forward: the dropped graph is reclaimed" (reclaimed w));
+      p "Train.forward: the dropped graph is reclaimed" (Gc_witness.reclaimed w));
   case "an explicit checkpoint does not keep a dropped graph" (fun () ->
       let ck, w = checkpointed_dropped () in
-      p "checkpoint: the dropped graph is reclaimed while the checkpoint is held" (reclaimed w);
+      p "checkpoint: the dropped graph is reclaimed while the checkpoint is held"
+        (Gc_witness.reclaimed w);
       ignore (Stdlib.Sys.opaque_identity ck : Tensor.checkpoint));
   case "leg B under GC pressure" (fun () ->
       let w, t, ctx = evaluated "dg_b" in
-      settle ();
+      Gc_witness.settle ();
       p "leg B: the held t is still a backprop root after collections" (Tensor.is_bprop_root t);
       let%op loss = t *. 3. in
       let ctx = Train.update_once ctx loss in
       exact "leg B: w.grad = 6 w" (Context.get_values ctx (grad_of w)) [| 6.; 12.; 18. |]);
   case "an ownership-preserving copy keeps the root" (fun () ->
       let w, copy, ctx = copy_kept () in
-      settle ();
+      Gc_witness.settle ();
       p "copy: the copy is still a backprop root after collections" (Tensor.is_bprop_root copy);
       let%op loss = copy *. 3. in
       let ctx = Train.update_once ctx loss in
@@ -194,7 +172,7 @@ let () =
         [| 6.; 12.; 18. |]);
   case "the lineage check survives its owner's reclamation" (fun () ->
       let h_grad, l2, ctx, l1 = trunk_owner_dropped () in
-      p "trunk: the dropped owner l1 is reclaimed" (reclaimed l1);
+      p "trunk: the dropped owner l1 is reclaimed" (Gc_witness.reclaimed l1);
       let msg = refusal "trunk" (fun () -> Train.update_once ~skip_init:true ctx l2) in
       p "trunk: l2 is refused at run naming h's backprop fragment"
         (unpropagated msg h_grad && has msg "accumulates into gradients"));
@@ -202,25 +180,25 @@ let () =
       let _w, t, _ctx = evaluated "dg_rs" in
       Tensor.with_unchanged_roots ~f:(fun () ->
           ignore (Tensor.consume_backprop_code t : Asgns.comp);
-          settle ());
+          Gc_witness.settle ());
       p "restore: with_unchanged_roots puts the held root back"
         (Tensor.is_bprop_root t && not_handed_out t);
       let ck = Tensor.checkpoint ~label:"dg_rs" () in
       let%op u = t *. 2. in
       ignore (Stdlib.Sys.opaque_identity u : Tensor.t);
       p "rewind: the consumer embedded t's backprop" (not (Tensor.is_bprop_root t));
-      settle ();
+      Gc_witness.settle ();
       Tensor.rewind ck;
       p "rewind: the held root is a root again, its marker reset"
         (Tensor.is_bprop_root t && not_handed_out t);
       let ck = Tensor.checkpoint ~label:"dg_rs_out" () in
       ignore (Tensor.consume_backprop_code t : Asgns.comp);
-      settle ();
+      Gc_witness.settle ();
       Tensor.rewind ck;
       p "rewind: an external handout stays excluded" (not (Tensor.is_bprop_root t)));
   case "a reclaimed consumer gives no ownership back" (fun () ->
       let c, u = consumer_dropped () in
-      p "consumer: the dropped consumer is reclaimed" (reclaimed u);
+      p "consumer: the dropped consumer is reclaimed" (Gc_witness.reclaimed u);
       p "consumer: its embedded child is neither root"
         ((not (Tensor.is_fwd_root c)) && not (Tensor.is_bprop_root c));
       let refused =
@@ -232,9 +210,9 @@ let () =
   case "the last closure's checkpoint holds a forward root it captured until the next closure"
     (fun () ->
       let w = closed_before_evaluation () in
-      p "closure: held by the last closure's checkpoint" (kept w);
+      p "closure: held by the last closure's checkpoint" (Gc_witness.kept w);
       next_closure ();
-      p "closure: reclaimed once the next closure replaces the checkpoint" (reclaimed w));
+      p "closure: reclaimed once the next closure replaces the checkpoint" (Gc_witness.reclaimed w));
   case "a graph dropped unevaluated stays a forward root" (fun () ->
       let w = unevaluated_dropped () in
-      p "unevaluated: the dropped graph is kept by the forward-root map" (kept w))
+      p "unevaluated: the dropped graph is kept by the forward-root map" (Gc_witness.kept w))

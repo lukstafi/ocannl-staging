@@ -586,7 +586,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules broadcast_constant_init)
- (libraries base ocannl arrayjit.verdict ll_test)
+ (libraries base ocannl arrayjit.verdict gc_witness ll_test)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -2901,7 +2901,14 @@
  (modules test_tensor_persistence)
  ; `arrayjit.utils` for `Atomic_file.is_staging_file`: the teardown sweeps for staging artifacts
  ; instead of naming the one temp file the writer used to leave.
- (libraries base ocannl sexplib stdio arrayjit.utils arrayjit.verdict)
+ (libraries
+  base
+  ocannl
+  sexplib
+  stdio
+  arrayjit.utils
+  arrayjit.verdict
+  gc_witness)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -3090,7 +3097,7 @@
  (package neural_nets_lib)
  (deps ocannl_config)
  (modules kernel_code_cache)
- (libraries base unix arrayjit.ir arrayjit.verdict))
+ (libraries base unix arrayjit.ir arrayjit.verdict gc_witness))
 
 (test
  ; ocannl-backend: none -- links arrayjit.ir alone; host-side Ndarray writes, no device.
@@ -3098,7 +3105,7 @@
  (package neural_nets_lib)
  (deps ocannl_config)
  (modules ndarray_flat_writer)
- (libraries base stdio arrayjit.ir arrayjit.verdict))
+ (libraries base stdio arrayjit.ir arrayjit.verdict gc_witness))
 
 (test
  ; ocannl-backend: none -- links arrayjit.ir alone; host-side Ndarray reads, no device.
@@ -3106,7 +3113,7 @@
  (package neural_nets_lib)
  (deps ocannl_config)
  (modules ndarray_flat_reader)
- (libraries base stdio arrayjit.ir arrayjit.verdict))
+ (libraries base stdio arrayjit.ir arrayjit.verdict gc_witness))
 
 (test
  (name test_ident_blacklist)
@@ -10578,7 +10585,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules dropped_graph_reclaimed)
- (libraries base ocannl stdio arrayjit.verdict)
+ (libraries base ocannl stdio arrayjit.verdict gc_witness)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -12447,7 +12454,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules dropped_graph_buffers)
- (libraries base ocannl stdio arrayjit.verdict)
+ (libraries base ocannl stdio arrayjit.verdict gc_witness)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 

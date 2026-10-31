@@ -213,14 +213,14 @@ let code_buffers () =
 let edge_values = [| Float.nan; 300.; -1.; 3e9; -3e9; 1e19; -1e19; 1e30; -1e30; Float.infinity |]
 
 (* Heap words an operation allocates, on stderr: the cost of a host read is a property of this
-   build, not of the golden. *)
-let word_bytes = Float.of_int (Stdlib.Sys.word_size / 8)
-
+   build, not of the golden. Measured in a window the finalisers of earlier garbage are drained
+   ahead of ([Gc_witness.drained_finalisers]). *)
 let measure what f =
-  let before = Stdlib.Gc.allocated_bytes () in
-  f ();
-  let words = (Stdlib.Gc.allocated_bytes () -. before) /. word_bytes in
-  Stdio.eprintf "allocation witness %s: %.0f words (not part of the golden)\n" what words;
+  let (), { Gc_witness.words; drained } = Gc_witness.drained_finalisers f in
+  Stdio.eprintf
+    "allocation witness %s: %.0f words, after draining %.0f words of finalisers (not part of the \
+     golden)\n"
+    what words drained;
   words
 
 (* 512 runs of 128 cells (padded), and one unpadded run of the same 65536 cells. *)
@@ -288,6 +288,7 @@ let () =
       Nd.set_from_float edges [| 0 |] v;
       convert_agrees ~label:(Printf.sprintf "edge value %h" v) edges dst_prec);
   (* The allocation bounds. Before gh-ocannl-1333 every one of these took heap words per cell. *)
+  claim "the allocation window counts a known allocation" (Gc_witness.window_sees_allocation ());
   let packed_precs, scalar_precs = List.partition_tf Ops.storage_precs ~f:is_packed in
   let result_words = Float.of_int (witness_cells + 1) in
   p_all

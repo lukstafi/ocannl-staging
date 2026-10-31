@@ -15,10 +15,11 @@
    parameter's pool after the returned context is released; and a fresh graph's host literal keeps a
    device-wide constant pool, and its node, until device teardown.
 
-   Witnesses are [Weak] observers taken in [@inline never] builders that return no other reference
-   to the graph; every reading clears the bounded analysis cache and follows [Gc.full_major] twice
-   and [Gc.compact]. A graph's writer events are pruned at the next write, so each case runs one
-   more graph before it reads.
+   Witnesses are [Gc_witness] observers taken in [@inline never] builders that return no other
+   reference to the graph; every reading clears the bounded analysis cache and follows
+   [Gc.full_major] twice and [Gc.compact], a "reclaimed" claim retries up to three such rounds, and
+   the literal's "kept" control requires its node to survive three. A graph's writer events are
+   pruned at the next write, so each case runs one more graph before it reads.
 
    Every memory claim reads the process's own accounting ([Alloc_census], the backend's used gauge),
    never the driver's free bytes (gh-ocannl-1798): those are device-wide, so any other process on
@@ -33,18 +34,6 @@ module Census = Ir.Alloc_census
 
 let n = 1 lsl 21
 let graphs = 3
-
-let settle () =
-  Stdlib.Gc.full_major ();
-  Stdlib.Gc.full_major ();
-  Stdlib.Gc.compact ()
-
-let watch x =
-  let w = Stdlib.Weak.create 1 in
-  Stdlib.Weak.set w 0 (Some (Stdlib.Obj.repr x));
-  w
-
-let reclaimed w = not (Stdlib.Weak.check w 0)
 
 type reading = {
   working : int;
@@ -61,7 +50,7 @@ type reading = {
    retention by design ([Low_level.clear_analysis_cache]), cleared so the readings see past it. *)
 let read () =
   Ir.Low_level.clear_analysis_cache ();
-  settle ();
+  Gc_witness.settle ();
   let c = Census.snapshot () in
   let probe = Context.auto () in
   {
@@ -91,12 +80,7 @@ let show_driver name ~before ~after =
 
 let backend = Context.backend_name (Context.auto ())
 
-type built = {
-  nodes : Stdlib.Obj.t Stdlib.Weak.t list;
-  host_init : Stdlib.Obj.t Stdlib.Weak.t;
-  bytes : int;
-  computed : bool;
-}
+type built = { nodes : Gc_witness.t list; host_init : Gc_witness.t; bytes : int; computed : bool }
 
 let value i j = Float.of_int ((i + j) % 7)
 
@@ -119,8 +103,8 @@ let[@inline never] lineage ~release i =
     Context.release c2;
     Context.release c1);
   {
-    nodes = [ watch w.value; watch t.value ];
-    host_init = watch nd;
+    nodes = [ Gc_witness.witness w.value; Gc_witness.witness t.value ];
+    host_init = Gc_witness.witness nd;
     bytes = Ir.Ndarray.size_in_bytes nd;
     computed =
       Array.length got = n && Array.for_alli got ~f:(fun j v -> Float.equal v (2. *. value i j));
@@ -146,7 +130,7 @@ let[@inline never] literal_released i =
   let ctx = Context.run ctx r in
   let bytes = Ir.Ndarray.size_in_bytes (host_init x) in
   Context.release ctx;
-  (watch x.value, bytes)
+  (Gc_witness.witness x.value, bytes)
 
 let builds ~from f = List.init graphs ~f:(fun i -> f (from + i))
 
@@ -174,9 +158,9 @@ let () =
         && after.freed - before.freed = after.allocated - before.allocated
         && after.pool_bytes = before.pool_bytes);
       p_all "released: every graph's nodes are reclaimed" built ~f:(fun b ->
-          List.for_all b.nodes ~f:reclaimed);
+          List.for_all b.nodes ~f:Gc_witness.reclaimed);
       p_all "released: every parameter's host-init array is reclaimed" built ~f:(fun b ->
-          reclaimed b.host_init));
+          Gc_witness.reclaimed b.host_init));
   case "an unreleased lineage keeps its pools, not its graph" (fun () ->
       let before = read () in
       show "unreleased: before" before;
@@ -194,7 +178,7 @@ let () =
         (after.allocated - before.allocated - (after.freed - before.freed) = 2 * graphs
         && after.pool_bytes - before.pool_bytes = 2 * graphs * bytes);
       p_all "unreleased: every graph's nodes are reclaimed all the same" built ~f:(fun b ->
-          List.for_all b.nodes ~f:reclaimed));
+          List.for_all b.nodes ~f:Gc_witness.reclaimed));
   case "gh-ocannl-1762: forward_once's initialization context keeps the parameter's pool" (fun () ->
       let before = read () in
       let bytes = builds ~from:21 forward_once_released in
@@ -214,4 +198,4 @@ let () =
         (after.constant_bytes - before.constant_bytes
         = List.sum (module Int) built ~f:(fun (_, bytes) -> bytes));
       p_all "literal: every literal's node is kept by the device's constant cache" built
-        ~f:(fun (w, _) -> not (reclaimed w)))
+        ~f:(fun (w, _) -> Gc_witness.kept w))

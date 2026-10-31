@@ -451,6 +451,7 @@ let () =
   (* The mapping itself, held in a local across the save below -- reading it afterwards is what
      makes this an experiment about a *live* mapping, not one the GC may already have dropped. *)
   let mapping = Lazy.force (Option.value_exn (Ir.Host_inits.find tn)) in
+  let mapping_witness = Gc_witness.witness mapping in
   Verdict.p "the mapping reads the checkpoint's values"
     (Array.equal Float.equal (Nd.retrieve_flat_values mapping) v1);
   (* A save killed between streaming and its commit leaves a staging file the size of the model, and
@@ -488,13 +489,15 @@ let () =
     (not (Stdlib.Sys.file_exists abandoned));
   Verdict.p "a save leaves another checkpoint's staging file alone" (Stdlib.Sys.file_exists other);
   (try Stdlib.Sys.remove other with _ -> ());
+  Verdict.claim "the mapping survives collections while this block holds it"
+    (Gc_witness.kept mapping_witness);
   Verdict.p "the live mapping still reads the values it was taken from"
     (Array.equal Float.equal (Nd.retrieve_flat_values mapping) v1)
 
 (* A fresh top-level block, so the previous one's mapping, context and nodes are out of scope. *)
 let () =
   Tensor.unsafe_reinitialize ();
-  Stdlib.Gc.full_major ();
+  Gc_witness.settle ();
   let ctx = Context.cpu () in
   let ctx, reloaded = Persistence.load ~ctx ~mmap:true live_mapping_path in
   let tn = List.hd_exn (Set.to_list reloaded) in

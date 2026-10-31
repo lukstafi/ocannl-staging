@@ -5092,6 +5092,18 @@ box.
   hand-rolled copies it replaced mostly lacked, leaving a crash's report on a deleted file.
   `stderr_capture_cases` pins the raising paths, in process and in a child.
 
+- `Gc_witness` (`test/support/gc_witness.mli`) owns what a test reads off the GC. A `Weak`
+  witness is taken in an `[@inline never]` builder that returns it and only what the case keeps;
+  `reclaimed` retries up to three `settle` rounds (`Gc.full_major` twice, then `Gc.compact`) and
+  `kept` requires the value to survive three, so neither rests on one collection. An allocation
+  bound is read in `drained_finalisers`, whose leading `Gc.full_major` runs the finalisers of
+  earlier garbage outside the window (on metal, tens of thousands of words of `release` messages,
+  gh-ocannl-1416). Every user carries the positive control beside its claims: a `kept` witness
+  (or `window_sees_allocation`) that must read alive, since a witness observing nothing makes
+  every "reclaimed" and every upper bound true. A control that is not already a golden row is a
+  silent `Verdict.claim`. Its own library, stdlib only, so an edit reaches the GC-reading tests
+  and not every `test_utils` dependant.
+
 - `ll_test_ratchet` (gh-ocannl-964) derives test sources from `Source_inventory`, harness membership
   from owning Dune stanza groups (including parent `subdir` blocks and `select` target-to-arm
   relationships), and constructor names from
