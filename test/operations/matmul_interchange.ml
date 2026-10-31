@@ -38,7 +38,11 @@ open Verdict.Claims
 
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 let on_gpu = Sched.backend_is_gpu backend_name
-let skipped = Verdict.skipped ~backend:backend_name
+
+(* The executed seed families: the GPU one where the backend is a GPU, the CPU one elsewhere; each
+   claim is skipped by name where its leg is closed (gh-ocannl-1703). *)
+let gpu_leg = Verdict.leg ~when_:on_gpu ~on:backend_name ()
+let cpu_leg = Verdict.leg ~when_:(not on_gpu) ~on:backend_name ()
 
 (* The backend's accumulator residency, which a [Privatize] tile is minted at (gh-ocannl-1116). *)
 let accum_prec = Ll_test.backend_accum_prec
@@ -362,70 +366,62 @@ let leg (c : case) ~expect_prefix ~ko_extents ~nk =
           | exception exn ->
               Stdio.eprintf "%s: replay FAILED: %s\n" tag (Exn.to_string exn);
               false);
+      let family_label what =
+        Printf.sprintf "%s: every %s candidate compiles, runs and matches the reference bitwise" tag
+          what
+      in
       let run_family ~what seeds =
         Stdio.eprintf "%s: executing %d %s seeds on %s\n%!" tag (List.length seeds) what
           backend_name;
-        let results =
-          List.mapi seeds ~f:(fun n q ->
-              match Sched.apply (sched q) (hermetic o) with
-              | scheduled -> execute ~name:(Printf.sprintf "mi_%s_%s%d" tag what n) scheduled c
-              | exception exn ->
-                  Stdio.eprintf "%s/%s: construct FAILED: %s\n" tag what (Exn.to_string exn);
-                  None)
-        in
-        p_all
-          (Printf.sprintf "%s: every %s candidate compiles, runs and matches the reference bitwise"
-             tag what) results ~f:(function
+        List.mapi seeds ~f:(fun n q ->
+            match Sched.apply (sched q) (hermetic o) with
+            | scheduled -> execute ~name:(Printf.sprintf "mi_%s_%s%d" tag what n) scheduled c
+            | exception exn ->
+                Stdio.eprintf "%s/%s: construct FAILED: %s\n" tag what (Exn.to_string exn);
+                None)
+      in
+      let family_claim label results =
+        p_all label results ~f:(function
           | Some (got, _) -> Array.equal Float.equal got c.want
-          | None -> false);
-        results
+          | None -> false)
       in
       (* The tensorized family through the real mma hook, where the device advertises a tile for the
          site's f32 operands (Metal's simdgroup matrices; a tf32-lifting environment on CUDA): the
          gate is the seeder's own capability judgment, never the seeds under test (gh-ocannl-1115).
-         Every input is a dyadic exact in tf32 too, so bitwise still holds. *)
+         Every input is a dyadic exact in tf32 too, so bitwise still holds. Its claims are written
+         once, in a leg open where the capability is advertised on a GPU (gh-ocannl-1703). *)
       let mma_what = "tensorized" in
-      let mma_label =
-        Printf.sprintf "%s: every %s candidate compiles, runs and matches the reference bitwise" tag
-          mma_what
+      let mma_leg =
+        match
+          Ll_test.tensorized_matmul_capability ~is_gpu:true ~is_cpu:false ~limits
+            ~a:site.Autotune.m_a ~b:site.Autotune.m_b ~d:site.Autotune.m_d
+        with
+        | `Advertised -> Verdict.leg ~when_:on_gpu ~on:backend_name ()
+        | `Withheld aggregation -> Verdict.leg ~aggregation ~when_:false ~on:backend_name ()
       in
-      let real_label = tag ^ ": the device's own tensorized seeds are proposed" in
-      let rendered_label =
-        Printf.sprintf "%s: every %s candidate renders tensorized per its mma census" tag mma_what
+      let real =
+        lazy (unfused_seeds ~is_gpu:true ~limits o |> List.filter ~f:(fun q -> q.Autotune.sk_mma))
       in
-      (match
-         Ll_test.tensorized_matmul_capability ~is_gpu:true ~is_cpu:false ~limits
-           ~a:site.Autotune.m_a ~b:site.Autotune.m_b ~d:site.Autotune.m_d
-       with
-      | `Advertised when on_gpu ->
-          let real =
-            unfused_seeds ~is_gpu:true ~limits o |> List.filter ~f:(fun q -> q.Autotune.sk_mma)
-          in
-          p real_label (not (List.is_empty real));
-          let results = run_family ~what:mma_what real in
-          (* Parity is the claim above; this one is what makes it a TENSORIZED claim. A candidate
-             that failed to run has no census and fails here as well as there. *)
-          p_all rendered_label results ~f:(function
+      in_leg ~leg:mma_leg (tag ^ ": the device's own tensorized seeds are proposed") (fun label ->
+          p label (not (List.is_empty (Lazy.force real))));
+      let mma_results = lazy (run_family ~what:mma_what (Lazy.force real)) in
+      in_leg ~leg:mma_leg (family_label mma_what) (fun label ->
+          family_claim label (Lazy.force mma_results));
+      (* Parity is the claim above; this one is what makes it a TENSORIZED claim. A candidate that
+         failed to run has no census and fails here as well as there. *)
+      in_legf ~leg:mma_leg "%s: every %s candidate renders tensorized per its mma census" tag
+        mma_what (fun label ->
+          p_all label (Lazy.force mma_results) ~f:(function
             | Some (_, census) ->
                 if not (Ll_test.rendered_tensorized census) then
                   Stdio.eprintf "%s: a tensorized candidate rendered %s\n" tag
                     (Ir.C_syntax.mma_summary_string census);
                 Ll_test.rendered_tensorized census
-            | None -> false)
-      | `Advertised ->
-          skipped real_label;
-          skipped mma_label;
-          skipped rendered_label
-      | `Withheld aggregation ->
-          Verdict.skipped ~aggregation ~backend:backend_name real_label;
-          Verdict.skipped ~aggregation ~backend:backend_name mma_label;
-          Verdict.skipped ~aggregation ~backend:backend_name rendered_label);
-      if on_gpu then (
-        ignore (run_family ~what:"gpu" gpu_seeds : _ list);
-        skipped (tag ^ ": every cpu candidate compiles, runs and matches the reference bitwise"))
-      else (
-        skipped (tag ^ ": every gpu candidate compiles, runs and matches the reference bitwise");
-        ignore (run_family ~what:"cpu" cpu_seeds : _ list))
+            | None -> false));
+      in_leg ~leg:gpu_leg (family_label "gpu") (fun label ->
+          family_claim label (run_family ~what:"gpu" gpu_seeds));
+      in_leg ~leg:cpu_leg (family_label "cpu") (fun label ->
+          family_claim label (run_family ~what:"cpu" cpu_seeds))
 
 let () =
   p_all "reference: every weight-gradient cell is nonzero" (Array.to_list wgrad.want) ~f:(fun v ->

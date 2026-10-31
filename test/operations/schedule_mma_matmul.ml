@@ -408,98 +408,129 @@ let () =
       (Context.hardware_limits (Context.auto ()))
       ~a:Ir.Backend_intf.Mma_tf32 ~b:Ir.Backend_intf.Mma_tf32 ~d:Ir.Backend_intf.Mma_f32
   in
-  if advertises_tf32 then (
-    let f32 = Ir.Ops.single and statement = Ir.Backend_intf.Mma_per_statement in
-    let tf32_marker =
-      arm_marker ~policy:{ (Numerics.get ()) with tf32_matmuls = true } ~scope:statement f32 f32 f32
-    in
-    let a_off, b_off = tf32_inputs ~tag:"tf32_off_" ~k:n in
-    let%op c_off_serial = a_off * b_off in
-    let%op c_off_mma = a_off * b_off in
-    Numerics.set_policy { (Numerics.get ()) with tf32_matmuls = false };
-    let want_off = compile_serial ~name:"mm_tf32_off_serial" c_off_serial in
-    let off_seeded = ref false in
-    let got_off, census_off =
-      compile_mma_with_census
-        ~inspect:(fun opt -> off_seeded := tf32_mma_seeded opt)
-        ~name:"mm_tf32_off_mma" c_off_mma
-    in
-    let src_off = Generated.read "mm_tf32_off_mma" in
-    p_all2 "tf32 policy-off matmul matches the serial twin bitwise" got_off want_off ~f:Float.equal;
-    p "tf32 policy-off renders and records the scalar fallback"
-      (Ll_test.all_declined ~what:"tf32 policy-off" census_off
-      && Option.is_none (mma_arm ~scope:statement f32 f32 f32)
-      && (not (String.is_substring src_off ~substring:tf32_marker))
-      && not (String.is_substring src_off ~substring:"precision::tf32"));
-    p "tf32 policy-off autotune omits tensorized candidates" (not !off_seeded);
-
-    Numerics.set_policy { (Numerics.get ()) with tf32_matmuls = true };
-    let a_on, b_on = tf32_inputs ~tag:"tf32_on_" ~k:n in
-    let%op c_on_serial = a_on * b_on in
-    let%op c_on_mma = a_on * b_on in
-    let want_on = compile_serial ~name:"mm_tf32_on_serial" c_on_serial in
-    let got_on, census_on = compile_mma_with_census ~name:"mm_tf32_on_mma" c_on_mma in
-    let src_on = Generated.read "mm_tf32_on_mma" in
-    p_close "tf32 policy-on matmul matches the serial twin within tolerance" got_on want_on
-      ~tol:approx_rel_tol;
-    p "tf32 policy-on renders and records wmma tf32"
-      (Ll_test.all_rendered ~what:"tf32 policy-on" Ir.C_syntax.Mma_intrinsics census_on
-      && String.is_substring src_on ~substring:tf32_marker
-      && String.is_substring src_on ~substring:"precision::tf32"
-      && String.is_substring src_on ~substring:"__float_to_tf32");
-
-    let a_k24, b_k24 = tf32_inputs ~tag:"tf32_k24_" ~k:24 in
-    let%op c_k24_serial = a_k24 * b_k24 in
-    let%op c_k24_mma = a_k24 * b_k24 in
-    let want_k24 = compile_serial ~name:"mm_tf32_k24_serial" c_k24_serial in
-    let k24_seeded = ref false in
-    let got_k24, census_k24 =
-      compile_mma_with_census
-        ~inspect:(fun opt -> k24_seeded := tf32_mma_seeded opt)
-        ~name:"mm_tf32_k24_mma" c_k24_mma
-    in
-    let src_k24 = Generated.read "mm_tf32_k24_mma" in
-    p_close "tf32 k=24 divergent tile matches the serial twin" got_k24 want_k24 ~tol:approx_rel_tol;
-    p "tf32 k=24 divergent tile emits the wmma intrinsic"
-      (List.exists census_k24 ~f:(Ir.C_syntax.equal_mma_rendering Ir.C_syntax.Mma_intrinsics)
-      && String.is_substring src_k24 ~substring:("tile_mma 16x32x24 " ^ tf32_marker));
-    p "tf32 k=24 autotune seeds tensorized candidates" !k24_seeded;
-
-    let atv =
-      Array.init (n * n) ~f:(fun x ->
-          Ll_test.cycle_flat ~dims:[| n; n |] ~modulus:17 ~offset:(-8.) ~stride:0.0625 x
-          +. Ll_test.cycle_flat ~dims:[| n; n |] ~modulus:7 ~offset:0. ~stride:0.0002 x)
-    in
-    let btv =
-      Array.init (n * n) ~f:(fun x ->
-          Ll_test.cycle_flat ~dims:[| n; n |] ~modulus:13 ~offset:(-6.) ~stride:0.078125 x
-          -. Ll_test.cycle_flat ~dims:[| n; n |] ~modulus:3 ~offset:0. ~stride:0.0004 x)
-    in
-    let at = TDSL.ndarray atv ~label:[ "tf32_at" ] ~output_dims:[ n; n ] () in
-    let bt = TDSL.ndarray btv ~label:[ "tf32_bt" ] ~output_dims:[ n; n ] () in
-    let%op ct_serial = at +* "ki;kj=>ij" bt in
-    let%op ct_mma = at +* "ki;kj=>ij" bt in
-    let want_t = compile_serial ~name:"mm_tf32_ta_serial" ct_serial in
-    let got_t, census_t = compile_mma_with_census ~name:"mm_tf32_ta_mma" ct_mma in
-    let src_t = Generated.read "mm_tf32_ta_mma" in
-    p_close "tf32 transposed-A matmul matches the serial twin" got_t want_t ~tol:approx_rel_tol;
-    p "tf32 transposed-A matmul emits the expected wmma layout"
-      (List.exists census_t ~f:(Ir.C_syntax.equal_mma_rendering Ir.C_syntax.Mma_intrinsics)
-      && String.is_substring src_t ~substring:"matrix_a, 16, 16, 8"
-      && String.is_substring src_t ~substring:"col_major"
-      && String.is_substring src_t ~substring:tf32_marker);
-    Numerics.set_policy { (Numerics.get ()) with tf32_matmuls = false })
-  else (
-    skipped "tf32 policy-off matmul matches the serial twin bitwise";
-    skipped "tf32 policy-off renders and records the scalar fallback";
-    skipped "tf32 policy-off autotune omits tensorized candidates";
-    skipped "tf32 policy-on matmul matches the serial twin within tolerance";
-    skipped "tf32 policy-on renders and records wmma tf32";
-    skipped "tf32 k=24 divergent tile matches the serial twin";
-    skipped "tf32 k=24 divergent tile emits the wmma intrinsic";
-    skipped "tf32 k=24 autotune seeds tensorized candidates";
-    skipped "tf32 transposed-A matmul matches the serial twin";
-    skipped "tf32 transposed-A matmul emits the expected wmma layout");
+  (* Open where the device advertises the tf32 format; elsewhere every claim is skipped by name, in
+     the order this one sequence makes them (gh-ocannl-1703). Each policy's compiles sit in a lazy
+     the claims force in order, so the policy each compile sees is the one it saw as a branch. *)
+  let tf32_leg = Verdict.leg ~when_:advertises_tf32 ~on:backend_name () in
+  let f32 = Ir.Ops.single and statement = Ir.Backend_intf.Mma_per_statement in
+  let tf32_marker =
+    lazy
+      (arm_marker
+         ~policy:{ (Numerics.get ()) with tf32_matmuls = true }
+         ~scope:statement f32 f32 f32)
+  in
+  let tf32_off =
+    lazy
+      (ignore (Lazy.force tf32_marker : string);
+       let a_off, b_off = tf32_inputs ~tag:"tf32_off_" ~k:n in
+       let%op c_off_serial = a_off * b_off in
+       let%op c_off_mma = a_off * b_off in
+       Numerics.set_policy { (Numerics.get ()) with tf32_matmuls = false };
+       let want_off = compile_serial ~name:"mm_tf32_off_serial" c_off_serial in
+       let off_seeded = ref false in
+       let got_off, census_off =
+         compile_mma_with_census
+           ~inspect:(fun opt -> off_seeded := tf32_mma_seeded opt)
+           ~name:"mm_tf32_off_mma" c_off_mma
+       in
+       let src_off = Generated.read "mm_tf32_off_mma" in
+       (got_off, want_off, census_off, src_off, !off_seeded))
+  in
+  in_leg ~leg:tf32_leg "tf32 policy-off matmul matches the serial twin bitwise" (fun label ->
+      let got_off, want_off, _, _, _ = Lazy.force tf32_off in
+      p_all2 label got_off want_off ~f:Float.equal);
+  in_leg ~leg:tf32_leg "tf32 policy-off renders and records the scalar fallback" (fun label ->
+      let _, _, census_off, src_off, _ = Lazy.force tf32_off in
+      p label
+        (Ll_test.all_declined ~what:"tf32 policy-off" census_off
+        && Option.is_none (mma_arm ~scope:statement f32 f32 f32)
+        && (not (String.is_substring src_off ~substring:(Lazy.force tf32_marker)))
+        && not (String.is_substring src_off ~substring:"precision::tf32")));
+  in_leg ~leg:tf32_leg "tf32 policy-off autotune omits tensorized candidates" (fun label ->
+      let _, _, _, _, off_seeded = Lazy.force tf32_off in
+      p label (not off_seeded));
+  let tf32_on =
+    lazy
+      (Numerics.set_policy { (Numerics.get ()) with tf32_matmuls = true };
+       let a_on, b_on = tf32_inputs ~tag:"tf32_on_" ~k:n in
+       let%op c_on_serial = a_on * b_on in
+       let%op c_on_mma = a_on * b_on in
+       let want_on = compile_serial ~name:"mm_tf32_on_serial" c_on_serial in
+       let got_on, census_on = compile_mma_with_census ~name:"mm_tf32_on_mma" c_on_mma in
+       let src_on = Generated.read "mm_tf32_on_mma" in
+       (got_on, want_on, census_on, src_on))
+  in
+  in_leg ~leg:tf32_leg "tf32 policy-on matmul matches the serial twin within tolerance"
+    (fun label ->
+      let got_on, want_on, _, _ = Lazy.force tf32_on in
+      p_close label got_on want_on ~tol:approx_rel_tol);
+  in_leg ~leg:tf32_leg "tf32 policy-on renders and records wmma tf32" (fun label ->
+      let _, _, census_on, src_on = Lazy.force tf32_on in
+      p label
+        (Ll_test.all_rendered ~what:"tf32 policy-on" Ir.C_syntax.Mma_intrinsics census_on
+        && String.is_substring src_on ~substring:(Lazy.force tf32_marker)
+        && String.is_substring src_on ~substring:"precision::tf32"
+        && String.is_substring src_on ~substring:"__float_to_tf32"));
+  (* Still under the policy-on setting [tf32_on] left. *)
+  let tf32_k24 =
+    lazy
+      (let a_k24, b_k24 = tf32_inputs ~tag:"tf32_k24_" ~k:24 in
+       let%op c_k24_serial = a_k24 * b_k24 in
+       let%op c_k24_mma = a_k24 * b_k24 in
+       let want_k24 = compile_serial ~name:"mm_tf32_k24_serial" c_k24_serial in
+       let k24_seeded = ref false in
+       let got_k24, census_k24 =
+         compile_mma_with_census
+           ~inspect:(fun opt -> k24_seeded := tf32_mma_seeded opt)
+           ~name:"mm_tf32_k24_mma" c_k24_mma
+       in
+       let src_k24 = Generated.read "mm_tf32_k24_mma" in
+       (got_k24, want_k24, census_k24, src_k24, !k24_seeded))
+  in
+  in_leg ~leg:tf32_leg "tf32 k=24 divergent tile matches the serial twin" (fun label ->
+      let got_k24, want_k24, _, _, _ = Lazy.force tf32_k24 in
+      p_close label got_k24 want_k24 ~tol:approx_rel_tol);
+  in_leg ~leg:tf32_leg "tf32 k=24 divergent tile emits the wmma intrinsic" (fun label ->
+      let _, _, census_k24, src_k24, _ = Lazy.force tf32_k24 in
+      p label
+        (List.exists census_k24 ~f:(Ir.C_syntax.equal_mma_rendering Ir.C_syntax.Mma_intrinsics)
+        && String.is_substring src_k24 ~substring:("tile_mma 16x32x24 " ^ Lazy.force tf32_marker)));
+  in_leg ~leg:tf32_leg "tf32 k=24 autotune seeds tensorized candidates" (fun label ->
+      let _, _, _, _, k24_seeded = Lazy.force tf32_k24 in
+      p label k24_seeded);
+  let tf32_ta =
+    lazy
+      (let atv =
+         Array.init (n * n) ~f:(fun x ->
+             Ll_test.cycle_flat ~dims:[| n; n |] ~modulus:17 ~offset:(-8.) ~stride:0.0625 x
+             +. Ll_test.cycle_flat ~dims:[| n; n |] ~modulus:7 ~offset:0. ~stride:0.0002 x)
+       in
+       let btv =
+         Array.init (n * n) ~f:(fun x ->
+             Ll_test.cycle_flat ~dims:[| n; n |] ~modulus:13 ~offset:(-6.) ~stride:0.078125 x
+             -. Ll_test.cycle_flat ~dims:[| n; n |] ~modulus:3 ~offset:0. ~stride:0.0004 x)
+       in
+       let at = TDSL.ndarray atv ~label:[ "tf32_at" ] ~output_dims:[ n; n ] () in
+       let bt = TDSL.ndarray btv ~label:[ "tf32_bt" ] ~output_dims:[ n; n ] () in
+       let%op ct_serial = at +* "ki;kj=>ij" bt in
+       let%op ct_mma = at +* "ki;kj=>ij" bt in
+       let want_t = compile_serial ~name:"mm_tf32_ta_serial" ct_serial in
+       let got_t, census_t = compile_mma_with_census ~name:"mm_tf32_ta_mma" ct_mma in
+       let src_t = Generated.read "mm_tf32_ta_mma" in
+       (* The last tf32 compile: the policy returns to off for the legs below. *)
+       Numerics.set_policy { (Numerics.get ()) with tf32_matmuls = false };
+       (got_t, want_t, census_t, src_t))
+  in
+  in_leg ~leg:tf32_leg "tf32 transposed-A matmul matches the serial twin" (fun label ->
+      let got_t, want_t, _, _ = Lazy.force tf32_ta in
+      p_close label got_t want_t ~tol:approx_rel_tol);
+  in_leg ~leg:tf32_leg "tf32 transposed-A matmul emits the expected wmma layout" (fun label ->
+      let _, _, census_t, src_t = Lazy.force tf32_ta in
+      p label
+        (List.exists census_t ~f:(Ir.C_syntax.equal_mma_rendering Ir.C_syntax.Mma_intrinsics)
+        && String.is_substring src_t ~substring:"matrix_a, 16, 16, 8"
+        && String.is_substring src_t ~substring:"col_major"
+        && String.is_substring src_t ~substring:(Lazy.force tf32_marker)));
 
   let%op mc1 = ma * mb in
   let mma_comp = named "mm_mma" (Train.forward mc1) in
@@ -669,43 +700,44 @@ let () =
      f32"
     (Ll_test.matmul_products ~m:n ~n ~k:n h32a h32b)
     ~f:(Ll_test.exact_partials ~sig_bits:24);
-  (let claim_value = "f16->f32 direct tensorized matmul equals the exact sum bitwise" in
-   let claim_struct = "f16->f32 direct tensorized structure as expected" in
-   if on_cuda then (
-     skipped claim_value;
-     skipped claim_struct)
-   else
-     let h32ma = NTDSL.init ~l:"h32ma" ~prec:Ir.Ops.half ~i:[ n ] ~o:[ n ] ~f:h32a () in
-     let h32mb = NTDSL.init ~l:"h32mb" ~prec:Ir.Ops.half ~i:[ n ] ~o:[ n ] ~f:h32b () in
-     let%op mch32 = h32ma * h32mb in
-     Tn.update_prec mch32.Tensor.value Ir.Ops.single;
-     (* Pinned: on a native-fp16 CPU [Fp16_narrow] computes the half operands at storage width, so
-        the bridged register tiling below is the default policy's rendering. *)
-     let got, census =
-       Test_utils.with_fp16_auto (fun () -> compile_mma_with_census ~name:"mm_h32_mma" mch32)
-     in
-     p_all2 claim_value got exact_h32 ~f:Float.equal;
-     let src = Generated.read "mm_h32_mma" in
-     let has s = String.is_substring src ~substring:s in
-     p claim_struct
-       (if on_metal then
-          Ll_test.all_rendered ~what:"f16->f32 direct" Ir.C_syntax.Mma_intrinsics census
-          && has "simdgroup_float8x8 __mma_acc"
-          && has "simdgroup_half8x8 __mma_af"
-          && (not (has "__mma_dstage"))
-          && not (has "thread_elements()")
-        else if on_hip then
-          if Lazy.force hip_mma then
-            (* f16 operand fragments into an f32 accumulator fragment that is the f32 destination's
-               own type, so [d] loads and stores unconverted (no coordinate table). *)
+  (let leg = Verdict.leg ~when_:(not on_cuda) ~on:backend_name () in
+   let h32 =
+     lazy
+       (let h32ma = NTDSL.init ~l:"h32ma" ~prec:Ir.Ops.half ~i:[ n ] ~o:[ n ] ~f:h32a () in
+        let h32mb = NTDSL.init ~l:"h32mb" ~prec:Ir.Ops.half ~i:[ n ] ~o:[ n ] ~f:h32b () in
+        let%op mch32 = h32ma * h32mb in
+        Tn.update_prec mch32.Tensor.value Ir.Ops.single;
+        (* Pinned: on a native-fp16 CPU [Fp16_narrow] computes the half operands at storage width,
+           so the bridged register tiling below is the default policy's rendering. *)
+        Test_utils.with_fp16_auto (fun () -> compile_mma_with_census ~name:"mm_h32_mma" mch32))
+   in
+   in_leg ~leg "f16->f32 direct tensorized matmul equals the exact sum bitwise" (fun label ->
+       let got, _ = Lazy.force h32 in
+       p_all2 label got exact_h32 ~f:Float.equal);
+   in_leg ~leg "f16->f32 direct tensorized structure as expected" (fun label ->
+       let _, census = Lazy.force h32 in
+       let src = Generated.read "mm_h32_mma" in
+       let has s = String.is_substring src ~substring:s in
+       p label
+         (if on_metal then
             Ll_test.all_rendered ~what:"f16->f32 direct" Ir.C_syntax.Mma_intrinsics census
-            && has (rocwmma_f32_acc ^ " __mma_acc")
-            && has rocwmma_f16_a
-            && not (has "ocannl_wmma_rc16")
-          else Ll_test.all_declined ~what:"f16->f32 direct" census && not (has "rocwmma")
-        else
-          Ll_test.all_rendered ~what:"f16->f32 direct" Ir.C_syntax.Mma_register_tiled census
-          && has "narrow storage bridged: a:half b:half"));
+            && has "simdgroup_float8x8 __mma_acc"
+            && has "simdgroup_half8x8 __mma_af"
+            && (not (has "__mma_dstage"))
+            && not (has "thread_elements()")
+          else if on_hip then
+            if Lazy.force hip_mma then
+              (* f16 operand fragments into an f32 accumulator fragment that is the f32
+                 destination's own type, so [d] loads and stores unconverted (no coordinate
+                 table). *)
+              Ll_test.all_rendered ~what:"f16->f32 direct" Ir.C_syntax.Mma_intrinsics census
+              && has (rocwmma_f32_acc ^ " __mma_acc")
+              && has rocwmma_f16_a
+              && not (has "ocannl_wmma_rc16")
+            else Ll_test.all_declined ~what:"f16->f32 direct" census && not (has "rocwmma")
+          else
+            Ll_test.all_rendered ~what:"f16->f32 direct" Ir.C_syntax.Mma_register_tiled census
+            && has "narrow storage bridged: a:half b:half")));
 
   (* --- Fp16_wide (gh-ocannl-680): the uniform-f16 combination under the wide policy. CUDA sm_80+
      routes it to the f32-accumulate inline-PTX m16n8k16 arm (the bf16 uniform arm's body over the
@@ -857,29 +889,29 @@ let () =
      covered it — either way, no register tiling and a recorded fallback. CPU-only: on the GPU
      backends [narrow_compute_f32] does not touch f16 compute and the leg above already pins the
      wide rendering. --- *)
-  (let claim_ncf32_value =
-     "Fp16_wide with narrow_compute_f32 off matches the independent wide reference"
+  (let leg = Verdict.leg ~when_:(not on_gpu) ~on:backend_name () in
+   let hn =
+     lazy
+       (Numerics.set_policy
+          { saved_policy with fp16_arithmetic = Numerics.Fp16_wide; narrow_compute_f32 = false };
+        let%op mchn1 = mwa * mwb in
+        Tn.update_prec mchn1.Tensor.value Ir.Ops.half;
+        let got_census = compile_mma_with_census ~name:"mm_h_wide_nco_mma" mchn1 in
+        Numerics.set_policy saved_policy;
+        got_census)
    in
-   let claim_ncf32_structure =
+   (* Compared against the independent wide reference, on the width-sensitive inputs: the fallback's
+      localized accumulator staying half — not merely differing from a serial twin rendered the same
+      way — is what this must catch (Codex P1 round 3 on PR #477). *)
+   in_leg ~leg "Fp16_wide with narrow_compute_f32 off matches the independent wide reference"
+     (fun label ->
+       let got_hn, _ = Lazy.force hn in
+       p_all2 label got_hn wide_ref_hw ~f:Float.equal);
+   in_leg ~leg
      "Fp16_wide with narrow_compute_f32 off declines the register tiling (no narrow C-tile \
-      accumulator)"
-   in
-   if on_gpu then (
-     skipped claim_ncf32_value;
-     skipped claim_ncf32_structure)
-   else begin
-     Numerics.set_policy
-       { saved_policy with fp16_arithmetic = Numerics.Fp16_wide; narrow_compute_f32 = false };
-     let%op mchn1 = mwa * mwb in
-     Tn.update_prec mchn1.Tensor.value Ir.Ops.half;
-     let got_hn, census_hn = compile_mma_with_census ~name:"mm_h_wide_nco_mma" mchn1 in
-     Numerics.set_policy saved_policy;
-     (* Compared against the independent wide reference, on the width-sensitive inputs: the
-        fallback's localized accumulator staying half — not merely differing from a serial twin
-        rendered the same way — is what this must catch (Codex P1 round 3 on PR #477). *)
-     p_all2 claim_ncf32_value got_hn wide_ref_hw ~f:Float.equal;
-     p claim_ncf32_structure (Ll_test.all_declined ~what:"Fp16_wide nco" census_hn)
-   end);
+      accumulator)" (fun label ->
+       let _, census_hn = Lazy.force hn in
+       p label (Ll_test.all_declined ~what:"Fp16_wide nco" census_hn)));
 
   (* --- Bfloat16 (gh-ocannl-545): the two accumulator shapes, which are NOT interchangeable on
      CUDA. [nvcuda::wmma] has no bf16 accumulator fragment (mma.hpp declares [__nv_bfloat16]
@@ -1249,6 +1281,7 @@ let () =
    let mbf = fp8_b ~l:"mbf" ~i:(Some [ n ]) ~o:[ n ] in
    let mtaf = fp8_a ~l:"mtaf" ~i:None ~o:[ n; n ] in
    let mtbf = fp8_b ~l:"mtbf" ~i:None ~o:[ n; n ] in
+   let metal_leg = Verdict.leg ~when_:on_metal ~on:backend_name () in
    let fp8_leg ~tag ~build =
      let mcf0 = build () in
      Tn.update_prec mcf0.Tensor.value Ir.Ops.single;
@@ -1302,20 +1335,15 @@ let () =
          && has "narrow storage bridged: a:fp8 b:fp8"
      in
      p (Printf.sprintf "%s tensorized structure as expected" tag) ok;
-     let fence_claim = Printf.sprintf "%s Metal fallback fences device memory on both sides" tag in
-     let control_claim =
-       Printf.sprintf "%s Metal fence check rejects a threadgroup-only bracket" tag
-     in
-     if on_metal then (
-       p fence_claim (metal_fallback_device_fenced src);
-       let weakened =
-         String.substr_replace_first src ~pattern:metal_device_fence
-           ~with_:"threadgroup_barrier(mem_flags::mem_threadgroup);"
-       in
-       p control_claim (not (metal_fallback_device_fenced weakened)))
-     else (
-       skipped fence_claim;
-       skipped control_claim)
+     in_legf ~leg:metal_leg "%s Metal fallback fences device memory on both sides" tag (fun label ->
+         p label (metal_fallback_device_fenced src));
+     in_legf ~leg:metal_leg "%s Metal fence check rejects a threadgroup-only bracket" tag
+       (fun label ->
+         let weakened =
+           String.substr_replace_first src ~pattern:metal_device_fence
+             ~with_:"threadgroup_barrier(mem_flags::mem_threadgroup);"
+         in
+         p label (not (metal_fallback_device_fenced weakened)))
    in
    fp8_leg ~tag:"f8" ~build:(fun () ->
        let%op t = maf * mbf in
@@ -1347,78 +1375,84 @@ let () =
      twin is BITWISE. Pinned on the C backends only: the GPU intrinsic paths decline
      non-multiple-of-tile extents by contract (already covered by the half case's fallback pin).
      --- *)
-  if not on_gpu then (
-    let mi = 7 and mk = 13 and mj = 19 in
-    let eav =
-      Array.init (mi * mk)
-        ~f:(Ll_test.cycle_flat ~dims:[| mi; mk |] ~modulus:11 ~offset:0. ~stride:0.375)
-    in
-    let ebv =
-      Array.init (mk * mj)
-        ~f:(Ll_test.cycle_flat ~dims:[| mk; mj |] ~modulus:9 ~offset:(-4.) ~stride:1.)
-    in
-    let ea = TDSL.ndarray eav ~label:[ "ea" ] ~input_dims:[ mk ] ~output_dims:[ mi ] () in
-    let eb = TDSL.ndarray ebv ~label:[ "eb" ] ~input_dims:[ mj ] ~output_dims:[ mk ] () in
-    let%op ec0 = ea * eb in
-    let ctx_e0 = Context.auto () in
-    let ctx_e0, routine_e0 =
-      Context.compile
-        ~lowered_transform:(fun opt -> [ opt ])
-        ctx_e0
-        (named "mm_edge_serial" (Train.forward ec0))
-        Ir.Indexing.Empty
-    in
-    let ctx_e0 = Context.run ctx_e0 routine_e0 in
-    let got_edge_serial = nonzero "mm_edge_serial" (Context.get_values ctx_e0 ec0.Tensor.value) in
-    let%op ec1 = ea * eb in
-    let edge_schedule (opt : LL.optimized) : Sched.schedule =
-      let paths = Ll_test.nest_paths opt.LL.llc in
-      let i, j, k =
-        match List.find_exn paths ~f:(fun p -> List.length p = 3) with
-        | [ i; j; k ] -> (i, j, k)
-        | _ -> assert false
-      in
-      (* The zeroing must cover the lane slot (validate_parallel's coverage rule), so its column
-         loop becomes the Workgroup axis and the lane width matches its extent — arbitrary on the C
-         backends, where the lane loop renders serially. *)
-      let ez, zsyms = Sched.expand_zero ~tn:ec1.Tensor.value in
-      let zj = match zsyms with [ _; zj ] -> zj | _ -> assert false in
-      let rz = Sched.Retype { axis = zj; ty = LL.Workgroup } in
-      let tz, _lane = Sched.tensorize ~i ~j ~k ~simd_width:mj () in
-      [ ez; rz; tz ]
-    in
-    let transform_e opt = Sched.apply (edge_schedule opt) opt in
-    let ctx_e = Context.auto () in
-    let ctx_e, routine_e =
-      Context.compile
-        ~lowered_transform:(fun o -> [ transform_e o ])
-        ctx_e
-        (named "mm_edge_mma" (Train.forward ec1))
-        Ir.Indexing.Empty
-    in
-    let ctx_e = Context.run ctx_e routine_e in
-    let got_edge = Context.get_values ctx_e ec1.Tensor.value in
-    p_all2 "edge-extent tensorized matmul matches the serial twin bitwise" got_edge got_edge_serial
-      ~f:Float.equal;
-    let src = Generated.read "mm_edge_mma" in
-    let has s = String.is_substring src ~substring:s in
-    let cov = default_coverage ~m:mi ~n:mj in
-    let vectors = List.length cov.tail_widths in
-    p "edge-extent register tiling covers the edges with vector tiles, not scalar code"
-      (Ll_test.all_rendered ~what:"edge-extent" Ir.C_syntax.Mma_register_tiled
-         (renderings routine_e)
-      && has
-           (Printf.sprintf "%s; column tail %d in %d vector%s; row tail %d)"
-              (full_blocks ~m:mi ~n:mj cov) (mj - cov.n_full) vectors
-              (if vectors = 1 then "" else "s")
-              (mi - cov.m_full))
-      (* 19 is 3 mod every width: the tail ends in a PARTIAL vector, however many whole ones the
-         default's width leaves before it. *)
-      && Option.equal Int.equal (List.last cov.tail_widths) (Some 3)
-      && not (has "tmma_acc__")))
-  else (
-    skipped "edge-extent tensorized matmul matches the serial twin bitwise";
-    skipped "edge-extent register tiling covers the edges with vector tiles, not scalar code");
+  let cpu_leg = Verdict.leg ~when_:(not on_gpu) ~on:backend_name () in
+  let mi = 7 and mk = 13 and mj = 19 in
+  let edge =
+    lazy
+      (let eav =
+         Array.init (mi * mk)
+           ~f:(Ll_test.cycle_flat ~dims:[| mi; mk |] ~modulus:11 ~offset:0. ~stride:0.375)
+       in
+       let ebv =
+         Array.init (mk * mj)
+           ~f:(Ll_test.cycle_flat ~dims:[| mk; mj |] ~modulus:9 ~offset:(-4.) ~stride:1.)
+       in
+       let ea = TDSL.ndarray eav ~label:[ "ea" ] ~input_dims:[ mk ] ~output_dims:[ mi ] () in
+       let eb = TDSL.ndarray ebv ~label:[ "eb" ] ~input_dims:[ mj ] ~output_dims:[ mk ] () in
+       let%op ec0 = ea * eb in
+       let ctx_e0 = Context.auto () in
+       let ctx_e0, routine_e0 =
+         Context.compile
+           ~lowered_transform:(fun opt -> [ opt ])
+           ctx_e0
+           (named "mm_edge_serial" (Train.forward ec0))
+           Ir.Indexing.Empty
+       in
+       let ctx_e0 = Context.run ctx_e0 routine_e0 in
+       let got_edge_serial =
+         nonzero "mm_edge_serial" (Context.get_values ctx_e0 ec0.Tensor.value)
+       in
+       let%op ec1 = ea * eb in
+       let edge_schedule (opt : LL.optimized) : Sched.schedule =
+         let paths = Ll_test.nest_paths opt.LL.llc in
+         let i, j, k =
+           match List.find_exn paths ~f:(fun p -> List.length p = 3) with
+           | [ i; j; k ] -> (i, j, k)
+           | _ -> assert false
+         in
+         (* The zeroing must cover the lane slot (validate_parallel's coverage rule), so its column
+            loop becomes the Workgroup axis and the lane width matches its extent — arbitrary on the
+            C backends, where the lane loop renders serially. *)
+         let ez, zsyms = Sched.expand_zero ~tn:ec1.Tensor.value in
+         let zj = match zsyms with [ _; zj ] -> zj | _ -> assert false in
+         let rz = Sched.Retype { axis = zj; ty = LL.Workgroup } in
+         let tz, _lane = Sched.tensorize ~i ~j ~k ~simd_width:mj () in
+         [ ez; rz; tz ]
+       in
+       let transform_e opt = Sched.apply (edge_schedule opt) opt in
+       let ctx_e = Context.auto () in
+       let ctx_e, routine_e =
+         Context.compile
+           ~lowered_transform:(fun o -> [ transform_e o ])
+           ctx_e
+           (named "mm_edge_mma" (Train.forward ec1))
+           Ir.Indexing.Empty
+       in
+       let ctx_e = Context.run ctx_e routine_e in
+       (Context.get_values ctx_e ec1.Tensor.value, got_edge_serial, routine_e))
+  in
+  in_leg ~leg:cpu_leg "edge-extent tensorized matmul matches the serial twin bitwise" (fun label ->
+      let got_edge, got_edge_serial, _ = Lazy.force edge in
+      p_all2 label got_edge got_edge_serial ~f:Float.equal);
+  in_leg ~leg:cpu_leg
+    "edge-extent register tiling covers the edges with vector tiles, not scalar code" (fun label ->
+      let _, _, routine_e = Lazy.force edge in
+      let src = Generated.read "mm_edge_mma" in
+      let has s = String.is_substring src ~substring:s in
+      let cov = default_coverage ~m:mi ~n:mj in
+      let vectors = List.length cov.tail_widths in
+      p label
+        (Ll_test.all_rendered ~what:"edge-extent" Ir.C_syntax.Mma_register_tiled
+           (renderings routine_e)
+        && has
+             (Printf.sprintf "%s; column tail %d in %d vector%s; row tail %d)"
+                (full_blocks ~m:mi ~n:mj cov) (mj - cov.n_full) vectors
+                (if vectors = 1 then "" else "s")
+                (mi - cov.m_full))
+        (* 19 is 3 mod every width: the tail ends in a PARTIAL vector, however many whole ones the
+           default's width leaves before it. *)
+        && Option.equal Int.equal (List.last cov.tail_widths) (Some 3)
+        && not (has "tmma_acc__")));
 
   (* --- Extent-adapted geometry (gh-ocannl-575, gh-ocannl-620): an 8x40 output. The C-tile width
      [rn * lanes] is ranked against the actual column extent over the ladder of widths the file
@@ -1428,72 +1462,78 @@ let () =
      narrower register tile, the ranking is about operand reuse alone, and the pin is the
      relationship: the emitted coverage is [Register_tile.coverage] of the model's choice for this
      site, with no scalar column anywhere. Bitwise against the serial twin either way. --- *)
-  if not on_gpu then (
-    let wi = 8 and wk = 8 and wj = 40 in
-    (* Both operands must vary with BOTH their axes or the oracle stops discriminating: a modulus
-       dividing the row stride makes every reduction row identical, and a mis-indexed k read then
-       still matches the serial twin (Codex P1 on PR #357). 11 and 13 are coprime to the strides (8
-       and 40), so all 8 rows and all 8 columns of each operand differ — and so do all 8 rows of the
-       product, whose columns take 13 distinct values, more than any tile width in play. The values
-       stay exactly representable (multiples of 1/32 throughout). *)
-    let wav =
-      Array.init (wi * wk)
-        ~f:(Ll_test.cycle_flat ~dims:[| wi; wk |] ~modulus:11 ~offset:0. ~stride:0.125)
-    in
-    let wbv =
-      Array.init (wk * wj)
-        ~f:(Ll_test.cycle_flat ~dims:[| wk; wj |] ~modulus:13 ~offset:(-6.) ~stride:0.25)
-    in
-    let wa = TDSL.ndarray wav ~label:[ "wa" ] ~input_dims:[ wk ] ~output_dims:[ wi ] () in
-    let wb = TDSL.ndarray wbv ~label:[ "wb" ] ~input_dims:[ wj ] ~output_dims:[ wk ] () in
-    let%op wc0 = wa * wb in
-    let ctx_w0 = Context.auto () in
-    let ctx_w0, routine_w0 =
-      Context.compile
-        ~lowered_transform:(fun opt -> [ opt ])
-        ctx_w0
-        (named "mm_width_serial" (Train.forward wc0))
-        Ir.Indexing.Empty
-    in
-    let ctx_w0 = Context.run ctx_w0 routine_w0 in
-    let got_width_serial = nonzero "mm_width_serial" (Context.get_values ctx_w0 wc0.Tensor.value) in
-    let%op wc1 = wa * wb in
-    let width_schedule (opt : LL.optimized) : Sched.schedule =
-      let paths = Ll_test.nest_paths opt.LL.llc in
-      let i, j, k =
-        match List.find_exn paths ~f:(fun p -> List.length p = 3) with
-        | [ i; j; k ] -> (i, j, k)
-        | _ -> assert false
-      in
-      let ez, zsyms = Sched.expand_zero ~tn:wc1.Tensor.value in
-      let zj = match zsyms with [ _; zj ] -> zj | _ -> assert false in
-      let rz = Sched.Retype { axis = zj; ty = LL.Workgroup } in
-      let tz, _lane = Sched.tensorize ~i ~j ~k ~simd_width:wj () in
-      [ ez; rz; tz ]
-    in
-    let transform_w opt = Sched.apply (width_schedule opt) opt in
-    let ctx_w = Context.auto () in
-    let ctx_w, routine_w =
-      Context.compile
-        ~lowered_transform:(fun o -> [ transform_w o ])
-        ctx_w
-        (named "mm_width_mma" (Train.forward wc1))
-        Ir.Indexing.Empty
-    in
-    let ctx_w = Context.run ctx_w routine_w in
-    let got_width = Context.get_values ctx_w wc1.Tensor.value in
-    p_all2 "extent-adapted tensorized matmul matches the serial twin bitwise" got_width
-      got_width_serial ~f:Float.equal;
-    let src = Generated.read "mm_width_mma" in
-    let has s = String.is_substring src ~substring:s in
-    p "extent-adapted geometry covers the column extent with vector tiles"
-      (Ll_test.all_rendered ~what:"extent-adapted" Ir.C_syntax.Mma_register_tiled
-         (renderings routine_w)
-      && has (full_blocks ~m:wi ~n:wj (default_coverage ~m:wi ~n:wj))
-      && not (has "tmma_acc__")))
-  else (
-    skipped "extent-adapted tensorized matmul matches the serial twin bitwise";
-    skipped "extent-adapted geometry covers the column extent with vector tiles");
+  let wi = 8 and wk = 8 and wj = 40 in
+  (* Both operands must vary with BOTH their axes or the oracle stops discriminating: a modulus
+     dividing the row stride makes every reduction row identical, and a mis-indexed k read then
+     still matches the serial twin (Codex P1 on PR #357). 11 and 13 are coprime to the strides (8
+     and 40), so all 8 rows and all 8 columns of each operand differ — and so do all 8 rows of the
+     product, whose columns take 13 distinct values, more than any tile width in play. The values
+     stay exactly representable (multiples of 1/32 throughout). *)
+  let width =
+    lazy
+      (let wav =
+         Array.init (wi * wk)
+           ~f:(Ll_test.cycle_flat ~dims:[| wi; wk |] ~modulus:11 ~offset:0. ~stride:0.125)
+       in
+       let wbv =
+         Array.init (wk * wj)
+           ~f:(Ll_test.cycle_flat ~dims:[| wk; wj |] ~modulus:13 ~offset:(-6.) ~stride:0.25)
+       in
+       let wa = TDSL.ndarray wav ~label:[ "wa" ] ~input_dims:[ wk ] ~output_dims:[ wi ] () in
+       let wb = TDSL.ndarray wbv ~label:[ "wb" ] ~input_dims:[ wj ] ~output_dims:[ wk ] () in
+       let%op wc0 = wa * wb in
+       let ctx_w0 = Context.auto () in
+       let ctx_w0, routine_w0 =
+         Context.compile
+           ~lowered_transform:(fun opt -> [ opt ])
+           ctx_w0
+           (named "mm_width_serial" (Train.forward wc0))
+           Ir.Indexing.Empty
+       in
+       let ctx_w0 = Context.run ctx_w0 routine_w0 in
+       let got_width_serial =
+         nonzero "mm_width_serial" (Context.get_values ctx_w0 wc0.Tensor.value)
+       in
+       let%op wc1 = wa * wb in
+       let width_schedule (opt : LL.optimized) : Sched.schedule =
+         let paths = Ll_test.nest_paths opt.LL.llc in
+         let i, j, k =
+           match List.find_exn paths ~f:(fun p -> List.length p = 3) with
+           | [ i; j; k ] -> (i, j, k)
+           | _ -> assert false
+         in
+         let ez, zsyms = Sched.expand_zero ~tn:wc1.Tensor.value in
+         let zj = match zsyms with [ _; zj ] -> zj | _ -> assert false in
+         let rz = Sched.Retype { axis = zj; ty = LL.Workgroup } in
+         let tz, _lane = Sched.tensorize ~i ~j ~k ~simd_width:wj () in
+         [ ez; rz; tz ]
+       in
+       let transform_w opt = Sched.apply (width_schedule opt) opt in
+       let ctx_w = Context.auto () in
+       let ctx_w, routine_w =
+         Context.compile
+           ~lowered_transform:(fun o -> [ transform_w o ])
+           ctx_w
+           (named "mm_width_mma" (Train.forward wc1))
+           Ir.Indexing.Empty
+       in
+       let ctx_w = Context.run ctx_w routine_w in
+       (Context.get_values ctx_w wc1.Tensor.value, got_width_serial, routine_w))
+  in
+  in_leg ~leg:cpu_leg "extent-adapted tensorized matmul matches the serial twin bitwise"
+    (fun label ->
+      let got_width, got_width_serial, _ = Lazy.force width in
+      p_all2 label got_width got_width_serial ~f:Float.equal);
+  in_leg ~leg:cpu_leg "extent-adapted geometry covers the column extent with vector tiles"
+    (fun label ->
+      let _, _, routine_w = Lazy.force width in
+      let src = Generated.read "mm_width_mma" in
+      let has s = String.is_substring src ~substring:s in
+      p label
+        (Ll_test.all_rendered ~what:"extent-adapted" Ir.C_syntax.Mma_register_tiled
+           (renderings routine_w)
+        && has (full_blocks ~m:wi ~n:wj (default_coverage ~m:wi ~n:wj))
+        && not (has "tmma_acc__")));
 
   (* --- Single rounding of the accumulator update (gh-ocannl-614). Every other f32 leg here feeds
      exactly-representable products, so it cannot tell a fused update from a multiply and an add:
@@ -1514,86 +1554,91 @@ let () =
      while the tile -- and its fallback -- compute the fused chain whatever the licence. So the leg
      compiles both routines under [fp_contract], which is what "the serial twin's fused chain"
      means. --- *)
-  if not on_gpu then (
-    let contract_var = "OCANNL_FP_CONTRACT" in
-    let previous_contract = Stdlib.Sys.getenv_opt contract_var in
-    Unix.putenv contract_var "true";
-    let fi = 8 and fk = 32 and fj = 32 in
-    (* Full-mantissa operands: each product needs more bits than f32 carries, so fma and mul-add
-       differ, and both vary with both axes (69 and 53 are coprime to the strides). *)
-    let fav =
-      Array.init (fi * fk) ~f:(fun x ->
-          1.0 +. Ll_test.cycle_flat ~dims:[| fi; fk |] ~modulus:69 ~offset:3. ~stride:0x1p-18 x)
-    in
-    let fbv =
-      Array.init (fk * fj) ~f:(fun x ->
-          -1.0 -. Ll_test.cycle_flat ~dims:[| fk; fj |] ~modulus:53 ~offset:5. ~stride:0x1p-17 x)
-    in
-    let fa = TDSL.ndarray fav ~label:[ "fua" ] ~input_dims:[ fk ] ~output_dims:[ fi ] () in
-    let fb = TDSL.ndarray fbv ~label:[ "fub" ] ~input_dims:[ fj ] ~output_dims:[ fk ] () in
-    let%op fc0 = fa * fb in
-    let ctx_f0 = Context.auto () in
-    let ctx_f0, routine_f0 =
-      Context.compile
-        ~lowered_transform:(fun opt -> [ opt ])
-        ctx_f0
-        (named "mm_fused_serial" (Train.forward fc0))
-        Ir.Indexing.Empty
-    in
-    let ctx_f0 = Context.run ctx_f0 routine_f0 in
-    let want_fused = nonzero "mm_fused_serial" (Context.get_values ctx_f0 fc0.Tensor.value) in
-    let%op fc1 = fa * fb in
-    let fused_schedule (opt : LL.optimized) : Sched.schedule =
-      let paths = Ll_test.nest_paths opt.LL.llc in
-      let i, j, k =
-        match List.find_exn paths ~f:(fun p -> List.length p = 3) with
-        | [ i; j; k ] -> (i, j, k)
-        | _ -> assert false
-      in
-      let ez, zsyms = Sched.expand_zero ~tn:fc1.Tensor.value in
-      let zj = match zsyms with [ _; zj ] -> zj | _ -> assert false in
-      let rz = Sched.Retype { axis = zj; ty = LL.Workgroup } in
-      let tz, _lane = Sched.tensorize ~i ~j ~k ~simd_width:fj () in
-      [ ez; rz; tz ]
-    in
-    let transform_f opt = Sched.apply (fused_schedule opt) opt in
-    let ctx_f = Context.auto () in
-    let ctx_f, routine_f =
-      Context.compile
-        ~lowered_transform:(fun o -> [ transform_f o ])
-        ctx_f
-        (named "mm_fused_mma" (Train.forward fc1))
-        Ir.Indexing.Empty
-    in
-    let ctx_f = Context.run ctx_f routine_f in
-    let got_fused = Context.get_values ctx_f fc1.Tensor.value in
-    (* Inexact by construction — each operand carries ~19 mantissa bits, so their product needs ~37
-       and f32 holds 24 — but checked rather than asserted: were the products exactly representable
-       this leg would silently duplicate the first one, which cannot see a rounding difference. *)
-    let inexact_in_f32 x = Float.(Int32.float_of_bits (Int32.bits_of_float x) <> x) in
-    p_all "full-mantissa products are inexact in f32"
-      (List.range 0 (fi * fk))
-      ~f:(fun x -> inexact_in_f32 (fav.(x) *. fbv.(x % (fk * fj))));
-    p_all2 "full-mantissa tensorized matmul matches the serial twin bitwise" got_fused want_fused
-      ~f:Float.equal;
-    let src = Generated.read "mm_fused_mma" in
-    let has s = String.is_substring src ~substring:s in
-    p "register tiling offers a whole-vector fused accumulator update"
-      (Ll_test.all_rendered ~what:"full-mantissa" Ir.C_syntax.Mma_register_tiled
-         (renderings routine_f)
-      && has "__builtin_elementwise_fma"
-      (* The gcc arm: a whole-vector builtin, not the per-lane subscripted loop the spill lives in.
-         Every arm is emitted target-independently, behind an [#elif] — which one carries the x86
-         builtin depends on the machine's lane count ([__FMA__] at 4 and 8 lanes, [__AVX512F__] at
-         16), so the pin is that an x86 whole-vector arm exists at this width, not how its guard
-         reads. *)
-      && has "#elif "
-      && has "__builtin_ia32_vfmadd");
-    Unix.putenv contract_var (Option.value previous_contract ~default:""))
-  else (
-    skipped "full-mantissa products are inexact in f32";
-    skipped "full-mantissa tensorized matmul matches the serial twin bitwise";
-    skipped "register tiling offers a whole-vector fused accumulator update");
+  let fi = 8 and fk = 32 and fj = 32 in
+  let fused =
+    lazy
+      (let contract_var = "OCANNL_FP_CONTRACT" in
+       let previous_contract = Stdlib.Sys.getenv_opt contract_var in
+       Unix.putenv contract_var "true";
+       (* Full-mantissa operands: each product needs more bits than f32 carries, so fma and mul-add
+          differ, and both vary with both axes (69 and 53 are coprime to the strides). *)
+       let fav =
+         Array.init (fi * fk) ~f:(fun x ->
+             1.0 +. Ll_test.cycle_flat ~dims:[| fi; fk |] ~modulus:69 ~offset:3. ~stride:0x1p-18 x)
+       in
+       let fbv =
+         Array.init (fk * fj) ~f:(fun x ->
+             -1.0 -. Ll_test.cycle_flat ~dims:[| fk; fj |] ~modulus:53 ~offset:5. ~stride:0x1p-17 x)
+       in
+       let fa = TDSL.ndarray fav ~label:[ "fua" ] ~input_dims:[ fk ] ~output_dims:[ fi ] () in
+       let fb = TDSL.ndarray fbv ~label:[ "fub" ] ~input_dims:[ fj ] ~output_dims:[ fk ] () in
+       let%op fc0 = fa * fb in
+       let ctx_f0 = Context.auto () in
+       let ctx_f0, routine_f0 =
+         Context.compile
+           ~lowered_transform:(fun opt -> [ opt ])
+           ctx_f0
+           (named "mm_fused_serial" (Train.forward fc0))
+           Ir.Indexing.Empty
+       in
+       let ctx_f0 = Context.run ctx_f0 routine_f0 in
+       let want_fused = nonzero "mm_fused_serial" (Context.get_values ctx_f0 fc0.Tensor.value) in
+       let%op fc1 = fa * fb in
+       let fused_schedule (opt : LL.optimized) : Sched.schedule =
+         let paths = Ll_test.nest_paths opt.LL.llc in
+         let i, j, k =
+           match List.find_exn paths ~f:(fun p -> List.length p = 3) with
+           | [ i; j; k ] -> (i, j, k)
+           | _ -> assert false
+         in
+         let ez, zsyms = Sched.expand_zero ~tn:fc1.Tensor.value in
+         let zj = match zsyms with [ _; zj ] -> zj | _ -> assert false in
+         let rz = Sched.Retype { axis = zj; ty = LL.Workgroup } in
+         let tz, _lane = Sched.tensorize ~i ~j ~k ~simd_width:fj () in
+         [ ez; rz; tz ]
+       in
+       let transform_f opt = Sched.apply (fused_schedule opt) opt in
+       let ctx_f = Context.auto () in
+       let ctx_f, routine_f =
+         Context.compile
+           ~lowered_transform:(fun o -> [ transform_f o ])
+           ctx_f
+           (named "mm_fused_mma" (Train.forward fc1))
+           Ir.Indexing.Empty
+       in
+       let ctx_f = Context.run ctx_f routine_f in
+       let got_fused = Context.get_values ctx_f fc1.Tensor.value in
+       Unix.putenv contract_var (Option.value previous_contract ~default:"");
+       (fav, fbv, got_fused, want_fused, routine_f))
+  in
+  (* Inexact by construction — each operand carries ~19 mantissa bits, so their product needs ~37
+     and f32 holds 24 — but checked rather than asserted: were the products exactly representable
+     this leg would silently duplicate the first one, which cannot see a rounding difference. *)
+  in_leg ~leg:cpu_leg "full-mantissa products are inexact in f32" (fun label ->
+      let fav, fbv, _, _, _ = Lazy.force fused in
+      let inexact_in_f32 x = Float.(Int32.float_of_bits (Int32.bits_of_float x) <> x) in
+      p_all label
+        (List.range 0 (fi * fk))
+        ~f:(fun x -> inexact_in_f32 (fav.(x) *. fbv.(x % (fk * fj)))));
+  in_leg ~leg:cpu_leg "full-mantissa tensorized matmul matches the serial twin bitwise"
+    (fun label ->
+      let _, _, got_fused, want_fused, _ = Lazy.force fused in
+      p_all2 label got_fused want_fused ~f:Float.equal);
+  in_leg ~leg:cpu_leg "register tiling offers a whole-vector fused accumulator update" (fun label ->
+      let _, _, _, _, routine_f = Lazy.force fused in
+      let src = Generated.read "mm_fused_mma" in
+      let has s = String.is_substring src ~substring:s in
+      p label
+        (Ll_test.all_rendered ~what:"full-mantissa" Ir.C_syntax.Mma_register_tiled
+           (renderings routine_f)
+        && has "__builtin_elementwise_fma"
+        (* The gcc arm: a whole-vector builtin, not the per-lane subscripted loop the spill lives
+           in. Every arm is emitted target-independently, behind an [#elif] — which one carries the
+           x86 builtin depends on the machine's lane count ([__FMA__] at 4 and 8 lanes,
+           [__AVX512F__] at 16), so the pin is that an x86 whole-vector arm exists at this width,
+           not how its guard reads. *)
+        && has "#elif "
+        && has "__builtin_ia32_vfmadd"));
 
   (* --- The staged + tensorized composition (lane-aware Stage): shared tiles for ma and mb,
      cooperatively loaded under fresh extent-32 Workgroup lane loops, then the micro-kernel
@@ -1663,72 +1708,25 @@ let () =
       (staged_schedule ~out:mc3.Tensor.value ~src_a:ma.Tensor.value ~src_b:mb.Tensor.value opt)
       opt
   in
+  let gpu_leg = Verdict.leg ~when_:on_gpu ~on:backend_name () in
   let ctx_c = Context.auto () in
-  if on_gpu then (
-    let ctx_c, routine_c =
-      Context.compile
-        ~lowered_transform:(fun o -> [ staged_transform o ])
-        ctx_c staged_comp Ir.Indexing.Empty
-    in
-    let ctx_c = Context.run ctx_c routine_c in
-    let got_staged = Context.get_values ctx_c mc3.Tensor.value in
-    p_close "staged+tensorized matmul parity (GPU) or clean rejection (CPU)" got_staged got_serial
-      ~tol:approx_tol;
-    let src = Generated.read "mm_staged_mma" in
-    let has s = String.is_substring src ~substring:s in
-    let count_sub sub =
-      String.substr_index_all src ~may_overlap:false ~pattern:sub |> List.length
-    in
-    let f32 = Ir.Ops.single in
-    let ok =
-      (* Metal's f32 tile is advertised; CUDA's wmma and HIP's rocWMMA decline uniform f32. *)
-      census_agrees_with_capability ~what:"staged f32" ~a_prec:f32 ~b_prec:f32 ~d_prec:f32
-        (renderings routine_c)
-      &&
-      if on_metal then
-        (* Two shared tiles cooperatively loaded, the mma reading them from threadgroup memory; the
-           ma tile's partial-width load keeps its [lane < 8] guard. The marked accumulator fragment
-           is loaded before the serial [k_o] body and stored after it; the body itself contains
-           update-only MMA calls (gh-ocannl-480). *)
-        let body_begin = "/* simdgroup fragment reduction body begins */" in
-        let body_end = "/* simdgroup fragment reduction body ends */" in
-        let fragment_load = "simdgroup_load(__mma_fragment_" in
-        let fragment_store = "simdgroup_store(__mma_fragment_" in
-        let resident =
-          match
-            ( String.substr_index src ~pattern:fragment_load,
-              String.substr_index src ~pattern:body_begin,
-              String.substr_index src ~pattern:body_end,
-              String.substr_index src ~pattern:fragment_store )
-          with
-          | Some load, Some beg, Some fin, Some store when load < beg && beg < fin && fin < store ->
-              let reduction_body = String.sub src ~pos:beg ~len:(fin - beg) in
-              let update = "/* tile_mma fragment update" in
-              let barrier = "threadgroup_barrier(mem_flags::mem_threadgroup);" in
-              let update_has_trailing_barrier =
-                match String.substr_index reduction_body ~pattern:update with
-                | Some update_pos ->
-                    String.is_substring
-                      (String.drop_prefix reduction_body update_pos)
-                      ~substring:barrier
-                | None -> false
-              in
-              (not (String.is_substring reduction_body ~substring:fragment_load))
-              && (not (String.is_substring reduction_body ~substring:fragment_store))
-              && update_has_trailing_barrier
-          | _ -> false
-        in
-        count_sub ("threadgroup float " ^ Generated.node_ident "tile_") = 2
-        && has "simdgroup_multiply_accumulate"
-        && has "threadgroup_barrier" && has "tile_mma fragment update" && resident
-        && not (has ("float " ^ Generated.node_ident "fragment_"))
-      else
-        (* CUDA/HIP: the shared tiles, read by the scalar fallback. *)
-        count_sub ("__shared__ float " ^ Generated.node_ident "tile_") = 2 && has "__syncthreads()"
-    in
-    p "staged+tensorized structure as expected" ok)
-  else (
-    (match
+  let staged_gpu =
+    lazy
+      (let ctx_c, routine_c =
+         Context.compile
+           ~lowered_transform:(fun o -> [ staged_transform o ])
+           ctx_c staged_comp Ir.Indexing.Empty
+       in
+       let ctx_c = Context.run ctx_c routine_c in
+       let got_staged = Context.get_values ctx_c mc3.Tensor.value in
+       (got_staged, routine_c))
+  in
+  (if on_gpu then
+     p_close "staged+tensorized matmul parity (GPU) or clean rejection (CPU)"
+       (fst (Lazy.force staged_gpu))
+       got_serial ~tol:approx_tol
+   else
+     match
        try
          ignore
            (Context.compile
@@ -1738,11 +1736,67 @@ let () =
          None
        with Invalid_argument msg -> Some msg
      with
-    | Some msg ->
-        p "staged+tensorized matmul parity (GPU) or clean rejection (CPU)"
-          (String.is_substring msg ~substring:"not supported")
-    | None -> p "staged+tensorized matmul parity (GPU) or clean rejection (CPU)" false);
-    skipped "staged+tensorized structure as expected");
+     | Some msg ->
+         p "staged+tensorized matmul parity (GPU) or clean rejection (CPU)"
+           (String.is_substring msg ~substring:"not supported")
+     | None -> p "staged+tensorized matmul parity (GPU) or clean rejection (CPU)" false);
+  in_leg ~leg:gpu_leg "staged+tensorized structure as expected" (fun label ->
+      let _, routine_c = Lazy.force staged_gpu in
+      let src = Generated.read "mm_staged_mma" in
+      let has s = String.is_substring src ~substring:s in
+      let count_sub sub =
+        String.substr_index_all src ~may_overlap:false ~pattern:sub |> List.length
+      in
+      let f32 = Ir.Ops.single in
+      let ok =
+        (* Metal's f32 tile is advertised; CUDA's wmma and HIP's rocWMMA decline uniform f32. *)
+        census_agrees_with_capability ~what:"staged f32" ~a_prec:f32 ~b_prec:f32 ~d_prec:f32
+          (renderings routine_c)
+        &&
+        if on_metal then
+          (* Two shared tiles cooperatively loaded, the mma reading them from threadgroup memory;
+             the ma tile's partial-width load keeps its [lane < 8] guard. The marked accumulator
+             fragment is loaded before the serial [k_o] body and stored after it; the body itself
+             contains update-only MMA calls (gh-ocannl-480). *)
+          let body_begin = "/* simdgroup fragment reduction body begins */" in
+          let body_end = "/* simdgroup fragment reduction body ends */" in
+          let fragment_load = "simdgroup_load(__mma_fragment_" in
+          let fragment_store = "simdgroup_store(__mma_fragment_" in
+          let resident =
+            match
+              ( String.substr_index src ~pattern:fragment_load,
+                String.substr_index src ~pattern:body_begin,
+                String.substr_index src ~pattern:body_end,
+                String.substr_index src ~pattern:fragment_store )
+            with
+            | Some load, Some beg, Some fin, Some store when load < beg && beg < fin && fin < store
+              ->
+                let reduction_body = String.sub src ~pos:beg ~len:(fin - beg) in
+                let update = "/* tile_mma fragment update" in
+                let barrier = "threadgroup_barrier(mem_flags::mem_threadgroup);" in
+                let update_has_trailing_barrier =
+                  match String.substr_index reduction_body ~pattern:update with
+                  | Some update_pos ->
+                      String.is_substring
+                        (String.drop_prefix reduction_body update_pos)
+                        ~substring:barrier
+                  | None -> false
+                in
+                (not (String.is_substring reduction_body ~substring:fragment_load))
+                && (not (String.is_substring reduction_body ~substring:fragment_store))
+                && update_has_trailing_barrier
+            | _ -> false
+          in
+          count_sub ("threadgroup float " ^ Generated.node_ident "tile_") = 2
+          && has "simdgroup_multiply_accumulate"
+          && has "threadgroup_barrier" && has "tile_mma fragment update" && resident
+          && not (has ("float " ^ Generated.node_ident "fragment_"))
+        else
+          (* CUDA/HIP: the shared tiles, read by the scalar fallback. *)
+          count_sub ("__shared__ float " ^ Generated.node_ident "tile_") = 2
+          && has "__syncthreads()"
+      in
+      p label ok);
 
   (* --- The staged + tensorized composition at half precision, accumulated in f32: the leg that
      pins the cross-[k_o] accumulator residency (gh-ocannl-480) on the tensor-core backends. The f32
@@ -1755,53 +1809,58 @@ let () =
      with the half serial twin is bitwise on every backend and either rendering path. --- *)
   let%op mchs = mah * mbh in
   Tn.update_prec mchs.Tensor.value Ir.Ops.single;
-  if on_gpu then (
-    let transform_hs opt =
-      Sched.apply
-        (staged_schedule ~out:mchs.Tensor.value ~src_a:mah.Tensor.value ~src_b:mbh.Tensor.value opt)
-        opt
-    in
-    let ctx_d = Context.auto () in
-    let ctx_d, routine_d =
-      Context.compile
-        ~lowered_transform:(fun o -> [ transform_hs o ])
-        ctx_d
-        (named "mm_h_staged_mma" (Train.forward mchs))
-        Ir.Indexing.Empty
-    in
-    let ctx_d = Context.run ctx_d routine_d in
-    let got_h_staged = Context.get_values ctx_d mchs.Tensor.value in
-    (* Parity is bitwise on every backend: wmma, Metal's [simdgroup_matrix] f32 accumulate
-       (gh-ocannl-923) and RDNA3's [v_wmma_f32_16x16x16_f16] all return the exactly-rounded dot
-       product for these f16-exact inputs of one sign. HIP held a tolerance here while [mbh] was
-       signed (observed max abs diff ~1.3e-7, the mixed-sign residue of gh-ocannl-1420), until
-       gh-ocannl-1432 made the inputs nonnegative. *)
-    p_all2 "staged+tensorized half matmul matches the serial twin bitwise" got_h_staged got_h_serial
-      ~f:Float.equal;
-    let src = Generated.read "mm_h_staged_mma" in
-    let has s = String.is_substring src ~substring:s in
-    (* f16 operands with an f32 accumulator: every tensor-core backend renders the marked
-       accumulator as an f32 fragment array resident across [k_o]. On Metal (gh-ocannl-923) the
-       fragment is the destination's own type, so it loads and stores [d] directly — no
-       [ocannl_mma_rc8], which is the wide-f16 arm's conversion. Metal and HIP are verified, so
-       their pins are strict; on CUDA below sm_70, and on HIP without the tile (gh-ocannl-1032), the
-       capability withholds the tile and the census must record the lane-0 fallback instead. *)
-    let half = Ir.Ops.half and single = Ir.Ops.single in
-    let ok =
-      census_agrees_with_capability ~what:"staged half->f32" ~a_prec:half ~b_prec:half
-        ~d_prec:single (renderings routine_d)
-      &&
-      if on_metal then
-        staged_half_resident src
-        && has "simdgroup_float8x8 __mma_fragment_"
-        && has "simdgroup_half8x8 __mma_af"
-        && not (has "ocannl_mma_rc8")
-      else (not (advertised ~a_prec:half ~b_prec:half ~d_prec:single)) || staged_half_resident src
-    in
-    p "staged+tensorized half fragment residency" ok)
-  else (
-    skipped "staged+tensorized half matmul matches the serial twin bitwise";
-    skipped "staged+tensorized half fragment residency");
+  let h_staged =
+    lazy
+      (let transform_hs opt =
+         Sched.apply
+           (staged_schedule ~out:mchs.Tensor.value ~src_a:mah.Tensor.value ~src_b:mbh.Tensor.value
+              opt)
+           opt
+       in
+       let ctx_d = Context.auto () in
+       let ctx_d, routine_d =
+         Context.compile
+           ~lowered_transform:(fun o -> [ transform_hs o ])
+           ctx_d
+           (named "mm_h_staged_mma" (Train.forward mchs))
+           Ir.Indexing.Empty
+       in
+       let ctx_d = Context.run ctx_d routine_d in
+       let got_h_staged = Context.get_values ctx_d mchs.Tensor.value in
+       (got_h_staged, routine_d))
+  in
+  (* Parity is bitwise on every backend: wmma, Metal's [simdgroup_matrix] f32 accumulate
+     (gh-ocannl-923) and RDNA3's [v_wmma_f32_16x16x16_f16] all return the exactly-rounded dot
+     product for these f16-exact inputs of one sign. HIP held a tolerance here while [mbh] was
+     signed (observed max abs diff ~1.3e-7, the mixed-sign residue of gh-ocannl-1420), until
+     gh-ocannl-1432 made the inputs nonnegative. *)
+  in_leg ~leg:gpu_leg "staged+tensorized half matmul matches the serial twin bitwise" (fun label ->
+      let got_h_staged, _ = Lazy.force h_staged in
+      p_all2 label got_h_staged got_h_serial ~f:Float.equal);
+  in_leg ~leg:gpu_leg "staged+tensorized half fragment residency" (fun label ->
+      let _, routine_d = Lazy.force h_staged in
+      let src = Generated.read "mm_h_staged_mma" in
+      let has s = String.is_substring src ~substring:s in
+      (* f16 operands with an f32 accumulator: every tensor-core backend renders the marked
+         accumulator as an f32 fragment array resident across [k_o]. On Metal (gh-ocannl-923) the
+         fragment is the destination's own type, so it loads and stores [d] directly — no
+         [ocannl_mma_rc8], which is the wide-f16 arm's conversion. Metal and HIP are verified, so
+         their pins are strict; on CUDA below sm_70, and on HIP without the tile (gh-ocannl-1032),
+         the capability withholds the tile and the census must record the lane-0 fallback
+         instead. *)
+      let half = Ir.Ops.half and single = Ir.Ops.single in
+      let ok =
+        census_agrees_with_capability ~what:"staged half->f32" ~a_prec:half ~b_prec:half
+          ~d_prec:single (renderings routine_d)
+        &&
+        if on_metal then
+          staged_half_resident src
+          && has "simdgroup_float8x8 __mma_fragment_"
+          && has "simdgroup_half8x8 __mma_af"
+          && not (has "ocannl_mma_rc8")
+        else (not (advertised ~a_prec:half ~b_prec:half ~d_prec:single)) || staged_half_resident src
+      in
+      p label ok);
 
   (* --- The same staged half composition with a uniform-f16 accumulator (gh-ocannl-480): the leg
      that exercises the same-type accumulator fragment element (half, not f32) on every tensor-core
@@ -1810,41 +1869,47 @@ let () =
      --- *)
   let%op mchu = mah * mbh in
   Tn.update_prec mchu.Tensor.value Ir.Ops.half;
-  if on_gpu then (
-    let transform_hu opt =
-      Sched.apply
-        (staged_schedule ~out:mchu.Tensor.value ~src_a:mah.Tensor.value ~src_b:mbh.Tensor.value opt)
-        opt
-    in
-    let ctx_u = Context.auto () in
-    let ctx_u, routine_u =
-      Test_utils.with_fp16_auto (fun () ->
-          Context.compile
-            ~lowered_transform:(fun o -> [ transform_hu o ])
-            ctx_u
-            (named "mm_hu_staged_mma" (Train.forward mchu))
-            Ir.Indexing.Empty)
-    in
-    let ctx_u = Context.run ctx_u routine_u in
-    let got_hu = Context.get_values ctx_u mchu.Tensor.value in
-    p_all2 "staged+tensorized uniform-f16 matmul matches the serial twin bitwise" got_hu
-      got_h_serial ~f:Float.equal;
-    let src = Generated.read "mm_hu_staged_mma" in
-    (* Uniform f16->f16 is a valid combination on all three tensor-core backends, so the accumulator
-       fragment stays resident across [k_o] on each where the capability advertises the tile; where
-       it withholds it (pre-Apple7, pre-sm_70, HIP without the tile) the census must record the
-       lane-0 fallback. Read under the policy the leg compiled with. *)
-    let half = Ir.Ops.half in
-    let ok =
-      Test_utils.with_fp16_auto (fun () ->
-          census_agrees_with_capability ~what:"staged uniform-f16" ~a_prec:half ~b_prec:half
-            ~d_prec:half (renderings routine_u)
-          && ((not (advertised ~a_prec:half ~b_prec:half ~d_prec:half)) || staged_half_resident src))
-    in
-    p "staged+tensorized uniform-f16 fragment residency" ok)
-  else (
-    skipped "staged+tensorized uniform-f16 matmul matches the serial twin bitwise";
-    skipped "staged+tensorized uniform-f16 fragment residency");
+  let hu_staged =
+    lazy
+      (let transform_hu opt =
+         Sched.apply
+           (staged_schedule ~out:mchu.Tensor.value ~src_a:mah.Tensor.value ~src_b:mbh.Tensor.value
+              opt)
+           opt
+       in
+       let ctx_u = Context.auto () in
+       let ctx_u, routine_u =
+         Test_utils.with_fp16_auto (fun () ->
+             Context.compile
+               ~lowered_transform:(fun o -> [ transform_hu o ])
+               ctx_u
+               (named "mm_hu_staged_mma" (Train.forward mchu))
+               Ir.Indexing.Empty)
+       in
+       let ctx_u = Context.run ctx_u routine_u in
+       let got_hu = Context.get_values ctx_u mchu.Tensor.value in
+       (got_hu, routine_u))
+  in
+  in_leg ~leg:gpu_leg "staged+tensorized uniform-f16 matmul matches the serial twin bitwise"
+    (fun label ->
+      let got_hu, _ = Lazy.force hu_staged in
+      p_all2 label got_hu got_h_serial ~f:Float.equal);
+  in_leg ~leg:gpu_leg "staged+tensorized uniform-f16 fragment residency" (fun label ->
+      let _, routine_u = Lazy.force hu_staged in
+      let src = Generated.read "mm_hu_staged_mma" in
+      (* Uniform f16->f16 is a valid combination on all three tensor-core backends, so the
+         accumulator fragment stays resident across [k_o] on each where the capability advertises
+         the tile; where it withholds it (pre-Apple7, pre-sm_70, HIP without the tile) the census
+         must record the lane-0 fallback. Read under the policy the leg compiled with. *)
+      let half = Ir.Ops.half in
+      let ok =
+        Test_utils.with_fp16_auto (fun () ->
+            census_agrees_with_capability ~what:"staged uniform-f16" ~a_prec:half ~b_prec:half
+              ~d_prec:half (renderings routine_u)
+            && ((not (advertised ~a_prec:half ~b_prec:half ~d_prec:half))
+               || staged_half_resident src))
+      in
+      p label ok);
 
   (* --- Staged uniform-f16 under [Numerics.Fp16_wide] (HIP: gh-ocannl-789; Metal: gh-ocannl-837;
      CUDA wmma: gh-ocannl-925): this EXECUTES the converted [d] boundary in the FRAGMENT scope,
@@ -1859,84 +1924,91 @@ let () =
      this composition rendered it once per [k_o] block and read 2048 — the fragment scope is wmma's
      f32 accumulator fragments behind the table-addressed element conversion, where the device
      advertises it (sm_80+). --- *)
-  let claim_fw_value =
-    "staged+tensorized Fp16_wide matmul equals the once-narrowed wide reference bitwise"
-  in
-  let claim_fw_struct = "staged+tensorized Fp16_wide fragment residency converts d once" in
-  if on_metal || (on_hip && Lazy.force hip_mma) || Lazy.force cuda_f16_wide_fragment then (
-    let kw = 144 in
-    let fwsa =
-      NTDSL.init ~l:"fwsa" ~prec:Ir.Ops.half ~i:[ kw ] ~o:[ n ]
-        ~f:(fun idcs -> if idcs.(1) % bm = 0 then 1. else 0.)
-        ()
-    in
-    let fwsb =
-      NTDSL.init ~l:"fwsb" ~prec:Ir.Ops.half ~i:[ n ] ~o:[ kw ]
-        ~f:(fun idcs -> if idcs.(0) % bm <> 0 then 0. else if idcs.(0) = 0 then 2048. else 1.)
-        ()
-    in
-    Numerics.set_policy { saved_policy with fp16_arithmetic = Numerics.Fp16_wide };
-    let%op mchfw = fwsa * fwsb in
-    Tn.update_prec mchfw.Tensor.value Ir.Ops.half;
-    let transform_fw opt =
-      Sched.apply
-        (staged_schedule ~out:mchfw.Tensor.value ~src_a:fwsa.Tensor.value ~src_b:fwsb.Tensor.value
-           opt)
-        opt
-    in
-    let ctx_fw = Context.auto () in
-    let ctx_fw, routine_fw =
-      Context.compile
-        ~lowered_transform:(fun o -> [ transform_fw o ])
-        ctx_fw
-        (named "mm_huw_staged_mma" (Train.forward mchfw))
-        Ir.Indexing.Empty
-    in
-    let census_fw = renderings routine_fw in
-    let ctx_fw = Context.run ctx_fw routine_fw in
-    let got_fw = Context.get_values ctx_fw mchfw.Tensor.value in
-    Numerics.set_policy saved_policy;
-    Stdio.eprintf
-      "schedule_mma_matmul: staged Fp16_wide k=144 cell 0 on %s: %g (not part of the golden)\n%!"
-      backend_name got_fw.(0);
-    p_all claim_fw_value (Array.to_list got_fw) ~f:(Float.equal 2056.);
-    let src = Generated.read "mm_huw_staged_mma" in
-    let has s = String.is_substring src ~substring:s in
-    p claim_fw_struct
-      (Ll_test.all_rendered ~what:"staged Fp16_wide" Ir.C_syntax.Mma_intrinsics census_fw
-      && staged_half_resident ~converted_d:true src
-      &&
-      if on_metal then metal_table_boundary ~acc:"__mma_fragment_" src && has "simdgroup_half8x8"
-      else if on_hip then hip_table_boundary ~acc:"__mma_fragment_" src
-      else
-        (* The f32 fragment array, the half operand fragments, and the table-addressed boundary —
-           which must also be the only [d] traffic: no fragment load or store of [__mma_dp] (that
-           would be a type-punned copy) and no inline-PTX arm (that would be the per-[k_o] rendering
-           this leg replaces). The census above rules out the lane-0 fallback. *)
-        has (wmma_f32_acc ^ " __mma_fragment_")
-        && has "matrix_a, 16, 16, 16, __half"
-        && has "load_matrix_sync(__mma_rc, ocannl_wmma_rc16, 16"
-        && has "__device__ __align__(32) float ocannl_wmma_rc16[256]"
-        && (not (has "load_matrix_sync(__mma_fragment_"))
-        && (not (has "store_matrix_sync(__mma_dp"))
-        && not (has "mma.sync.aligned")))
-  else (
-    (* gh-ocannl-1032: on HIP this leg's whole subject is the converted [d] boundary in the FRAGMENT
-       scope, which exists only where a tensor unit does. With no advertised tile-MMA the
-       composition declines to the scalar fallback, which has no accumulator fragment to convert —
-       there is no weaker claim here to keep, only an honest skip.
+  (* gh-ocannl-1032: on HIP this leg's whole subject is the converted [d] boundary in the FRAGMENT
+     scope, which exists only where a tensor unit does. With no advertised tile-MMA the composition
+     declines to the scalar fallback, which has no accumulator fragment to convert — there is no
+     weaker claim here to keep, only an honest skip.
 
-       The ORDINARY backend skip, not `Environment`, even though the reason on this fleet's boxes is
-       the host's rocWMMA provisioning. [mma_supported] is a conjunction — an RDNA3+/wave32 device
-       AND the headers — and [hardware_limits] reports only its result, so from here the two are
-       indistinguishable: on a CDNA gfx9 wave64 box the leg is withdrawn by the DEVICE, which is
-       backend coverage this hardware can never have rather than a host condition a sweep should
-       aggregate away. Telling them apart would mean restating the device predicate the backend
-       owns, and the only thing it would buy is a label. `Backend` is the conservative reading of
-       the two (Verdict's contract already lets an `Environment` mark elsewhere carry same-key
-       `Backend` skips), and the host half is reported anyway, by name, in the note above. *)
-    skipped claim_fw_value;
-    skipped claim_fw_struct);
+     The ORDINARY backend skip, not `Environment`, even though the reason on this fleet's boxes is
+     the host's rocWMMA provisioning. [mma_supported] is a conjunction — an RDNA3+/wave32 device AND
+     the headers — and [hardware_limits] reports only its result, so from here the two are
+     indistinguishable: on a CDNA gfx9 wave64 box the leg is withdrawn by the DEVICE, which is
+     backend coverage this hardware can never have rather than a host condition a sweep should
+     aggregate away. Telling them apart would mean restating the device predicate the backend owns,
+     and the only thing it would buy is a label. `Backend` is the conservative reading of the two
+     (Verdict's contract already lets an `Environment` mark elsewhere carry same-key `Backend`
+     skips), and the host half is reported anyway, by name, in the note above. *)
+  let fw_leg =
+    Verdict.leg
+      ~when_:(on_metal || (on_hip && Lazy.force hip_mma) || Lazy.force cuda_f16_wide_fragment)
+      ~on:backend_name ()
+  in
+  let fw =
+    lazy
+      (let kw = 144 in
+       let fwsa =
+         NTDSL.init ~l:"fwsa" ~prec:Ir.Ops.half ~i:[ kw ] ~o:[ n ]
+           ~f:(fun idcs -> if idcs.(1) % bm = 0 then 1. else 0.)
+           ()
+       in
+       let fwsb =
+         NTDSL.init ~l:"fwsb" ~prec:Ir.Ops.half ~i:[ n ] ~o:[ kw ]
+           ~f:(fun idcs -> if idcs.(0) % bm <> 0 then 0. else if idcs.(0) = 0 then 2048. else 1.)
+           ()
+       in
+       Numerics.set_policy { saved_policy with fp16_arithmetic = Numerics.Fp16_wide };
+       let%op mchfw = fwsa * fwsb in
+       Tn.update_prec mchfw.Tensor.value Ir.Ops.half;
+       let transform_fw opt =
+         Sched.apply
+           (staged_schedule ~out:mchfw.Tensor.value ~src_a:fwsa.Tensor.value
+              ~src_b:fwsb.Tensor.value opt)
+           opt
+       in
+       let ctx_fw = Context.auto () in
+       let ctx_fw, routine_fw =
+         Context.compile
+           ~lowered_transform:(fun o -> [ transform_fw o ])
+           ctx_fw
+           (named "mm_huw_staged_mma" (Train.forward mchfw))
+           Ir.Indexing.Empty
+       in
+       let census_fw = renderings routine_fw in
+       let ctx_fw = Context.run ctx_fw routine_fw in
+       let got_fw = Context.get_values ctx_fw mchfw.Tensor.value in
+       Numerics.set_policy saved_policy;
+       Stdio.eprintf
+         "schedule_mma_matmul: staged Fp16_wide k=144 cell 0 on %s: %g (not part of the golden)\n%!"
+         backend_name got_fw.(0);
+       (got_fw, census_fw))
+  in
+  in_leg ~leg:fw_leg
+    "staged+tensorized Fp16_wide matmul equals the once-narrowed wide reference bitwise"
+    (fun label ->
+      let got_fw, _ = Lazy.force fw in
+      p_all label (Array.to_list got_fw) ~f:(Float.equal 2056.));
+  in_leg ~leg:fw_leg "staged+tensorized Fp16_wide fragment residency converts d once" (fun label ->
+      let _, census_fw = Lazy.force fw in
+      let src = Generated.read "mm_huw_staged_mma" in
+      let has s = String.is_substring src ~substring:s in
+      p label
+        (Ll_test.all_rendered ~what:"staged Fp16_wide" Ir.C_syntax.Mma_intrinsics census_fw
+        && staged_half_resident ~converted_d:true src
+        &&
+        if on_metal then metal_table_boundary ~acc:"__mma_fragment_" src && has "simdgroup_half8x8"
+        else if on_hip then hip_table_boundary ~acc:"__mma_fragment_" src
+        else
+          (* The f32 fragment array, the half operand fragments, and the table-addressed boundary —
+             which must also be the only [d] traffic: no fragment load or store of [__mma_dp] (that
+             would be a type-punned copy) and no inline-PTX arm (that would be the per-[k_o]
+             rendering this leg replaces). The census above rules out the lane-0 fallback. *)
+          has (wmma_f32_acc ^ " __mma_fragment_")
+          && has "matrix_a, 16, 16, 16, __half"
+          && has "load_matrix_sync(__mma_rc, ocannl_wmma_rc16, 16"
+          && has "__device__ __align__(32) float ocannl_wmma_rc16[256]"
+          && (not (has "load_matrix_sync(__mma_fragment_"))
+          && (not (has "store_matrix_sync(__mma_dp"))
+          && not (has "mma.sync.aligned")));
 
   (* --- f16 operands into f32 STORAGE under the k-split discriminator (gh-ocannl-923), in BOTH
      emission scopes: the unstaged schedule keeps the whole k=144 reduction in one [Tile_mma]
@@ -1966,12 +2038,6 @@ let () =
        discriminates)"
       scope
   in
-  let claim_h32k_direct_struct =
-    "f16->f32 k-split, direct scope: the mixed intrinsic loads and stores d unconverted"
-  in
-  let claim_h32k_staged_struct =
-    "f16->f32 k-split, fragment scope: the f32 fragment stays resident with d unconverted"
-  in
   let kw = 144 in
   let ksa_f idcs = if idcs.(1) % bm = 0 then 1. else 0. in
   let ksb_f idcs = if idcs.(0) % bm <> 0 then 0. else if idcs.(0) = 0 then 2048. else 1. in
@@ -1982,85 +2048,99 @@ let () =
      f32"
     (Ll_test.matmul_products ~m:n ~n ~k:kw ksa_f ksb_f)
     ~f:(Ll_test.exact_partials ~sig_bits:24);
-  if on_metal || Lazy.force cuda_h32_wmma || (on_hip && Lazy.force hip_mma) then (
-    let ksa = NTDSL.init ~l:"h32ksa" ~prec:Ir.Ops.half ~i:[ kw ] ~o:[ n ] ~f:ksa_f () in
-    let ksb = NTDSL.init ~l:"h32ksb" ~prec:Ir.Ops.half ~i:[ n ] ~o:[ kw ] ~f:ksb_f () in
-    let run ~staged ~d_prec ~name =
-      let%op t = ksa * ksb in
-      Tn.update_prec t.Tensor.value d_prec;
-      let transform opt =
-        let out = t.Tensor.value in
-        Sched.apply
-          (if staged then staged_schedule ~out ~src_a:ksa.Tensor.value ~src_b:ksb.Tensor.value opt
-           else mma_schedule ~out opt)
-          opt
-      in
-      let ctx, routine =
-        Context.compile
-          ~lowered_transform:(fun o -> [ transform o ])
-          (Context.auto ())
-          (named name (Train.forward t))
-          Ir.Indexing.Empty
-      in
-      let census = renderings routine in
-      let ctx = Context.run ctx routine in
-      (Array.to_list (Context.get_values ctx t.Tensor.value), census, Generated.read name)
-    in
-    (* The f16 -> f32 arm is policy-independent, so it runs under the ambient policy (the stanza
-       declares OCANNL_FP16_ARITHMETIC); the control pins [Fp16_auto], whose uniform-f16 arm is the
-       narrow one. *)
-    let got_direct, census_direct, src_direct =
-      run ~staged:false ~d_prec:Ir.Ops.single ~name:"mm_h32k_mma"
-    in
-    let got_staged, census_staged, src_staged =
-      run ~staged:true ~d_prec:Ir.Ops.single ~name:"mm_h32k_staged_mma"
-    in
-    Numerics.set_policy { saved_policy with fp16_arithmetic = Numerics.Fp16_auto };
-    let ctl_direct, _, _ = run ~staged:false ~d_prec:Ir.Ops.half ~name:"mm_h16k_mma" in
-    let ctl_staged, _, _ = run ~staged:true ~d_prec:Ir.Ops.half ~name:"mm_h16k_staged_mma" in
-    Numerics.set_policy saved_policy;
-    Stdio.eprintf
-      "schedule_mma_matmul: f16->f32 k-split cell 0: direct %g, fragment %g; f16->f16 control: \
-       direct %g, fragment %g (not part of the golden)\n\
-       %!"
-      (List.hd_exn got_direct) (List.hd_exn got_staged) (List.hd_exn ctl_direct)
-      (List.hd_exn ctl_staged);
-    p_all (claim_h32k_value "direct") got_direct ~f:(Float.equal 2056.);
-    p_all (claim_h32k_value "fragment") got_staged ~f:(Float.equal 2056.);
-    p_none (claim_h32k_control "direct") ctl_direct ~f:(Float.equal 2056.);
-    p_none (claim_h32k_control "fragment") ctl_staged ~f:(Float.equal 2056.);
-    (* Per backend: the f32 accumulator over half operand fragments, and no conversion at [d] —
-       Metal's, CUDA's and HIP's coordinate tables. *)
-    let f32_acc =
-      if on_metal then "simdgroup_float8x8" else if on_hip then rocwmma_f32_acc else wmma_f32_acc
-    in
-    let acc_decl, operand_decl, conversion =
-      if on_metal then
-        ("simdgroup_float8x8 __mma_acc", "simdgroup_half8x8 __mma_af", "ocannl_mma_rc8")
-      else if on_hip then (rocwmma_f32_acc ^ " __mma_acc", rocwmma_f16_a, "ocannl_wmma_rc16")
-      else (wmma_f32_acc ^ " __mma_acc", "matrix_a, 16, 16, 16, __half", "ocannl_wmma_rc16")
-    in
-    (let has s = String.is_substring src_direct ~substring:s in
-     p claim_h32k_direct_struct
-       (Ll_test.all_rendered ~what:"f16->f32 k-split direct" Ir.C_syntax.Mma_intrinsics
-          census_direct
-       && has acc_decl && has operand_decl
-       && not (has conversion)));
-    let has s = String.is_substring src_staged ~substring:s in
-    p claim_h32k_staged_struct
-      (Ll_test.all_rendered ~what:"f16->f32 k-split fragment" Ir.C_syntax.Mma_intrinsics
-         census_staged
-      && staged_half_resident src_staged
-      && has (f32_acc ^ " __mma_fragment_")
-      && has operand_decl
-      && not (has conversion)))
-  else (
-    skipped (claim_h32k_value "direct");
-    skipped (claim_h32k_value "fragment");
-    skipped (claim_h32k_control "direct");
-    skipped (claim_h32k_control "fragment");
-    skipped claim_h32k_direct_struct;
-    skipped claim_h32k_staged_struct);
+  let h32k_leg =
+    Verdict.leg
+      ~when_:(on_metal || Lazy.force cuda_h32_wmma || (on_hip && Lazy.force hip_mma))
+      ~on:backend_name ()
+  in
+  let h32k =
+    lazy
+      (let ksa = NTDSL.init ~l:"h32ksa" ~prec:Ir.Ops.half ~i:[ kw ] ~o:[ n ] ~f:ksa_f () in
+       let ksb = NTDSL.init ~l:"h32ksb" ~prec:Ir.Ops.half ~i:[ n ] ~o:[ kw ] ~f:ksb_f () in
+       let run ~staged ~d_prec ~name =
+         let%op t = ksa * ksb in
+         Tn.update_prec t.Tensor.value d_prec;
+         let transform opt =
+           let out = t.Tensor.value in
+           Sched.apply
+             (if staged then
+                staged_schedule ~out ~src_a:ksa.Tensor.value ~src_b:ksb.Tensor.value opt
+              else mma_schedule ~out opt)
+             opt
+         in
+         let ctx, routine =
+           Context.compile
+             ~lowered_transform:(fun o -> [ transform o ])
+             (Context.auto ())
+             (named name (Train.forward t))
+             Ir.Indexing.Empty
+         in
+         let census = renderings routine in
+         let ctx = Context.run ctx routine in
+         (Array.to_list (Context.get_values ctx t.Tensor.value), census, Generated.read name)
+       in
+       (* The f16 -> f32 arm is policy-independent, so it runs under the ambient policy (the stanza
+          declares OCANNL_FP16_ARITHMETIC); the control pins [Fp16_auto], whose uniform-f16 arm is
+          the narrow one. *)
+       let direct = run ~staged:false ~d_prec:Ir.Ops.single ~name:"mm_h32k_mma" in
+       let staged = run ~staged:true ~d_prec:Ir.Ops.single ~name:"mm_h32k_staged_mma" in
+       Numerics.set_policy { saved_policy with fp16_arithmetic = Numerics.Fp16_auto };
+       let ctl_direct, _, _ = run ~staged:false ~d_prec:Ir.Ops.half ~name:"mm_h16k_mma" in
+       let ctl_staged, _, _ = run ~staged:true ~d_prec:Ir.Ops.half ~name:"mm_h16k_staged_mma" in
+       Numerics.set_policy saved_policy;
+       let got_direct, _, _ = direct and got_staged, _, _ = staged in
+       Stdio.eprintf
+         "schedule_mma_matmul: f16->f32 k-split cell 0: direct %g, fragment %g; f16->f16 control: \
+          direct %g, fragment %g (not part of the golden)\n\
+          %!"
+         (List.hd_exn got_direct) (List.hd_exn got_staged) (List.hd_exn ctl_direct)
+         (List.hd_exn ctl_staged);
+       (direct, staged, ctl_direct, ctl_staged))
+  in
+  in_leg ~leg:h32k_leg (claim_h32k_value "direct") (fun label ->
+      let (got_direct, _, _), _, _, _ = Lazy.force h32k in
+      p_all label got_direct ~f:(Float.equal 2056.));
+  in_leg ~leg:h32k_leg (claim_h32k_value "fragment") (fun label ->
+      let _, (got_staged, _, _), _, _ = Lazy.force h32k in
+      p_all label got_staged ~f:(Float.equal 2056.));
+  in_leg ~leg:h32k_leg (claim_h32k_control "direct") (fun label ->
+      let _, _, ctl_direct, _ = Lazy.force h32k in
+      p_none label ctl_direct ~f:(Float.equal 2056.));
+  in_leg ~leg:h32k_leg (claim_h32k_control "fragment") (fun label ->
+      let _, _, _, ctl_staged = Lazy.force h32k in
+      p_none label ctl_staged ~f:(Float.equal 2056.));
+  (* Per backend: the f32 accumulator over half operand fragments, and no conversion at [d] —
+     Metal's, CUDA's and HIP's coordinate tables. *)
+  let f32_acc =
+    if on_metal then "simdgroup_float8x8" else if on_hip then rocwmma_f32_acc else wmma_f32_acc
+  in
+  let acc_decl, operand_decl, conversion =
+    if on_metal then ("simdgroup_float8x8 __mma_acc", "simdgroup_half8x8 __mma_af", "ocannl_mma_rc8")
+    else if on_hip then (rocwmma_f32_acc ^ " __mma_acc", rocwmma_f16_a, "ocannl_wmma_rc16")
+    else (wmma_f32_acc ^ " __mma_acc", "matrix_a, 16, 16, 16, __half", "ocannl_wmma_rc16")
+  in
+  in_leg ~leg:h32k_leg
+    "f16->f32 k-split, direct scope: the mixed intrinsic loads and stores d unconverted"
+    (fun label ->
+      let (_, census_direct, src_direct), _, _, _ = Lazy.force h32k in
+      let has s = String.is_substring src_direct ~substring:s in
+      p label
+        (Ll_test.all_rendered ~what:"f16->f32 k-split direct" Ir.C_syntax.Mma_intrinsics
+           census_direct
+        && has acc_decl && has operand_decl
+        && not (has conversion)));
+  in_leg ~leg:h32k_leg
+    "f16->f32 k-split, fragment scope: the f32 fragment stays resident with d unconverted"
+    (fun label ->
+      let _, (_, census_staged, src_staged), _, _ = Lazy.force h32k in
+      let has s = String.is_substring src_staged ~substring:s in
+      p label
+        (Ll_test.all_rendered ~what:"f16->f32 k-split fragment" Ir.C_syntax.Mma_intrinsics
+           census_staged
+        && staged_half_resident src_staged
+        && has (f32_acc ^ " __mma_fragment_")
+        && has operand_decl
+        && not (has conversion)));
 
   (* --- Staged uniform-bf16 under [Numerics.Bf16_wide] (gh-ocannl-838): the gh-ocannl-789 k-split
      discriminator at bf16, executing the converted [d] boundary in the FRAGMENT scope. bf16's
@@ -2083,34 +2163,8 @@ let () =
      and a SWIZZLED staged twin — the [ldmatrix]-fed one the autotuner seeds beside the plain one,
      which wmma could not have read — runs the same claims, so the two twins cannot differ in width.
      --- *)
-  let claim_bw_value =
-    "staged+tensorized Bf16_wide matmul equals the once-narrowed wide reference bitwise"
-  in
-  let claim_bw_struct = "staged+tensorized Bf16_wide fragment residency converts d once" in
-  let claim_bw_control =
-    "staged+tensorized default-policy uniform-bf16 matmul narrows between blocks exactly where the \
-     backend keeps bf16 storage residency"
-  in
-  let claim_bw_narrow_control =
-    "staged+tensorized Bf16_narrow uniform-bf16 matmul narrows between blocks exactly where that \
-     mode keeps bf16 storage residency"
-  in
-  let claim_bw_narrow_envelope =
-    "staged+tensorized Bf16_narrow k-split lies between the per-block-narrowed value and one bf16 \
-     ulp more per later block (a known-answer envelope a zeroed output fails)"
-  in
-  let claim_bw_narrow_tensorizes =
-    "on HIP, the staged Bf16_narrow twin tensorizes (the approximate profile's arm)"
-  in
   let claim_bw_discriminates =
     "the k-split inputs discriminate: narrowing per block and once give different bf16 values"
-  in
-  let claim_bw_swz_value =
-    "swizzled staged twin under Bf16_wide and the default policy equals the once-narrowed wide \
-     reference bitwise"
-  in
-  let claim_bw_swz_struct =
-    "swizzled staged twin keeps the same register fragment, fed through ldmatrix"
   in
   let cuda_bf16_wide_fragment =
     match cuda_mma () with
@@ -2135,150 +2189,185 @@ let () =
   let bws_narrow = List.fold bws_block_sums ~init:0. ~f:(fun acc s -> to_bf16 (acc +. s)) in
   let bws_wide = to_bf16 (List.fold bws_block_sums ~init:0. ~f:( +. )) in
   p claim_bw_discriminates Float.(bws_narrow <> bws_wide);
-  if on_metal || (on_hip && Lazy.force hip_mma) || cuda_bf16_wide_fragment then (
-    let bwsa = NTDSL.init ~l:"bwsa" ~prec:Ir.Ops.bfloat16 ~i:[ kw ] ~o:[ n ] ~f:bws_a () in
-    let bwsb = NTDSL.init ~l:"bwsb" ~prec:Ir.Ops.bfloat16 ~i:[ n ] ~o:[ kw ] ~f:bws_b () in
-    let run_staged ?swizzle ~name () =
-      let%op t = bwsa * bwsb in
-      Tn.update_prec t.Tensor.value Ir.Ops.bfloat16;
-      let transform opt =
-        Sched.apply
-          (staged_schedule ?swizzle ~out:t.Tensor.value ~src_a:bwsa.Tensor.value
-             ~src_b:bwsb.Tensor.value opt)
-          opt
+  (* Where the tensor unit is absent this leg has no fragment to convert (see the Fp16_wide leg's
+     skip above for why this is the ordinary backend skip). *)
+  let bw_leg =
+    Verdict.leg
+      ~when_:(on_metal || (on_hip && Lazy.force hip_mma) || cuda_bf16_wide_fragment)
+      ~on:backend_name ()
+  in
+  let bw =
+    lazy
+      (let bwsa = NTDSL.init ~l:"bwsa" ~prec:Ir.Ops.bfloat16 ~i:[ kw ] ~o:[ n ] ~f:bws_a () in
+       let bwsb = NTDSL.init ~l:"bwsb" ~prec:Ir.Ops.bfloat16 ~i:[ n ] ~o:[ kw ] ~f:bws_b () in
+       let run_staged ?swizzle ~name () =
+         let%op t = bwsa * bwsb in
+         Tn.update_prec t.Tensor.value Ir.Ops.bfloat16;
+         let transform opt =
+           Sched.apply
+             (staged_schedule ?swizzle ~out:t.Tensor.value ~src_a:bwsa.Tensor.value
+                ~src_b:bwsb.Tensor.value opt)
+             opt
+         in
+         let ctx, routine =
+           Context.compile
+             ~lowered_transform:(fun o -> [ transform o ])
+             (Context.auto ())
+             (named name (Train.forward t))
+             Ir.Indexing.Empty
+         in
+         let census = renderings routine in
+         let ctx = Context.run ctx routine in
+         (Array.to_list (Context.get_values ctx t.Tensor.value), census)
+       in
+       Numerics.set_policy { saved_policy with bf16_arithmetic = Numerics.Bf16_auto };
+       let default_bf16_narrow =
+         Ir.Ops.equal_prec
+           ((Context.codegen_capabilities (Context.auto ())).Ir.Backend_intf.accum_prec
+              Ir.Ops.bfloat16)
+           Ir.Ops.bfloat16
+       in
+       let got_default, _ = run_staged ~name:"mm_bu_staged_mma" () in
+       (* The [Bf16_narrow] twin, as for the per-statement leg above (gh-ocannl-1051): HIP's narrow
+          fragment arm is reached only under this mode now. *)
+       Numerics.set_policy { saved_policy with bf16_arithmetic = Numerics.Bf16_narrow };
+       let narrow_bf16_narrow =
+         Ir.Ops.equal_prec
+           ((Context.codegen_capabilities (Context.auto ())).Ir.Backend_intf.accum_prec
+              Ir.Ops.bfloat16)
+           Ir.Ops.bfloat16
+       in
+       let got_narrow, census_narrow = run_staged ~name:"mm_bun_staged_mma" () in
+       Numerics.set_policy { saved_policy with bf16_arithmetic = Numerics.Bf16_wide };
+       let got_bw, census_bw = run_staged ~name:"mm_buw_staged_mma" () in
+       Numerics.set_policy saved_policy;
+       Stdio.eprintf
+         "schedule_mma_matmul: staged uniform-bf16 k-split cell 0: Bf16_wide %g, default policy \
+          %g, Bf16_narrow %g; references: wide %g, narrowed per block %g (not part of the golden)\n\
+          %!"
+         (List.hd_exn got_bw) (List.hd_exn got_default) (List.hd_exn got_narrow) bws_wide bws_narrow;
+       ( run_staged,
+         (default_bf16_narrow, got_default),
+         (narrow_bf16_narrow, got_narrow, census_narrow),
+         (got_bw, census_bw) ))
+  in
+  in_leg ~leg:bw_leg
+    "staged+tensorized Bf16_wide matmul equals the once-narrowed wide reference bitwise"
+    (fun label ->
+      let _, _, _, (got_bw, _) = Lazy.force bw in
+      p_all label got_bw ~f:(Float.equal bws_wide));
+  in_leg ~leg:bw_leg
+    "staged+tensorized default-policy uniform-bf16 matmul narrows between blocks exactly where the \
+     backend keeps bf16 storage residency" (fun label ->
+      let _, (default_bf16_narrow, got_default), _, _ = Lazy.force bw in
+      if default_bf16_narrow then p_none label got_default ~f:(Float.equal bws_wide)
+      else p_all label got_default ~f:(Float.equal bws_wide));
+  in_leg ~leg:bw_leg
+    "staged+tensorized Bf16_narrow uniform-bf16 matmul narrows between blocks exactly where that \
+     mode keeps bf16 storage residency" (fun label ->
+      let _, _, (narrow_bf16_narrow, got_narrow, _), _ = Lazy.force bw in
+      if narrow_bf16_narrow then p_none label got_narrow ~f:(Float.equal bws_wide)
+      else p_all label got_narrow ~f:(Float.equal bws_wide));
+  (* A known answer for the narrow arm, whose rounding the claims above deliberately do not pin:
+     each later block's 257 is a tie, and how a bf16-accumulate unit rounds a tie is the question,
+     not the sign (the inputs are nonnegative; gfx1151's and gfx1102's arms read [bws_narrow]
+     exactly, gh-ocannl-1432, but nothing here requires that of every backend). Adding a positive +1
+     per later block to a bf16 partial can round it down to where it was or up by one ulp, never
+     lower and never more, so any narrowing between blocks lands in [bws_narrow, bws_narrow + ulp *
+     later blocks] — and a wide reading ([bws_wide]) lies inside it too, so the claim is universal.
+     The gh1051 A/B drivers cite this as where the narrow arm's values are pinned. *)
+  in_leg ~leg:bw_leg
+    "staged+tensorized Bf16_narrow k-split lies between the per-block-narrowed value and one bf16 \
+     ulp more per later block (a known-answer envelope a zeroed output fails)" (fun label ->
+      let _, _, (_, got_narrow, _), _ = Lazy.force bw in
+      let ulp =
+        let _, e = Float.frexp bws_narrow in
+        Float.ldexp 1. (e - 8)
       in
-      let ctx, routine =
-        Context.compile
-          ~lowered_transform:(fun o -> [ transform o ])
-          (Context.auto ())
-          (named name (Train.forward t))
-          Ir.Indexing.Empty
-      in
-      let census = renderings routine in
-      let ctx = Context.run ctx routine in
-      (Array.to_list (Context.get_values ctx t.Tensor.value), census)
-    in
-    Numerics.set_policy { saved_policy with bf16_arithmetic = Numerics.Bf16_auto };
-    let default_bf16_narrow =
-      Ir.Ops.equal_prec
-        ((Context.codegen_capabilities (Context.auto ())).Ir.Backend_intf.accum_prec Ir.Ops.bfloat16)
-        Ir.Ops.bfloat16
-    in
-    let got_default, _ = run_staged ~name:"mm_bu_staged_mma" () in
-    (* The [Bf16_narrow] twin, as for the per-statement leg above (gh-ocannl-1051): HIP's narrow
-       fragment arm is reached only under this mode now. *)
-    Numerics.set_policy { saved_policy with bf16_arithmetic = Numerics.Bf16_narrow };
-    let narrow_bf16_narrow =
-      Ir.Ops.equal_prec
-        ((Context.codegen_capabilities (Context.auto ())).Ir.Backend_intf.accum_prec Ir.Ops.bfloat16)
-        Ir.Ops.bfloat16
-    in
-    let got_narrow, census_narrow = run_staged ~name:"mm_bun_staged_mma" () in
-    Numerics.set_policy { saved_policy with bf16_arithmetic = Numerics.Bf16_wide };
-    let got_bw, census_bw = run_staged ~name:"mm_buw_staged_mma" () in
-    Numerics.set_policy saved_policy;
-    Stdio.eprintf
-      "schedule_mma_matmul: staged uniform-bf16 k-split cell 0: Bf16_wide %g, default policy %g, \
-       Bf16_narrow %g; references: wide %g, narrowed per block %g (not part of the golden)\n\
-       %!"
-      (List.hd_exn got_bw) (List.hd_exn got_default) (List.hd_exn got_narrow) bws_wide bws_narrow;
-    p_all claim_bw_value got_bw ~f:(Float.equal bws_wide);
-    if default_bf16_narrow then p_none claim_bw_control got_default ~f:(Float.equal bws_wide)
-    else p_all claim_bw_control got_default ~f:(Float.equal bws_wide);
-    if narrow_bf16_narrow then p_none claim_bw_narrow_control got_narrow ~f:(Float.equal bws_wide)
-    else p_all claim_bw_narrow_control got_narrow ~f:(Float.equal bws_wide);
-    (* A known answer for the narrow arm, whose rounding the claims above deliberately do not pin:
-       each later block's 257 is a tie, and how a bf16-accumulate unit rounds a tie is the question,
-       not the sign (the inputs are nonnegative; gfx1151's and gfx1102's arms read [bws_narrow]
-       exactly, gh-ocannl-1432, but nothing here requires that of every backend). Adding a positive
-       +1 per later block to a bf16 partial can round it down to where it was or up by one ulp,
-       never lower and never more, so any narrowing between blocks lands in [bws_narrow, bws_narrow
-       + ulp * later blocks] — and a wide reading ([bws_wide]) lies inside it too, so the claim is
-       universal. The gh1051 A/B drivers cite this as where the narrow arm's values are pinned. *)
-    (let ulp =
-       let _, e = Float.frexp bws_narrow in
-       Float.ldexp 1. (e - 8)
-     in
-     let hi = bws_narrow +. (ulp *. Float.of_int (List.length bws_block_sums - 1)) in
-     p_all claim_bw_narrow_envelope got_narrow ~f:(fun v -> Float.(v >= bws_narrow && v <= hi)));
-    (let claim = claim_bw_narrow_tensorizes in
-     if on_hip then
-       p claim
-         ((not (List.is_empty census_narrow))
-         && List.for_all census_narrow
-              ~f:(Ir.C_syntax.equal_mma_rendering Ir.C_syntax.Mma_intrinsics))
-     else skipped claim);
-    let src = Generated.read "mm_buw_staged_mma" in
-    let has s = String.is_substring src ~substring:s in
-    (* CUDA's register fragment: loaded once before the reduction body and stored once after it,
-       with nothing narrowed to bf16 in between — the per-[k_o] rendering this replaces stores
-       [__float2bfloat16(__mma_d0)] inside the body, at every block. *)
-    (* The register-scope arm both staged Bf16_wide renderings below carry. *)
-    let wide_bf16_marker =
-      arm_marker
-        ~policy:{ (Numerics.get ()) with bf16_arithmetic = Numerics.Bf16_wide }
-        ~scope:Ir.Backend_intf.Mma_fragment_scope Ir.Ops.bfloat16 Ir.Ops.bfloat16 Ir.Ops.bfloat16
-    in
-    let cuda_register_resident src =
-      residency_holds src ~frag_load:"[0] = __bfloat162float(__mma_dr0[0]);"
-        ~body_begin:register_body_begin ~body_end:register_body_end
-        ~frag_store:"__mma_dr0[0] = __float2bfloat16(__mma_fragment_" ~barrier:"__syncthreads();"
-      &&
-      match
-        ( String.substr_index src ~pattern:register_body_begin,
-          String.substr_index src ~pattern:register_body_end )
-      with
-      | Some beg, Some fin ->
-          not
-            (String.is_substring
-               (String.sub src ~pos:beg ~len:(fin - beg))
-               ~substring:"__float2bfloat16")
-      | _ -> false
-    in
-    p claim_bw_struct
-      (Ll_test.all_rendered ~what:"staged Bf16_wide" Ir.C_syntax.Mma_intrinsics census_bw
-      &&
-      if on_cuda then
-        cuda_register_resident src && has "float __mma_fragment_" && has wide_bf16_marker
-        && has "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32"
-      else
-        staged_half_resident ~converted_d:true src
+      let hi = bws_narrow +. (ulp *. Float.of_int (List.length bws_block_sums - 1)) in
+      p_all label got_narrow ~f:(fun v -> Float.(v >= bws_narrow && v <= hi)));
+  in_leg ~leg:bw_leg
+    "on HIP, the staged Bf16_narrow twin tensorizes (the approximate profile's arm)" (fun label ->
+      let _, _, (_, _, census_narrow), _ = Lazy.force bw in
+      if on_hip then
+        p label
+          ((not (List.is_empty census_narrow))
+          && List.for_all census_narrow
+               ~f:(Ir.C_syntax.equal_mma_rendering Ir.C_syntax.Mma_intrinsics))
+      else skipped label);
+  (* CUDA's register fragment: loaded once before the reduction body and stored once after it, with
+     nothing narrowed to bf16 in between — the per-[k_o] rendering this replaces stores
+     [__float2bfloat16(__mma_d0)] inside the body, at every block. *)
+  (* The register-scope arm both staged Bf16_wide renderings below carry. *)
+  let wide_bf16_marker =
+    lazy
+      (arm_marker
+         ~policy:{ (Numerics.get ()) with bf16_arithmetic = Numerics.Bf16_wide }
+         ~scope:Ir.Backend_intf.Mma_fragment_scope Ir.Ops.bfloat16 Ir.Ops.bfloat16 Ir.Ops.bfloat16)
+  in
+  let cuda_register_resident src =
+    residency_holds src ~frag_load:"[0] = __bfloat162float(__mma_dr0[0]);"
+      ~body_begin:register_body_begin ~body_end:register_body_end
+      ~frag_store:"__mma_dr0[0] = __float2bfloat16(__mma_fragment_" ~barrier:"__syncthreads();"
+    &&
+    match
+      ( String.substr_index src ~pattern:register_body_begin,
+        String.substr_index src ~pattern:register_body_end )
+    with
+    | Some beg, Some fin ->
+        not
+          (String.is_substring
+             (String.sub src ~pos:beg ~len:(fin - beg))
+             ~substring:"__float2bfloat16")
+    | _ -> false
+  in
+  in_leg ~leg:bw_leg "staged+tensorized Bf16_wide fragment residency converts d once" (fun label ->
+      let _, _, _, (_, census_bw) = Lazy.force bw in
+      let src = Generated.read "mm_buw_staged_mma" in
+      let has s = String.is_substring src ~substring:s in
+      p label
+        (Ll_test.all_rendered ~what:"staged Bf16_wide" Ir.C_syntax.Mma_intrinsics census_bw
         &&
-        if on_metal then
-          metal_table_boundary ~acc:"__mma_fragment_" src && has "simdgroup_bfloat8x8"
-        else hip_table_boundary ~acc:"__mma_fragment_" src);
-    (* The swizzled twin exists only where an [ldmatrix] arm reads it: Metal and HIP decline the
-       layout to the scalar fallback, which is width-correct by construction and not this leg's
-       subject. *)
-    if on_cuda then (
-      let swizzle = LL.Swizzle_b128 in
-      let got_swz_default, _ = run_staged ~swizzle ~name:"mm_bu_swz_staged_mma" () in
-      Numerics.set_policy { saved_policy with bf16_arithmetic = Numerics.Bf16_wide };
-      let got_swz, census_swz = run_staged ~swizzle ~name:"mm_buw_swz_staged_mma" () in
-      Numerics.set_policy saved_policy;
-      p_all claim_bw_swz_value (got_swz @ got_swz_default) ~f:(Float.equal bws_wide);
+        if on_cuda then
+          cuda_register_resident src && has "float __mma_fragment_"
+          && has (Lazy.force wide_bf16_marker)
+          && has "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32"
+        else
+          staged_half_resident ~converted_d:true src
+          &&
+          if on_metal then
+            metal_table_boundary ~acc:"__mma_fragment_" src && has "simdgroup_bfloat8x8"
+          else hip_table_boundary ~acc:"__mma_fragment_" src));
+  (* The swizzled twin exists only where an [ldmatrix] arm reads it: Metal and HIP decline the
+     layout to the scalar fallback, which is width-correct by construction and not this leg's
+     subject. *)
+  let swz_leg = Verdict.sub_leg bw_leg ~when_:(lazy on_cuda) ~on:backend_name in
+  let swz =
+    lazy
+      (let run_staged, _, _, _ = Lazy.force bw in
+       let swizzle = LL.Swizzle_b128 in
+       let got_swz_default, _ = run_staged ~swizzle ~name:"mm_bu_swz_staged_mma" () in
+       Numerics.set_policy { saved_policy with bf16_arithmetic = Numerics.Bf16_wide };
+       let got_swz, census_swz = run_staged ~swizzle ~name:"mm_buw_swz_staged_mma" () in
+       Numerics.set_policy saved_policy;
+       (got_swz, got_swz_default, census_swz))
+  in
+  in_leg ~leg:swz_leg
+    "swizzled staged twin under Bf16_wide and the default policy equals the once-narrowed wide \
+     reference bitwise" (fun label ->
+      let got_swz, got_swz_default, _ = Lazy.force swz in
+      p_all label (got_swz @ got_swz_default) ~f:(Float.equal bws_wide));
+  in_leg ~leg:swz_leg "swizzled staged twin keeps the same register fragment, fed through ldmatrix"
+    (fun label ->
+      let _, _, census_swz = Lazy.force swz in
       let src = Generated.read "mm_buw_swz_staged_mma" in
       let has s = String.is_substring src ~substring:s in
-      p claim_bw_swz_struct
+      p label
         (Ll_test.all_rendered ~what:"swizzled staged Bf16_wide" Ir.C_syntax.Mma_intrinsics_ldmatrix
            census_swz
         && cuda_register_resident src
-        && has (wide_bf16_marker ^ " ldmatrix a,b")
-        && has "ldmatrix.sync.aligned.m8n8"))
-    else (
-      skipped claim_bw_swz_value;
-      skipped claim_bw_swz_struct))
-  else (
-    (* Where the tensor unit is absent this leg has no fragment to convert (see the Fp16_wide leg's
-       skip above for why this is the ordinary backend skip). *)
-    skipped claim_bw_value;
-    skipped claim_bw_control;
-    skipped claim_bw_narrow_control;
-    skipped claim_bw_narrow_envelope;
-    skipped claim_bw_narrow_tensorizes;
-    skipped claim_bw_struct;
-    skipped claim_bw_swz_value;
-    skipped claim_bw_swz_struct);
+        && has (Lazy.force wide_bf16_marker ^ " ldmatrix a,b")
+        && has "ldmatrix.sync.aligned.m8n8"));
 
   (* --- Staged twins per advertised swizzled layout (gh-ocannl-1063 follow-up): the autotuner seeds
      a swizzled staged twin beside the plain one for exactly the format triples in
@@ -2295,193 +2384,193 @@ let () =
      relation itself, not a second format table. Only CUDA advertises a layout today, and the leg is
      CUDA's: an empty list (pre-sm_80, or a backend advertising none) is the ordinary backend skip,
      and a non-empty one on another backend fails until that backend's evidence is added. --- *)
-  let claim_twin_census =
-    "staged twins per advertised swizzled layout: the censuses agree apart from ldmatrix, which \
-     only the swizzled twin uses"
-  in
-  let claim_twin_resident =
-    "staged twins per advertised swizzled layout: both keep the register fragment resident across \
-     k_o"
-  in
-  let claim_twin_values =
-    "staged twins per advertised swizzled layout: both equal the host reference exactly"
-  in
-  let claim_twin_distinct =
-    "staged twins per advertised swizzled layout: every row and column of each operand is distinct"
-  in
-  let twin_claims =
-    [ claim_twin_census; claim_twin_resident; claim_twin_values; claim_twin_distinct ]
-  in
   (* Read on every backend, not through [cuda_mma], so that a staged layout another backend starts
      advertising is not skipped in silence: the pins below are CUDA's dialect ([ldmatrix], the
      mma.sync register scope, the 32-lane warp), and another backend's layout needs its own. *)
-  (match (Context.hardware_limits (Context.auto ())).Ir.Backend_intf.mma with
-  | Some mma when (not (List.is_empty mma.Ir.Backend_intf.mma_staged_layouts)) && not on_cuda ->
-      Stdio.eprintf
-        "staged twins: %s advertises staged layouts, but this leg pins only CUDA's rendering of \
-         them; extend it with that backend's load and residency evidence\n\
-         %!"
-        backend_name;
-      List.iter twin_claims ~f:(fun claim -> p claim false)
-  | Some mma when not (List.is_empty mma.Ir.Backend_intf.mma_staged_layouts) ->
-      let module BI = Ir.Backend_intf in
-      (* The twins' lane loop and cooperative staging are [simd_width] wide, and the output's column
-         extent is that lane loop. *)
-      if mma.BI.mma_simd_width <> simd_width || n <> simd_width then
-        failwith
-          (Printf.sprintf
-             "staged twins: the leg's %d-lane geometry does not match the warp width %d" simd_width
-             mma.BI.mma_simd_width);
-      let format_tag f =
-        String.chop_prefix_if_exists ~prefix:"mma_"
-          (String.lowercase (Sexp.to_string (BI.sexp_of_mma_input_format f)))
-      in
-      (* The register scope's [d] boundary, whatever the accumulator's storage type: the load fills
-         the fragment's registers ([frag[__mi][__ni][0] = widen(__mma_dr0[0]);]) and the store
-         writes the rows back ([__mma_dr0[0] = narrow(frag…)]). The per-[k_o] rendering this
-         replaces reads and writes the same [__mma_dr0] rows inside the body, at every block. *)
-      let register_resident src =
-        residency_holds src ~frag_load:"[__mi][__ni][0] = " ~body_begin:register_body_begin
-          ~body_end:register_body_end ~frag_store:"__mma_dr0[0] = " ~barrier:"__syncthreads();"
-        &&
-        match
-          ( String.substr_index src ~pattern:register_body_begin,
-            String.substr_index src ~pattern:register_body_end )
-        with
-        | Some beg, Some fin ->
-            not
-              (String.is_substring
-                 (String.sub src ~pos:beg ~len:(fin - beg))
-                 ~substring:"__mma_dr0")
-        | _ -> false
-      in
-      let run_twins (((fa, fb, fd) as triple), layout) =
-        let tag = String.concat ~sep:"_" (List.map [ fa; fb; fd ] ~f:format_tag) in
-        let swizzle = match layout with BI.Mma_swizzled_b128 -> LL.Swizzle_b128 in
-        (* tf32 is a policy-gated reading of f32 storage, so a tf32 triple resolves (and renders)
-           only with the policy on. *)
-        Numerics.set_policy
-          {
-            saved_policy with
-            tf32_matmuls =
-              List.exists [ fa; fb; fd ] ~f:(function BI.Mma_tf32 -> true | _ -> false);
-          };
-        let storage = Ir.Ops.float_precs in
-        let a_prec, b_prec, d_prec =
-          match
-            List.find_map storage ~f:(fun a_prec ->
-                List.find_map storage ~f:(fun b_prec ->
-                    List.find storage ~f:(fun d_prec ->
-                        List.mem
-                          (Autotune.mma_format_triples ~a_prec ~b_prec ~d_prec)
-                          triple ~equal:BI.equal_mma_format_triple)
-                    |> Option.map ~f:(fun d_prec -> (a_prec, b_prec, d_prec))))
-          with
-          | Some precs -> precs
-          | None -> failwith ("staged twins: no storage precisions seed the triple " ^ tag)
-        in
-        (* The geometry follows the triple's advertised intrinsic tile: the row block and the block
-           of every [k_o] step cover the tile's m and k (tile extents are powers of two, so the
-           larger one is a multiple of the smaller), and four [k_o] blocks make the reduction
-           multi-block. The column extent is the whole [n]: the zeroing's column loop is the lane
-           loop, so [n] is the warp width and the tile's n must divide it. *)
-        (* A staged layout without a format tile is a capability the seeder never reaches: the
-           typed seeds look the tile up first and refute the tensorized branch without one. *)
-        let tm, tn, tk =
-          match
-            List.Assoc.find mma.BI.mma_format_tiles triple ~equal:BI.equal_mma_format_triple
-          with
-          | Some tile -> tile
-          | None ->
-              failwith
-                ("staged twins: the advertised staged layout of " ^ tag
-               ^ " has no mma_format_tiles entry, so no seed would reach it")
-        in
-        if n % tn <> 0 then
-          failwith
-            (Printf.sprintf
-               "staged twins %s: the tile's n=%d does not divide the lane-wide column extent %d" tag
-               tn n);
-        let bi = Int.max bm tm and bk = Int.max bm tk in
-        let kw = 4 * bk in
-        (* Small integers (1..2), exact in every storage format and clear of the zero init, drawn
-           from a well-mixed bit of the aperiodic [Bench_checksum.mix]: a cyclic key of period p
-           makes panels p apart identical, and the mix's low bits alias whole rows and columns, so a
-           twin staging the wrong panel, row or column would read the same values. Rather than argue
-           that premise, [claim_twin_distinct] checks it: every row and every column of each operand
-           differs from every other. Every partial sum is a nonnegative integer no larger than the
-           final one, so the host reference is exact whatever the narrowing order as long as the
-           final sums survive the accumulator's storage unchanged — checked by round-tripping them
-           through a [d_prec] array. *)
-        let a_key idcs =
-          Float.of_int (1 + ((Bench_checksum.mix ~salt:0x5A17 idcs.(0) idcs.(1) lsr 16) land 1))
-        in
-        let b_key idcs =
-          Float.of_int (1 + ((Bench_checksum.mix ~salt:0x3C6E idcs.(0) idcs.(1) lsr 16) land 1))
-        in
-        let reference =
-          Array.init (n * n) ~f:(fun cell ->
-              List.sum
-                (module Float)
-                (List.range 0 kw)
-                ~f:(fun k -> a_key [| cell / n; k |] *. b_key [| k; cell % n |]))
-        in
-        let stored =
-          let nd =
-            Ir.Ndarray.create_array ~debug:"twin_reference" d_prec ~dims:[| n * n |] ~padding:None
-          in
-          Ir.Ndarray.set_flat_values nd reference;
-          Ir.Ndarray.retrieve_flat_values nd
-        in
-        if not (Array.equal Float.equal stored reference) then
-          failwith
-            (Printf.sprintf "staged twins %s: k=%d sums outgrow the accumulator's exact integers"
-               tag kw);
-        let twa = NTDSL.init ~l:("twa_" ^ tag) ~prec:a_prec ~i:[ kw ] ~o:[ n ] ~f:a_key () in
-        let twb = NTDSL.init ~l:("twb_" ^ tag) ~prec:b_prec ~i:[ n ] ~o:[ kw ] ~f:b_key () in
-        let run ?swizzle ~name () =
-          let%op t = twa * twb in
-          Tn.update_prec t.Tensor.value d_prec;
-          let transform opt =
-            Sched.apply
-              (staged_schedule ?swizzle ~bm:bi ~bk ~out:t.Tensor.value ~src_a:twa.Tensor.value
-                 ~src_b:twb.Tensor.value opt)
-              opt
-          in
-          let ctx, routine =
-            Context.compile
-              ~lowered_transform:(fun o -> [ transform o ])
-              (Context.auto ())
-              (named name (Train.forward t))
-              Ir.Indexing.Empty
-          in
-          let census = renderings routine in
-          let ctx = Context.run ctx routine in
-          let src = Generated.read name in
-          (nonzero name (Context.get_values ctx t.Tensor.value), census, register_resident src)
-        in
-        let plain = run ~name:("mm_twin_plain_" ^ tag) () in
-        let swizzled = run ~swizzle ~name:("mm_twin_swz_" ^ tag) () in
-        Numerics.set_policy saved_policy;
-        let lines_distinct key ~rows ~cols =
-          let distinct lines =
-            not (List.contains_dup lines ~compare:(List.compare Float.compare))
-          in
-          distinct (List.init rows ~f:(fun r -> List.init cols ~f:(fun c -> key [| r; c |])))
-          && distinct (List.init cols ~f:(fun c -> List.init rows ~f:(fun r -> key [| r; c |])))
-        in
-        let distinct =
-          lines_distinct a_key ~rows:n ~cols:kw && lines_distinct b_key ~rows:kw ~cols:n
-        in
-        (tag, plain, swizzled, nonzero ("reference_" ^ tag) reference, distinct)
-      in
-      let twins = List.map mma.BI.mma_staged_layouts ~f:run_twins in
-      let apart_from_ldmatrix =
-        List.map ~f:(function
-          | Ir.C_syntax.Mma_intrinsics_ldmatrix -> Ir.C_syntax.Mma_intrinsics
-          | rendering -> rendering)
-      in
-      p_all claim_twin_census twins ~f:(fun (tag, (_, plain, _), (_, swizzled, _), _, _) ->
+  let twin_mma =
+    match (Context.hardware_limits (Context.auto ())).Ir.Backend_intf.mma with
+    | Some mma when not (List.is_empty mma.Ir.Backend_intf.mma_staged_layouts) -> Some mma
+    | _ -> None
+  in
+  (* Open wherever a staged layout is advertised; on a backend other than CUDA every claim then
+     fails, since the evidence below is CUDA's alone. *)
+  let twin_leg = Verdict.leg ~when_:(Option.is_some twin_mma) ~on:backend_name () in
+  let foreign_layouts = Option.is_some twin_mma && not on_cuda in
+  if foreign_layouts then
+    Stdio.eprintf
+      "staged twins: %s advertises staged layouts, but this leg pins only CUDA's rendering of \
+       them; extend it with that backend's load and residency evidence\n\
+       %!"
+      backend_name;
+  let twins =
+    lazy
+      (let mma = Option.value_exn twin_mma in
+       let module BI = Ir.Backend_intf in
+       (* The twins' lane loop and cooperative staging are [simd_width] wide, and the output's
+          column extent is that lane loop. *)
+       if mma.BI.mma_simd_width <> simd_width || n <> simd_width then
+         failwith
+           (Printf.sprintf
+              "staged twins: the leg's %d-lane geometry does not match the warp width %d" simd_width
+              mma.BI.mma_simd_width);
+       let format_tag f =
+         String.chop_prefix_if_exists ~prefix:"mma_"
+           (String.lowercase (Sexp.to_string (BI.sexp_of_mma_input_format f)))
+       in
+       (* The register scope's [d] boundary, whatever the accumulator's storage type: the load fills
+          the fragment's registers ([frag[__mi][__ni][0] = widen(__mma_dr0[0]);]) and the store
+          writes the rows back ([__mma_dr0[0] = narrow(frag…)]). The per-[k_o] rendering this
+          replaces reads and writes the same [__mma_dr0] rows inside the body, at every block. *)
+       let register_resident src =
+         residency_holds src ~frag_load:"[__mi][__ni][0] = " ~body_begin:register_body_begin
+           ~body_end:register_body_end ~frag_store:"__mma_dr0[0] = " ~barrier:"__syncthreads();"
+         &&
+         match
+           ( String.substr_index src ~pattern:register_body_begin,
+             String.substr_index src ~pattern:register_body_end )
+         with
+         | Some beg, Some fin ->
+             not
+               (String.is_substring
+                  (String.sub src ~pos:beg ~len:(fin - beg))
+                  ~substring:"__mma_dr0")
+         | _ -> false
+       in
+       let run_twins (((fa, fb, fd) as triple), layout) =
+         let tag = String.concat ~sep:"_" (List.map [ fa; fb; fd ] ~f:format_tag) in
+         let swizzle = match layout with BI.Mma_swizzled_b128 -> LL.Swizzle_b128 in
+         (* tf32 is a policy-gated reading of f32 storage, so a tf32 triple resolves (and renders)
+            only with the policy on. *)
+         Numerics.set_policy
+           {
+             saved_policy with
+             tf32_matmuls =
+               List.exists [ fa; fb; fd ] ~f:(function BI.Mma_tf32 -> true | _ -> false);
+           };
+         let storage = Ir.Ops.float_precs in
+         let a_prec, b_prec, d_prec =
+           match
+             List.find_map storage ~f:(fun a_prec ->
+                 List.find_map storage ~f:(fun b_prec ->
+                     List.find storage ~f:(fun d_prec ->
+                         List.mem
+                           (Autotune.mma_format_triples ~a_prec ~b_prec ~d_prec)
+                           triple ~equal:BI.equal_mma_format_triple)
+                     |> Option.map ~f:(fun d_prec -> (a_prec, b_prec, d_prec))))
+           with
+           | Some precs -> precs
+           | None -> failwith ("staged twins: no storage precisions seed the triple " ^ tag)
+         in
+         (* The geometry follows the triple's advertised intrinsic tile: the row block and the block
+            of every [k_o] step cover the tile's m and k (tile extents are powers of two, so the
+            larger one is a multiple of the smaller), and four [k_o] blocks make the reduction
+            multi-block. The column extent is the whole [n]: the zeroing's column loop is the lane
+            loop, so [n] is the warp width and the tile's n must divide it. *)
+         (* A staged layout without a format tile is a capability the seeder never reaches: the
+            typed seeds look the tile up first and refute the tensorized branch without one. *)
+         let tm, tn, tk =
+           match
+             List.Assoc.find mma.BI.mma_format_tiles triple ~equal:BI.equal_mma_format_triple
+           with
+           | Some tile -> tile
+           | None ->
+               failwith
+                 ("staged twins: the advertised staged layout of " ^ tag
+                ^ " has no mma_format_tiles entry, so no seed would reach it")
+         in
+         if n % tn <> 0 then
+           failwith
+             (Printf.sprintf
+                "staged twins %s: the tile's n=%d does not divide the lane-wide column extent %d"
+                tag tn n);
+         let bi = Int.max bm tm and bk = Int.max bm tk in
+         let kw = 4 * bk in
+         (* Small integers (1..2), exact in every storage format and clear of the zero init, drawn
+            from a well-mixed bit of the aperiodic [Bench_checksum.mix]: a cyclic key of period p
+            makes panels p apart identical, and the mix's low bits alias whole rows and columns, so
+            a twin staging the wrong panel, row or column would read the same values. Rather than
+            argue that premise, the distinctness claim below checks it: every row and every column
+            of each operand differs from every other. Every partial sum is a nonnegative integer no
+            larger than the final one, so the host reference is exact whatever the narrowing order
+            as long as the final sums survive the accumulator's storage unchanged — checked by
+            round-tripping them through a [d_prec] array. *)
+         let a_key idcs =
+           Float.of_int (1 + ((Bench_checksum.mix ~salt:0x5A17 idcs.(0) idcs.(1) lsr 16) land 1))
+         in
+         let b_key idcs =
+           Float.of_int (1 + ((Bench_checksum.mix ~salt:0x3C6E idcs.(0) idcs.(1) lsr 16) land 1))
+         in
+         let reference =
+           Array.init (n * n) ~f:(fun cell ->
+               List.sum
+                 (module Float)
+                 (List.range 0 kw)
+                 ~f:(fun k -> a_key [| cell / n; k |] *. b_key [| k; cell % n |]))
+         in
+         let stored =
+           let nd =
+             Ir.Ndarray.create_array ~debug:"twin_reference" d_prec ~dims:[| n * n |] ~padding:None
+           in
+           Ir.Ndarray.set_flat_values nd reference;
+           Ir.Ndarray.retrieve_flat_values nd
+         in
+         if not (Array.equal Float.equal stored reference) then
+           failwith
+             (Printf.sprintf "staged twins %s: k=%d sums outgrow the accumulator's exact integers"
+                tag kw);
+         let twa = NTDSL.init ~l:("twa_" ^ tag) ~prec:a_prec ~i:[ kw ] ~o:[ n ] ~f:a_key () in
+         let twb = NTDSL.init ~l:("twb_" ^ tag) ~prec:b_prec ~i:[ n ] ~o:[ kw ] ~f:b_key () in
+         let run ?swizzle ~name () =
+           let%op t = twa * twb in
+           Tn.update_prec t.Tensor.value d_prec;
+           let transform opt =
+             Sched.apply
+               (staged_schedule ?swizzle ~bm:bi ~bk ~out:t.Tensor.value ~src_a:twa.Tensor.value
+                  ~src_b:twb.Tensor.value opt)
+               opt
+           in
+           let ctx, routine =
+             Context.compile
+               ~lowered_transform:(fun o -> [ transform o ])
+               (Context.auto ())
+               (named name (Train.forward t))
+               Ir.Indexing.Empty
+           in
+           let census = renderings routine in
+           let ctx = Context.run ctx routine in
+           let src = Generated.read name in
+           (nonzero name (Context.get_values ctx t.Tensor.value), census, register_resident src)
+         in
+         let plain = run ~name:("mm_twin_plain_" ^ tag) () in
+         let swizzled = run ~swizzle ~name:("mm_twin_swz_" ^ tag) () in
+         Numerics.set_policy saved_policy;
+         let lines_distinct key ~rows ~cols =
+           let distinct lines =
+             not (List.contains_dup lines ~compare:(List.compare Float.compare))
+           in
+           distinct (List.init rows ~f:(fun r -> List.init cols ~f:(fun c -> key [| r; c |])))
+           && distinct (List.init cols ~f:(fun c -> List.init rows ~f:(fun r -> key [| r; c |])))
+         in
+         let distinct =
+           lines_distinct a_key ~rows:n ~cols:kw && lines_distinct b_key ~rows:kw ~cols:n
+         in
+         (tag, plain, swizzled, nonzero ("reference_" ^ tag) reference, distinct)
+       in
+       List.map mma.BI.mma_staged_layouts ~f:run_twins)
+  in
+  let apart_from_ldmatrix =
+    List.map ~f:(function
+      | Ir.C_syntax.Mma_intrinsics_ldmatrix -> Ir.C_syntax.Mma_intrinsics
+      | rendering -> rendering)
+  in
+  let twin_claim label make =
+    in_leg ~leg:twin_leg label (fun label ->
+        if foreign_layouts then p label false else make label (Lazy.force twins))
+  in
+  twin_claim
+    "staged twins per advertised swizzled layout: the censuses agree apart from ldmatrix, which \
+     only the swizzled twin uses" (fun label twins ->
+      p_all label twins ~f:(fun (tag, (_, plain, _), (_, swizzled, _), _, _) ->
           let agree =
             (not (List.is_empty plain))
             && List.equal Ir.C_syntax.equal_mma_rendering (apart_from_ldmatrix plain)
@@ -2499,18 +2588,22 @@ let () =
             Stdio.eprintf "staged twins %s: plain census %s, swizzled census %s\n%!" tag
               (Sexp.to_string (List.sexp_of_t Ir.C_syntax.sexp_of_mma_rendering plain))
               (Sexp.to_string (List.sexp_of_t Ir.C_syntax.sexp_of_mma_rendering swizzled));
-          agree);
-      p_all claim_twin_resident twins
-        ~f:(fun (_, (_, _, resident_plain), (_, _, resident_swizzled), _, _) ->
-          resident_plain && resident_swizzled);
-      (* An independent oracle, not the twins against each other: a defect both paths share (a
-         staging index, the fragment mapping) would leave two equal wrong arrays. *)
-      p_all claim_twin_values twins
-        ~f:(fun (_, (got_plain, _, _), (got_swizzled, _, _), reference, _) ->
+          agree));
+  twin_claim
+    "staged twins per advertised swizzled layout: both keep the register fragment resident across \
+     k_o" (fun label twins ->
+      p_all label twins ~f:(fun (_, (_, _, resident_plain), (_, _, resident_swizzled), _, _) ->
+          resident_plain && resident_swizzled));
+  (* An independent oracle, not the twins against each other: a defect both paths share (a staging
+     index, the fragment mapping) would leave two equal wrong arrays. *)
+  twin_claim "staged twins per advertised swizzled layout: both equal the host reference exactly"
+    (fun label twins ->
+      p_all label twins ~f:(fun (_, (got_plain, _, _), (got_swizzled, _, _), reference, _) ->
           Array.equal Float.equal got_plain reference
-          && Array.equal Float.equal got_swizzled reference);
-      p_all claim_twin_distinct twins ~f:(fun (_, _, _, _, distinct) -> distinct)
-  | _ -> List.iter twin_claims ~f:skipped);
+          && Array.equal Float.equal got_swizzled reference));
+  twin_claim
+    "staged twins per advertised swizzled layout: every row and column of each operand is distinct"
+    (fun label twins -> p_all label twins ~f:(fun (_, _, _, _, distinct) -> distinct));
 
   (* --- Transposed operand layouts (the gradient-GEMM access patterns): [d[i,j] += at[k,i] *
      b[k,j]] (a stored transposed) and [d[i,j] += a[i,k] * bt[j,k]] (b stored transposed). Tensorize
@@ -2627,83 +2720,81 @@ let () =
            } );
      ]
    in
-   let claim_rendered = "every format triple's tensorized matmul renders its Tile_mma statements" in
-   let claim_both_sides = "the format triples include advertised and unadvertised ones" in
-   let claim_agree tag =
-     Printf.sprintf "%s: census is all-intrinsics exactly for the advertised format triples" tag
-   in
-   let claim_tiles = "the format cross-check micro-kernel fits every advertised format tile" in
    let limits = Context.hardware_limits (Context.auto ()) in
-   if on_gpu && Option.is_some limits.Ir.Backend_intf.mma then (
-     let mma = Option.value_exn limits.Ir.Backend_intf.mma in
-     p_all claim_tiles mma.Ir.Backend_intf.mma_format_tiles ~f:(fun (_, (tm, tn, tk)) ->
-         tm > 0 && tn > 0 && tk > 0 && bm % tm = 0 && n % tn = 0 && n % tk = 0);
-     let ma_of = Hashtbl.create (module String) and mb_of = Hashtbl.create (module String) in
-     let input tbl ~side (tag, prec) =
-       Hashtbl.find_or_add tbl tag ~default:(fun () ->
-           NTDSL.init
-             ~l:("fmt" ^ side ^ "_" ^ tag)
-             ~prec ~i:[ n ] ~o:[ n ]
-             ~f:(Ll_test.cycle ~dims:[| n; n |] ~modulus:5 ~offset:(-2.) ~stride:1.)
-             ())
-     in
-     let rows =
-       List.concat_map policies ~f:(fun (ptag, pslug, adjust) ->
-           Test_utils.with_policy adjust (fun () ->
-               let limits = Context.hardware_limits (Context.auto ()) in
-               List.map triples ~f:(fun (((at, aprec) as a), ((bt, bprec) as b), (dt, dprec)) ->
-                   let fa = input ma_of ~side:"a" a and fb = input mb_of ~side:"b" b in
-                   let%op mcf = fa * fb in
-                   Tn.update_prec mcf.Tensor.value dprec;
-                   let name = Printf.sprintf "mm_fmt_%s_%s_%s_%s" at bt dt pslug in
-                   let _ctx, routine =
-                     Context.compile
-                       ~lowered_transform:(fun o ->
-                         [ Sched.apply (mma_schedule ~out:mcf.Tensor.value o) o ])
-                       (Context.auto ())
-                       (named name (Train.forward mcf))
-                       Ir.Indexing.Empty
-                   in
-                   let census = renderings routine in
-                   let advertised =
-                     List.exists
-                       (Autotune.mma_format_triples ~a_prec:aprec ~b_prec:bprec ~d_prec:dprec)
-                       ~f:(fun (a, b, d) ->
-                         Ir.Backend_intf.advertises_mma_format_in_scope limits
-                           ~policy:(Numerics.get ()) ~scope:Ir.Backend_intf.Mma_per_statement ~a ~b
-                           ~d)
-                   in
-                   (ptag, Printf.sprintf "(%s, %s, %s)" at bt dt, advertised, census))))
-     in
-     p_all
-       ~min:(List.length policies * List.length triples)
-       claim_rendered rows
-       ~f:(fun (_, _, _, census) -> not (List.is_empty census));
-     p_all ~min:2 claim_both_sides [ true; false ] ~f:(fun want ->
-         List.exists rows ~f:(fun (_, _, advertised, _) -> Bool.equal advertised want));
-     List.iter policies ~f:(fun (ptag, _, _) ->
-         let mine = List.filter rows ~f:(fun (t, _, _, _) -> String.equal t ptag) in
-         p_all ~min:(List.length triples) (claim_agree ptag) mine
-           ~f:(fun (_, triple, advertised, census) ->
-             let all_intrinsics =
-               (not (List.is_empty census))
-               && List.for_all census
-                    ~f:(Ir.C_syntax.equal_mma_rendering Ir.C_syntax.Mma_intrinsics)
-             in
-             let ok = Bool.equal all_intrinsics advertised in
-             if not ok then
-               Stdio.eprintf "%s %s: advertised=%b, census=[%s]\n%!" ptag triple advertised
-                 (String.concat ~sep:"; "
-                    (List.map census ~f:(fun r ->
-                         Sexp.to_string (Ir.C_syntax.sexp_of_mma_rendering r))));
-             ok)))
-   else (
-     (* A missing HIP capability is the device/header conjunction, so use the ordinary backend skip
-        shared by the existing HIP legs, rather than claiming which half failed. *)
-     skipped claim_tiles;
-     skipped claim_rendered;
-     skipped claim_both_sides;
-     List.iter policies ~f:(fun (ptag, _, _) -> skipped (claim_agree ptag))));
+   (* A missing HIP capability is the device/header conjunction, so use the ordinary backend skip
+      shared by the existing HIP legs, rather than claiming which half failed. *)
+   let leg =
+     Verdict.leg ~when_:(on_gpu && Option.is_some limits.Ir.Backend_intf.mma) ~on:backend_name ()
+   in
+   in_leg ~leg "the format cross-check micro-kernel fits every advertised format tile" (fun label ->
+       let mma = Option.value_exn limits.Ir.Backend_intf.mma in
+       p_all label mma.Ir.Backend_intf.mma_format_tiles ~f:(fun (_, (tm, tn, tk)) ->
+           tm > 0 && tn > 0 && tk > 0 && bm % tm = 0 && n % tn = 0 && n % tk = 0));
+   let rows =
+     lazy
+       (let ma_of = Hashtbl.create (module String) and mb_of = Hashtbl.create (module String) in
+        let input tbl ~side (tag, prec) =
+          Hashtbl.find_or_add tbl tag ~default:(fun () ->
+              NTDSL.init
+                ~l:("fmt" ^ side ^ "_" ^ tag)
+                ~prec ~i:[ n ] ~o:[ n ]
+                ~f:(Ll_test.cycle ~dims:[| n; n |] ~modulus:5 ~offset:(-2.) ~stride:1.)
+                ())
+        in
+        List.concat_map policies ~f:(fun (ptag, pslug, adjust) ->
+            Test_utils.with_policy adjust (fun () ->
+                let limits = Context.hardware_limits (Context.auto ()) in
+                List.map triples ~f:(fun (((at, aprec) as a), ((bt, bprec) as b), (dt, dprec)) ->
+                    let fa = input ma_of ~side:"a" a and fb = input mb_of ~side:"b" b in
+                    let%op mcf = fa * fb in
+                    Tn.update_prec mcf.Tensor.value dprec;
+                    let name = Printf.sprintf "mm_fmt_%s_%s_%s_%s" at bt dt pslug in
+                    let _ctx, routine =
+                      Context.compile
+                        ~lowered_transform:(fun o ->
+                          [ Sched.apply (mma_schedule ~out:mcf.Tensor.value o) o ])
+                        (Context.auto ())
+                        (named name (Train.forward mcf))
+                        Ir.Indexing.Empty
+                    in
+                    let census = renderings routine in
+                    let advertised =
+                      List.exists
+                        (Autotune.mma_format_triples ~a_prec:aprec ~b_prec:bprec ~d_prec:dprec)
+                        ~f:(fun (a, b, d) ->
+                          Ir.Backend_intf.advertises_mma_format_in_scope limits
+                            ~policy:(Numerics.get ()) ~scope:Ir.Backend_intf.Mma_per_statement ~a ~b
+                            ~d)
+                    in
+                    (ptag, Printf.sprintf "(%s, %s, %s)" at bt dt, advertised, census)))))
+   in
+   in_leg ~leg "every format triple's tensorized matmul renders its Tile_mma statements"
+     (fun label ->
+       p_all
+         ~min:(List.length policies * List.length triples)
+         label (Lazy.force rows)
+         ~f:(fun (_, _, _, census) -> not (List.is_empty census)));
+   in_leg ~leg "the format triples include advertised and unadvertised ones" (fun label ->
+       p_all ~min:2 label [ true; false ] ~f:(fun want ->
+           List.exists (Lazy.force rows) ~f:(fun (_, _, advertised, _) ->
+               Bool.equal advertised want)));
+   List.iter policies ~f:(fun (ptag, _, _) ->
+       in_legf ~leg "%s: census is all-intrinsics exactly for the advertised format triples" ptag
+         (fun label ->
+           let mine = List.filter (Lazy.force rows) ~f:(fun (t, _, _, _) -> String.equal t ptag) in
+           p_all ~min:(List.length triples) label mine ~f:(fun (_, triple, advertised, census) ->
+               let all_intrinsics =
+                 (not (List.is_empty census))
+                 && List.for_all census
+                      ~f:(Ir.C_syntax.equal_mma_rendering Ir.C_syntax.Mma_intrinsics)
+               in
+               let ok = Bool.equal all_intrinsics advertised in
+               if not ok then
+                 Stdio.eprintf "%s %s: advertised=%b, census=[%s]\n%!" ptag triple advertised
+                   (String.concat ~sep:"; "
+                      (List.map census ~f:(fun r ->
+                           Sexp.to_string (Ir.C_syntax.sexp_of_mma_rendering r))));
+               ok))));
 
   (* --- Pattern discipline: Tensorize on a non-micro-kernel nest is a targeted error --- *)
   let%op mc2 = ma * mb in

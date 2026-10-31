@@ -76,22 +76,6 @@ let sweep =
   in
   Array.of_list (structured @ random)
 
-let claims_emulation =
-  [
-    "emulation: the rounded compile rewrites the accumulation into the target";
-    "emulation: every value rounds bitwise as cvt.rna.tf32.f32 does";
-    "emulation: the plain compile leaves some value unrounded (the inputs discriminate)";
-    "emulation: the sweep holds ties where ties-to-even rounds the other way";
-  ]
-
-let claims_hardware =
-  [
-    "hardware: at least one seed executes tensorized with its reference rounded to tf32";
-    "hardware: every executed seed matches its reference bitwise";
-    "hardware: no seed fails to reach its segment, is unjudged, or raises";
-    "hardware control: against the plain reference, some tensorized seed differs";
-  ]
-
 let emulation () =
   let n = Array.length sweep in
   let x_nd = nd "trr_x" [| 1; n; 2 |] (fun i -> if i.(2) = 0 then sweep.(i.(1)) else 0.) in
@@ -131,13 +115,13 @@ let emulation () =
       if k < 10 then
         Stdio.eprintf "emulation: %h rounded to %h, cvt.rna gives %h (not part of the golden)\n"
           sweep.(i) rounded.(i) want.(i));
-  p (List.nth_exn claims_emulation 0) (stmts > 0);
-  p_all (List.nth_exn claims_emulation 1) (List.init n ~f:Fn.id) ~f:(fun i ->
-      Float.equal rounded.(i) want.(i));
-  p_exists (List.nth_exn claims_emulation 2) (List.init n ~f:Fn.id) ~f:(fun i ->
-      not (Float.equal plain.(i) want.(i)));
-  p_exists (List.nth_exn claims_emulation 3) (Array.to_list sweep) ~f:(fun v ->
-      not (Float.equal (cvt_rna v) (ties_to_even v)))
+  p "emulation: the rounded compile rewrites the accumulation into the target" (stmts > 0);
+  p_all "emulation: every value rounds bitwise as cvt.rna.tf32.f32 does" (List.init n ~f:Fn.id)
+    ~f:(fun i -> Float.equal rounded.(i) want.(i));
+  p_exists "emulation: the plain compile leaves some value unrounded (the inputs discriminate)"
+    (List.init n ~f:Fn.id) ~f:(fun i -> not (Float.equal plain.(i) want.(i)));
+  p_exists "emulation: the sweep holds ties where ties-to-even rounds the other way"
+    (Array.to_list sweep) ~f:(fun v -> not (Float.equal (cvt_rna v) (ties_to_even v)))
 
 (* Whether this backend's arm reads f32 operands as tf32, and if not, what would lift that: the
    seeder's tensorized capability for an f32 site, then the parity mode's own tf32 predicate. *)
@@ -151,65 +135,80 @@ let tf32_arm limits =
   | `Advertised ->
       `Skip (if P.f32_reads_tf32_under_tf32_policy limits then `Environment else `Backend)
 
-let hardware () =
+(* Where the arm does not read f32 as tf32 every hardware claim is skipped by name, in the order
+   this one sequence makes them (gh-ocannl-1703); the matmul is built and its seeds executed only
+   where the leg is open. *)
+let hardware ~leg =
   let m = 32 and k = 16 and n = 32 in
-  (* Operands of every magnitude multiply 1 exactly; keep them clear of overflow in f32 arithmetic
-     around the tile anyway. A stride of 3 through the sweep (512 cells of its 1576) varies them
-     along both axes. *)
-  let a_vals =
-    Array.init (m * k) ~f:(fun f ->
-        let v = sweep.(f * 3) in
-        if Float.(abs v > 1e30) then v *. 1e-60 else v)
+  let setup =
+    lazy
+      ((* Operands of every magnitude multiply 1 exactly; keep them clear of overflow in f32
+          arithmetic around the tile anyway. A stride of 3 through the sweep (512 cells of its 1576)
+          varies them along both axes. *)
+       let a_vals =
+         Array.init (m * k) ~f:(fun f ->
+             let v = sweep.(f * 3) in
+             if Float.(abs v > 1e30) then v *. 1e-60 else v)
+       in
+       let a_nd =
+         nd "trr_a" [| 1; m; k |] (fun i ->
+             a_vals.(Ll_test.flat ~dims:[| m; k |] [| i.(1); i.(2) |]))
+       in
+       let e_nd = nd "trr_e" [| 1; k; n |] (fun i -> if i.(1) = i.(2) % k then 1. else 0.) in
+       let as_ = TDSL.rebatch ~l:"trr_as" a_nd () in
+       let es = TDSL.rebatch ~l:"trr_es" e_nd () in
+       let batch_n, bindings = IDX.get_static_symbol ~static_range:1 IDX.empty in
+       let%op a = as_ @| batch_n in
+       let%op e = es @| batch_n in
+       let%op out = a +* "ik; kj => ij" e in
+       Train.every_non_literal_materialized out;
+       let comp = Train.forward out in
+       let ctx = Context.auto () in
+       let static_indices = [ batch_n ] in
+       let opt = Bench_harness.capture_lowering ctx comp bindings in
+       fun ~round ->
+         snd
+           (P.parity ~tol:0. ~round ~select:P.any_seed
+              ~on_result:(fun r ->
+                Stdio.eprintf "%s%s (not part of the golden)\n"
+                  (if round then "" else "plain reference: ")
+                  (P.verdict_line r))
+              ctx comp bindings
+              ~bind:(fun r -> IDX.find_exn r.Context.bindings batch_n := 0)
+              ~static_indices opt))
   in
-  let a_nd =
-    nd "trr_a" [| 1; m; k |] (fun i -> a_vals.(Ll_test.flat ~dims:[| m; k |] [| i.(1); i.(2) |]))
-  in
-  let e_nd = nd "trr_e" [| 1; k; n |] (fun i -> if i.(1) = i.(2) % k then 1. else 0.) in
-  let as_ = TDSL.rebatch ~l:"trr_as" a_nd () in
-  let es = TDSL.rebatch ~l:"trr_es" e_nd () in
-  let batch_n, bindings = IDX.get_static_symbol ~static_range:1 IDX.empty in
-  let%op a = as_ @| batch_n in
-  let%op e = es @| batch_n in
-  let%op out = a +* "ik; kj => ij" e in
-  Train.every_non_literal_materialized out;
-  let comp = Train.forward out in
-  let ctx = Context.auto () in
-  let static_indices = [ batch_n ] in
-  let opt = Bench_harness.capture_lowering ctx comp bindings in
-  let parity ~round =
-    snd
-      (P.parity ~tol:0. ~round ~select:P.any_seed
-         ~on_result:(fun r ->
-           Stdio.eprintf "%s%s (not part of the golden)\n"
-             (if round then "" else "plain reference: ")
-             (P.verdict_line r))
-         ctx comp bindings
-         ~bind:(fun r -> IDX.find_exn r.Context.bindings batch_n := 0)
-         ~static_indices opt)
-  in
+  let parity ~round = (Lazy.force setup) ~round in
   let executed = function { P.verdict = Match _ | Mismatch _; _ } -> true | _ -> false in
-  let results = parity ~round:true in
+  let results = lazy (parity ~round:true) in
   (* Tensorized by the compiled routine's own census, every statement on the tensor-core path: a
      statement that fell back to the scalar kernel computes f32, not tf32. *)
   let all_tensor_core r =
     Ir.C_syntax.equal_tensorization r.P.mma.Ir.C_syntax.tensorization Ir.C_syntax.Tensorized
     && r.P.mma.Ir.C_syntax.scalar_fallbacks = 0
   in
-  p_exists (List.nth_exn claims_hardware 0) results ~f:(fun r ->
-      executed r && all_tensor_core r && not (List.is_empty r.P.rounded));
-  p_all (List.nth_exn claims_hardware 1) (List.filter results ~f:executed) ~f:(function
-    | { P.verdict = Match { err; _ }; _ } -> Float.(err = 0.)
-    | _ -> false);
-  p_none (List.nth_exn claims_hardware 2) results ~f:(function
-    | { P.verdict = Not_applied | Unjudged _ | Failed _ | Not_perturbed; _ } -> true
-    | _ -> false);
-  let plain = parity ~round:false in
-  p_exists (List.nth_exn claims_hardware 3) plain ~f:(fun r ->
-      (match r.P.verdict with Mismatch _ -> true | _ -> false) && all_tensor_core r)
+  in_leg ~leg "hardware: at least one seed executes tensorized with its reference rounded to tf32"
+    (fun label ->
+      p_exists label (Lazy.force results) ~f:(fun r ->
+          executed r && all_tensor_core r && not (List.is_empty r.P.rounded)));
+  in_leg ~leg "hardware: every executed seed matches its reference bitwise" (fun label ->
+      p_all label
+        (List.filter (Lazy.force results) ~f:executed)
+        ~f:(function { P.verdict = Match { err; _ }; _ } -> Float.(err = 0.) | _ -> false));
+  in_leg ~leg "hardware: no seed fails to reach its segment, is unjudged, or raises" (fun label ->
+      p_none label (Lazy.force results) ~f:(function
+        | { P.verdict = Not_applied | Unjudged _ | Failed _ | Not_perturbed; _ } -> true
+        | _ -> false));
+  let plain = lazy (parity ~round:false) in
+  in_leg ~leg "hardware control: against the plain reference, some tensorized seed differs"
+    (fun label ->
+      p_exists label (Lazy.force plain) ~f:(fun r ->
+          (match r.P.verdict with Mismatch _ -> true | _ -> false) && all_tensor_core r))
 
 let () =
   emulation ();
-  match tf32_arm (Context.hardware_limits (Context.auto ())) with
-  | `Reads -> hardware ()
-  | `Skip aggregation ->
-      List.iter claims_hardware ~f:(Verdict.skipped ~aggregation ~backend:backend_name)
+  let leg =
+    match tf32_arm (Context.hardware_limits (Context.auto ())) with
+    | `Reads -> Verdict.leg ~when_:true ~on:backend_name ()
+    | `Skip aggregation -> Verdict.leg ~aggregation ~when_:false ~on:backend_name ()
+  in
+  hardware ~leg

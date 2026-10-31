@@ -47,6 +47,10 @@ let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~d
 (* The C backends are the ones whose syntax config is cc's, the only one with a blend. *)
 let on_cc = Ir.Schedule.backend_is_cpu backend_name
 let skipped = Verdict.skipped ~backend:backend_name
+
+(* The kernel-text claims each leg makes on cc, skipped by name elsewhere: written once
+   (gh-ocannl-1703). *)
+let cc_leg = Verdict.leg ~when_:on_cc ~on:backend_name ()
 let () = Generated.init ~backend_name
 
 (* NaN against NaN by kind (the payload is the hardware's), everything else on the bits: a signed
@@ -323,15 +327,11 @@ let () =
        else
          let got = execute_leg ~name:leg.name ~seed:leg.seed ~out:leg.out leg.llc in
          values_claim ~name:leg.name claim got leg.want);
-      if on_cc then (
-        let text = kernel_text leg.name in
-        p (leg.name ^ ": the select calls the blend helper") (has text blend_marker);
-        p_none
-          (leg.name ^ ": no short-circuiting spelling of the select remains")
-          short_circuit_forms ~f:(has text))
-      else (
-        skipped (leg.name ^ ": the select calls the blend helper");
-        skipped (leg.name ^ ": no short-circuiting spelling of the select remains")))
+      let text = lazy (kernel_text leg.name) in
+      in_legf ~leg:cc_leg "%s: the select calls the blend helper" leg.name (fun label ->
+          p label (has (Lazy.force text) blend_marker));
+      in_legf ~leg:cc_leg "%s: no short-circuiting spelling of the select remains" leg.name
+        (fun label -> p_none label short_circuit_forms ~f:(has (Lazy.force text))))
 
 (* The assembly claim, on the two shapes of the backward pass: [where cond g 0] and a [Relu_gate],
    each gating a load from a buffer argument (which the compiler cannot prove dereferenceable). *)

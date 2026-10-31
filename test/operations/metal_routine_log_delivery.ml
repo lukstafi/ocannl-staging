@@ -50,7 +50,9 @@ let logged_stores ~first_id ~label =
   let o = Ll_test.optimize ~materialized:[ a; x ] ~name:label llc in
   (o, a, x)
 
-let run_logged ~values ?ctx ~first_id ~label () =
+(* The context after the run and its [sync], with the values the routine stored and the ones it
+   should have. *)
+let run_logged ?ctx ~first_id ~label () =
   let o, a, x = logged_stores ~first_id ~label in
   let av = Array.init n ~f:Float.of_int in
   let ctx, _routine =
@@ -58,8 +60,7 @@ let run_logged ~values ?ctx ~first_id ~label () =
   in
   let got = Context.get_values ctx x in
   Context.sync ctx;
-  p_all2 values got (Array.map av ~f:(fun v -> v +. 1.)) ~f:Float.equal;
-  ctx
+  (ctx, got, Array.map av ~f:(fun v -> v +. 1.))
 
 let claim_count what ~label ~expected =
   let got = count ~label in
@@ -67,30 +68,35 @@ let claim_count what ~label ~expected =
     label;
   p what (got = expected)
 
-(* The claims in the order the executing branch makes them; a skipping backend prints the same lines
-   in the same order, so the golden is shared. *)
-let first_values = "mrld_first: the routine stores its values"
-let first_all = "the first routine's stores are all in the stream log after its sync"
-let second_sync = "a second sync adds none of them again"
-let second_values = "mrld_second: the routine stores its values"
-let second_all = "the second routine's stores are all in the stream log after its sync"
-let first_once = "the first routine's lines are still there exactly once"
+(* CUDA and HIP skip every claim, by name, in the order this one sequence makes them
+   (gh-ocannl-1703). *)
+let leg =
+  Verdict.leg
+    ~when_:(not (List.mem [ "cuda"; "hip" ] backend_name ~equal:String.equal))
+    ~on:backend_name ()
 
 let () =
   if not (Utils.debug_log_from_routines ()) then
     fail "this test runs under --ocannl_debug_log_from_routines=true (see its dune rule)";
-  match backend_name with
-  | "cuda" | "hip" ->
-      List.iter
-        [ first_values; first_all; second_sync; second_values; second_all; first_once ]
-        ~f:(skipped ~backend:backend_name)
-  | _ ->
-      let ctx = run_logged ~values:first_values ~first_id:1000 ~label:"mrld_first" () in
-      claim_count first_all ~label:"mrld_first" ~expected:n;
+  let first = lazy (run_logged ~first_id:1000 ~label:"mrld_first" ()) in
+  in_leg ~leg "mrld_first: the routine stores its values" (fun label ->
+      let _, got, want = Lazy.force first in
+      p_all2 label got want ~f:Float.equal);
+  in_leg ~leg "the first routine's stores are all in the stream log after its sync" (fun what ->
+      claim_count what ~label:"mrld_first" ~expected:n);
+  in_leg ~leg "a second sync adds none of them again" (fun what ->
+      let ctx, _, _ = Lazy.force first in
       Context.sync ctx;
-      claim_count second_sync ~label:"mrld_first" ~expected:n;
-      let (_ : Context.t) =
-        run_logged ~values:second_values ~ctx ~first_id:2000 ~label:"mrld_second" ()
-      in
-      claim_count second_all ~label:"mrld_second" ~expected:n;
-      claim_count first_once ~label:"mrld_first" ~expected:n
+      claim_count what ~label:"mrld_first" ~expected:n);
+  let second =
+    lazy
+      (let ctx, _, _ = Lazy.force first in
+       run_logged ~ctx ~first_id:2000 ~label:"mrld_second" ())
+  in
+  in_leg ~leg "mrld_second: the routine stores its values" (fun label ->
+      let _, got, want = Lazy.force second in
+      p_all2 label got want ~f:Float.equal);
+  in_leg ~leg "the second routine's stores are all in the stream log after its sync" (fun what ->
+      claim_count what ~label:"mrld_second" ~expected:n);
+  in_leg ~leg "the first routine's lines are still there exactly once" (fun what ->
+      claim_count what ~label:"mrld_first" ~expected:n)

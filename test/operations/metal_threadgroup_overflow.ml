@@ -41,7 +41,6 @@ module Asgns = Ir.Assignments
 open Verdict.Claims
 
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
-let skipped = Verdict.skipped ~backend:backend_name
 let on_metal = String.is_substring backend_name ~substring:"metal"
 let half_bytes = Ir.Ops.prec_in_bytes Ir.Ops.half
 
@@ -140,29 +139,24 @@ let describe (leg : (Context.t * Context.routine) SO.outcome leg) =
   | Error (SO.Fatal { exn; phase; _ }) ->
       "fatal at " ^ Sexp.to_string (SO.sexp_of_phase phase) ^ ": " ^ Exn.to_string exn
 
-let claim_control =
-  "C: even-length half tiles estimated at exactly the limit compile, link and run correctly"
-
-let claim_gate =
-  "G: odd-length half tiles whose exact bytes total the limit are refused at Hardware_limits, \
-   requesting their rounded estimate, over the limit"
-
-let claim_estimate = "O: with exact sizes the gate estimates the odd tiles at exactly the limit"
-
-let claim_refused =
-  "O: pipeline creation's refusal is a contained Workgroup_memory decline at Backend_link, \
-   requesting leg G's rounded estimate over the device limit"
-
-let claim_public = "O: the public compile reports the refusal as a Utils.User_error"
-let all_claims = [ claim_control; claim_gate; claim_estimate; claim_refused; claim_public ]
-
 let () =
   let limits = Context.hardware_limits (Context.auto ()) in
-  match (on_metal, limits.Ir.Backend_intf.max_workgroup_memory_bytes) with
-  | true, Some limit when limit % (4 * half_bytes) = 0 ->
-      let elems = limit / half_bytes in
-      (* C: [bi] even, so [J = elems - bi] is even too ([elems] is a multiple of 4). *)
-      let control = compile_leg ~name:"tgo_control" ~bi:32 ~cols:(elems - 32) () in
+  let limit =
+    match (on_metal, limits.Ir.Backend_intf.max_workgroup_memory_bytes) with
+    | true, Some limit when limit % (4 * half_bytes) = 0 -> Some limit
+    | _ -> None
+  in
+  (* Off Metal, or without a limit of whole 4-element half tiles, every claim is skipped by name, in
+     the order this one sequence makes them (gh-ocannl-1703). *)
+  let metal = Verdict.leg ~when_:(Option.is_some limit) ~on:backend_name () in
+  let limit = Option.value limit ~default:0 in
+  let elems = limit / half_bytes in
+  (* C: [bi] even, so [J = elems - bi] is even too ([elems] is a multiple of 4). *)
+  let control = lazy (compile_leg ~name:"tgo_control" ~bi:32 ~cols:(elems - 32) ()) in
+  in_leg ~leg:metal
+    "C: even-length half tiles estimated at exactly the limit compile, link and run correctly"
+    (fun label ->
+      let control = Lazy.force control in
       let values =
         match control.result with
         | Ok (ctx, routine) ->
@@ -175,12 +169,16 @@ let () =
         Array.init (control.rows * control.cols) ~f:(fun flat ->
             u_value (flat / control.cols) +. v_value (flat % control.cols))
       in
-      p claim_control
+      p label
         (control.estimate = limit && control.exact = limit
         && Option.value_map values ~default:false ~f:(fun got ->
-            Array.equal Float.equal got expected));
-      (* G: one element moved from [v]'s tile to [u]'s, both odd. *)
-      let gate = compile_leg ~name:"tgo_gate" ~bi:33 ~cols:(elems - 33) () in
+            Array.equal Float.equal got expected)));
+  (* G: one element moved from [v]'s tile to [u]'s, both odd. *)
+  let gate = lazy (compile_leg ~name:"tgo_gate" ~bi:33 ~cols:(elems - 33) ()) in
+  in_leg ~leg:metal
+    "G: odd-length half tiles whose exact bytes total the limit are refused at Hardware_limits, \
+     requesting their rounded estimate, over the limit" (fun label ->
+      let gate = Lazy.force gate in
       let gate_refused =
         match gate.result with
         | Error
@@ -197,12 +195,17 @@ let () =
             Stdio.eprintf "metal_threadgroup_overflow: G: %s\n%!" (describe gate);
             false
       in
-      p claim_gate gate_refused;
-      (* O: leg G's kernel, judged by exact sizes. *)
-      let overflow =
-        compile_leg ~exact_gate:true ~name:"tgo_overflow" ~bi:33 ~cols:(elems - 33) ()
-      in
-      p claim_estimate (overflow.exact = limit);
+      p label gate_refused);
+  (* O: leg G's kernel, judged by exact sizes. *)
+  let overflow =
+    lazy (compile_leg ~exact_gate:true ~name:"tgo_overflow" ~bi:33 ~cols:(elems - 33) ())
+  in
+  in_leg ~leg:metal "O: with exact sizes the gate estimates the odd tiles at exactly the limit"
+    (fun label -> p label ((Lazy.force overflow).exact = limit));
+  in_leg ~leg:metal
+    "O: pipeline creation's refusal is a contained Workgroup_memory decline at Backend_link, \
+     requesting leg G's rounded estimate over the device limit" (fun label ->
+      let overflow = Lazy.force overflow in
       let refused =
         match overflow.result with
         | Error
@@ -214,14 +217,15 @@ let () =
                      { resource = SO.Workgroup_memory; requested; limit = Some l; _ };
                  execution_effect = SO.No_device_writes;
                }) ->
-            l = limit && requested > limit && requested = gate.estimate
+            l = limit && requested > limit && requested = (Lazy.force gate).estimate
         | _ -> false
       in
       (* The driver's counts, for the record (not part of the golden). *)
       Stdio.eprintf "metal_threadgroup_overflow: O: %s\n%!" (describe overflow);
-      p claim_refused refused;
+      p label refused);
+  in_leg ~leg:metal "O: the public compile reports the refusal as a Utils.User_error" (fun label ->
       let public = public_leg ~name:"tgo_public" ~bi:33 ~cols:(elems - 33) in
-      p claim_public
+      p label
         (match public with
         | Error (Utils.User_error msg) -> String.is_substring msg ~substring:"threadgroup memory"
         | Error exn ->
@@ -229,5 +233,4 @@ let () =
             false
         | Ok () ->
             Stdio.eprintf "metal_threadgroup_overflow: public: compiled\n%!";
-            false)
-  | _ -> List.iter all_claims ~f:skipped
+            false))

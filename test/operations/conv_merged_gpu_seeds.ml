@@ -144,111 +144,116 @@ let execute_seed ~name ~want ~transform y =
       Stdio.eprintf "%s: failed (not part of the golden): %s\n" name (Exn.to_string exn);
       `Failed
 
-let leg ?oc ?(row_masked = false) ~tag ~rows () =
+(* One leg's claims, made in [leg]: open where the GPU conv leg can seed an f32 site, skipped by
+   name elsewhere in the order this code makes them (gh-ocannl-1703). Everything they rest on is
+   computed lazily, only where [leg] is open. *)
+let merged_leg ~leg ?oc ?(row_masked = false) ~tag ~rows () =
   let make_merged ~rows n = make_merged ?oc ~rows n in
-  let want =
-    let y = make_merged ~rows (tag ^ "r") in
-    fst (run ~name:(tag ^ "_ref") ~transform:(fun opt -> [ opt ]) y)
-  in
-  if not (Array.exists want ~f:(fun v -> Float.(v <> 0.))) then
-    failwith (tag ^ ": the reference is all zeros — the parity claims would be vacuous");
-  let whole, segment = lowerings ~name:(tag ^ "_probe") (make_merged ~rows (tag ^ "p")) in
   let real_stmts opt = Option.value (gpu_real_stmts opt) ~default:0 in
-  let whole_seeds = gpu_seeds whole in
-  let seg_seeds = Option.value_map segment ~default:[] ~f:gpu_seeds in
-  Stdio.eprintf
-    "%s: whole routine %d real statements, %d GPU seeds; merged segment %d real statements, %d GPU \
-     seeds (not part of the golden)\n"
-    tag (real_stmts whole) (List.length whole_seeds)
-    (Option.value_map segment ~default:0 ~f:real_stmts)
-    (List.length seg_seeds);
-  p
+  let setup =
+    lazy
+      (let want =
+         let y = make_merged ~rows (tag ^ "r") in
+         fst (run ~name:(tag ^ "_ref") ~transform:(fun opt -> [ opt ]) y)
+       in
+       if not (Array.exists want ~f:(fun v -> Float.(v <> 0.))) then
+         failwith (tag ^ ": the reference is all zeros — the parity claims would be vacuous");
+       let whole, segment = lowerings ~name:(tag ^ "_probe") (make_merged ~rows (tag ^ "p")) in
+       let whole_seeds = gpu_seeds whole in
+       let seg_seeds = Option.value_map segment ~default:[] ~f:gpu_seeds in
+       Stdio.eprintf
+         "%s: whole routine %d real statements, %d GPU seeds; merged segment %d real statements, \
+          %d GPU seeds (not part of the golden)\n"
+         tag (real_stmts whole) (List.length whole_seeds)
+         (Option.value_map segment ~default:0 ~f:real_stmts)
+         (List.length seg_seeds);
+       (want, whole, segment, whole_seeds, seg_seeds))
+  in
+  in_leg ~leg
     (tag ^ ": the whole routine and its merged conv segment carry three or more real statements")
-    (real_stmts whole >= 3 && Option.exists segment ~f:(fun s -> real_stmts s >= 3));
-  p (tag ^ ": the GPU leg seeds the whole routine") (not (List.is_empty whole_seeds));
-  p (tag ^ ": the GPU leg seeds the merged segment") (not (List.is_empty seg_seeds));
+    (fun label ->
+      let _, whole, segment, _, _ = Lazy.force setup in
+      p label (real_stmts whole >= 3 && Option.exists segment ~f:(fun s -> real_stmts s >= 3)));
+  in_leg ~leg (tag ^ ": the GPU leg seeds the whole routine") (fun label ->
+      let _, _, _, whole_seeds, _ = Lazy.force setup in
+      p label (not (List.is_empty whole_seeds)));
+  in_leg ~leg (tag ^ ": the GPU leg seeds the merged segment") (fun label ->
+      let _, _, _, _, seg_seeds = Lazy.force setup in
+      p label (not (List.is_empty seg_seeds)));
   (* The pad-masked whole-extent flavor (row padded to the intrinsic row tile, [0x0x0/<tm>x0]): its
      accumulator fragment is workgroup-shared, transferred by lane 0 alone. *)
   if row_masked then
-    p_exists (tag ^ ": a whole-routine GPU seed pads the row to the mma tile") whole_seeds
-      ~f:(fun sp -> sp.Autotune.sk_bm = 0 && sp.Autotune.sk_tm > 0);
-  let whole_results =
-    List.mapi whole_seeds ~f:(fun i sp ->
-        let name = Printf.sprintf "%s_w%d" tag i in
-        Stdio.eprintf "%s = %s (not part of the golden)\n%!" name (Autotune.sketch_params_label sp);
-        execute_seed ~name ~want
-          ~transform:(fun opt ->
-            [ Sched.apply (Autotune.sketch_schedule ~accum_prec ~p:sp opt) opt ])
-          (make_merged ~rows name))
-  in
-  let seg_results =
-    List.mapi seg_seeds ~f:(fun i sp ->
-        let name = Printf.sprintf "%s_s%d" tag i in
-        Stdio.eprintf "%s = %s (not part of the golden)\n%!" name (Autotune.sketch_params_label sp);
-        let applied = ref false in
-        (* Compiled as a per-segment sketch candidate: the tuner's segmentation replayed, the conv
-           segment sketched, every other one on its preset. *)
-        let schedule _ seg =
-          if is_conv_segment seg then
-            match List.nth (gpu_seeds seg) i with
-            | Some sp ->
-                applied := true;
-                Some (Autotune.sketch_schedule ~accum_prec ~p:sp seg)
-            | None -> failwith (Printf.sprintf "%s: seed %d is gone from the segment" name i)
-          else None
-        in
-        let transform = Ll_test.tuner_transform ~schedule in
-        match execute_seed ~name ~want ~transform (make_merged ~rows name) with
-        | `Ran _ when not !applied ->
-            Stdio.eprintf "%s: the seed never reached the conv segment\n" name;
-            `Failed
-        | r -> r)
+    in_leg ~leg (tag ^ ": a whole-routine GPU seed pads the row to the mma tile") (fun label ->
+        let _, _, _, whole_seeds, _ = Lazy.force setup in
+        p_exists label whole_seeds ~f:(fun sp -> sp.Autotune.sk_bm = 0 && sp.Autotune.sk_tm > 0));
+  let results =
+    lazy
+      (let want, _, _, whole_seeds, seg_seeds = Lazy.force setup in
+       let whole_results =
+         List.mapi whole_seeds ~f:(fun i sp ->
+             let name = Printf.sprintf "%s_w%d" tag i in
+             Stdio.eprintf "%s = %s (not part of the golden)\n%!" name
+               (Autotune.sketch_params_label sp);
+             execute_seed ~name ~want
+               ~transform:(fun opt ->
+                 [ Sched.apply (Autotune.sketch_schedule ~accum_prec ~p:sp opt) opt ])
+               (make_merged ~rows name))
+       in
+       let seg_results =
+         List.mapi seg_seeds ~f:(fun i sp ->
+             let name = Printf.sprintf "%s_s%d" tag i in
+             Stdio.eprintf "%s = %s (not part of the golden)\n%!" name
+               (Autotune.sketch_params_label sp);
+             let applied = ref false in
+             (* Compiled as a per-segment sketch candidate: the tuner's segmentation replayed, the
+                conv segment sketched, every other one on its preset. *)
+             let schedule _ seg =
+               if is_conv_segment seg then
+                 match List.nth (gpu_seeds seg) i with
+                 | Some sp ->
+                     applied := true;
+                     Some (Autotune.sketch_schedule ~accum_prec ~p:sp seg)
+                 | None -> failwith (Printf.sprintf "%s: seed %d is gone from the segment" name i)
+               else None
+             in
+             let transform = Ll_test.tuner_transform ~schedule in
+             match execute_seed ~name ~want ~transform (make_merged ~rows name) with
+             | `Ran _ when not !applied ->
+                 Stdio.eprintf "%s: the seed never reached the conv segment\n" name;
+                 `Failed
+             | r -> r)
+       in
+       (whole_results, seg_results))
   in
   let ok = function `Ran (m, _) -> m | `Failed -> false in
   let tensorized = function `Ran (_, t) -> t | `Failed -> false in
-  p_all
+  in_leg ~leg
     (tag ^ ": every whole-routine GPU seed compiles and matches the natural form exactly, run twice")
-    whole_results ~f:ok;
-  p_all
+    (fun label ->
+      let whole_results, _ = Lazy.force results in
+      p_all label whole_results ~f:ok);
+  in_leg ~leg
     (tag
    ^ ": every merged-segment GPU seed compiles and matches the natural form exactly, run twice")
-    seg_results ~f:ok;
-  p_all
-    (tag ^ ": every GPU seed's routine is labeled tensorized")
-    (whole_results @ seg_results) ~f:tensorized
+    (fun label ->
+      let _, seg_results = Lazy.force results in
+      p_all label seg_results ~f:ok);
+  in_leg ~leg (tag ^ ": every GPU seed's routine is labeled tensorized") (fun label ->
+      let whole_results, seg_results = Lazy.force results in
+      p_all label (whole_results @ seg_results) ~f:tensorized)
 
 let () =
-  if Lazy.force gpu_capable then (
-    leg ~tag:"cm8" ~rows:8 ();
-    leg ~tag:"cm16" ~rows:16 ();
-    leg ~tag:"cm8w" ~rows:8 ~oc:64 ();
-    leg ~tag:"cm6w" ~rows:6 ~oc:64 ~row_masked:true ())
-  else
-    (* A GPU withholding the capability says which aggregation lifts it (tf32 off on CUDA). *)
+  (* A GPU withholding the capability says which aggregation lifts it (tf32 off on CUDA). *)
+  let leg =
+    let gpu_capable = Lazy.force gpu_capable in
     let aggregation =
       match Lazy.force tensorized_capability with
       | `Withheld aggregation when not on_cpu -> aggregation
       | `Withheld _ | `Advertised -> `Backend
     in
-    List.iter
-      [ ("cm8", false); ("cm16", false); ("cm8w", false); ("cm6w", true) ]
-      ~f:(fun (tag, row_masked) ->
-        List.iter
-          ~f:(Verdict.skipped ~aggregation ~backend:backend_name)
-          ([
-             tag
-             ^ ": the whole routine and its merged conv segment carry three or more real statements";
-             tag ^ ": the GPU leg seeds the whole routine";
-             tag ^ ": the GPU leg seeds the merged segment";
-           ]
-          @ (if row_masked then [ tag ^ ": a whole-routine GPU seed pads the row to the mma tile" ]
-             else [])
-          @ [
-              tag
-              ^ ": every whole-routine GPU seed compiles and matches the natural form exactly, run \
-                 twice";
-              tag
-              ^ ": every merged-segment GPU seed compiles and matches the natural form exactly, \
-                 run twice";
-              tag ^ ": every GPU seed's routine is labeled tensorized";
-            ]))
+    Verdict.leg ~aggregation ~when_:gpu_capable ~on:backend_name ()
+  in
+  merged_leg ~leg ~tag:"cm8" ~rows:8 ();
+  merged_leg ~leg ~tag:"cm16" ~rows:16 ();
+  merged_leg ~leg ~tag:"cm8w" ~rows:8 ~oc:64 ();
+  merged_leg ~leg ~tag:"cm6w" ~rows:6 ~oc:64 ~row_masked:true ()

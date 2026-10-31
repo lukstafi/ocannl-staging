@@ -58,6 +58,10 @@ let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~d
 let on_cpu = Sched.backend_is_cpu backend_name
 let skipped = Verdict.skipped ~backend:backend_name
 
+(* The register tiling is the C backends': every emission, tail and instantiation claim is made in
+   this leg, skipped by name elsewhere in the order the same code reaches it (gh-ocannl-1703). *)
+let cpu_leg = Verdict.leg ~when_:on_cpu ~on:backend_name ()
+
 module Generated = Test_utils.Generated
 
 let () = Generated.init ~backend_name
@@ -332,6 +336,18 @@ let header t =
 let provenance = "geometry from the schedule"
 let elt_bytes = 4
 
+(* What the emission claims share: the machine's vector file, the requested geometry and the tensors
+   the legs compile -- made only where the C-backend leg is open. *)
+type emission = {
+  file : Ir.Vector_file.t;
+  ladder : int list;
+  req : RT.t;
+  honoured : Tensor.t;
+  ob_t : Tensor.t;
+  ow_t : Tensor.t;
+  dflt_t : Tensor.t;
+}
+
 let () =
   let mav =
     Array.init (n * n) ~f:(Ll_test.cycle_flat ~dims:[| n; n |] ~modulus:13 ~offset:0. ~stride:0.25)
@@ -344,116 +360,153 @@ let () =
   let%op serial = ma * mb in
   let want, _ = compile_run ~name:"tmg_serial" ~leg:Serial serial in
   let want = nonzero "tmg_serial" want in
-  if not on_cpu then
-    List.iter
-      [
-        "a requested geometry renders register-tiled";
-        "the emitted header names the requested geometry and its provenance";
-        "the requested-geometry rendering matches the serial twin bitwise";
-        "a geometry minted for a narrower vector file renders register-tiled under its own header";
-        "the narrower-file rendering matches the serial twin bitwise";
-        "an over-budget request is refused by the fit rules";
-        "an over-budget request declines to the scalar fallback";
-        "the declined routine is labeled scalar-fallback, not tensorized";
-        "the declined routine still computes the serial values";
-        "an over-width request declines to the scalar fallback";
-        "the unrequested rendering carries the model's default geometry";
-        "the unrequested header does not claim a schedule provenance";
-        "the two-row twin renders register-tiled under its own header";
-        "the two-row twin matches the serial twin bitwise";
-      ]
-      ~f:skipped
-  else begin
-    let limits = Context.hardware_limits (Context.auto ()) in
-    let file = limits.Ir.Backend_intf.simd_vector in
-    let ladder = RT.simd_lane_ladder ~vector_bytes:file.bytes ~elt_bytes in
-    let lanes = List.hd_exn ladder in
-    (* Two vector columns where the file holds them (4*2 + 4 + 2 = 14 <= 19, the 16-register budget)
-       and, at 16 lanes, still no wider than n = 64; one where it holds only one -- a configured
-       width wider than a native register divides the count, e.g. 8 registers for 64-byte vectors on
-       NEON. *)
-    let rn = min 2 (RT.rn_cap ~vector_registers:file.registers) in
-    let req = { RT.rm = 4; rn; lanes } in
-    (* Forward code is consumed once per compile: one tensor per leg. *)
-    let%op honoured = ma * mb in
-    let%op ob_t = ma * mb in
-    let%op ow_t = ma * mb in
-    let%op dflt_t = ma * mb in
-    let got, census = compile_run ~name:"tmg_requested" ~leg:(Tensorized (Some req)) honoured in
-    p "a requested geometry renders register-tiled" (register_tiled census);
-    let src = Generated.read "tmg_requested" in
-    p "the emitted header names the requested geometry and its provenance"
-      (String.is_substring src ~substring:(header req)
-      && String.is_substring src ~substring:provenance);
-    p_all2 "the requested-geometry rendering matches the serial twin bitwise" got want
-      ~f:Float.equal;
-    (* A geometry minted for a narrower file (gh-ocannl-1317): half the narrowest width the file's
-       own ladder ranks -- 16 bytes on a 32- or 64-byte file, 8 on a 16-byte one -- a width the
-       renderer's model never picks here, which only a request minted elsewhere names. An 8-byte
-       file, the narrowest the renderer accepts, contains no narrower one. *)
-    let narrower = List.last_exn ladder / 2 in
-    let n_tiled =
-      "a geometry minted for a narrower vector file renders register-tiled under its own header"
-    and n_parity = "the narrower-file rendering matches the serial twin bitwise" in
-    if narrower * elt_bytes < 8 then (
-      skipped n_tiled;
-      skipped n_parity)
-    else begin
-      let minted = { RT.rm = 4; rn; lanes = narrower } in
-      let%op minted_t = ma * mb in
-      let got_n, census_n =
-        compile_run ~name:"tmg_narrower" ~leg:(Tensorized (Some minted)) minted_t
-      in
-      p n_tiled
+  let setup =
+    lazy
+      (let limits = Context.hardware_limits (Context.auto ()) in
+       let file = limits.Ir.Backend_intf.simd_vector in
+       let ladder = RT.simd_lane_ladder ~vector_bytes:file.bytes ~elt_bytes in
+       let lanes = List.hd_exn ladder in
+       (* Two vector columns where the file holds them (4*2 + 4 + 2 = 14 <= 19, the 16-register
+          budget) and, at 16 lanes, still no wider than n = 64; one where it holds only one -- a
+          configured width wider than a native register divides the count, e.g. 8 registers for
+          64-byte vectors on NEON. *)
+       let rn = min 2 (RT.rn_cap ~vector_registers:file.registers) in
+       let req = { RT.rm = 4; rn; lanes } in
+       (* Forward code is consumed once per compile: one tensor per leg. *)
+       let%op honoured = ma * mb in
+       let%op ob_t = ma * mb in
+       let%op ow_t = ma * mb in
+       let%op dflt_t = ma * mb in
+       { file; ladder; req; honoured; ob_t; ow_t; dflt_t })
+  in
+  let requested =
+    lazy
+      (let s = Lazy.force setup in
+       let got, census =
+         compile_run ~name:"tmg_requested" ~leg:(Tensorized (Some s.req)) s.honoured
+       in
+       (got, census, Generated.read "tmg_requested"))
+  in
+  in_leg ~leg:cpu_leg "a requested geometry renders register-tiled" (fun label ->
+      let _, census, _ = Lazy.force requested in
+      p label (register_tiled census));
+  in_leg ~leg:cpu_leg "the emitted header names the requested geometry and its provenance"
+    (fun label ->
+      let _, _, src = Lazy.force requested in
+      p label
+        (String.is_substring src ~substring:(header (Lazy.force setup).req)
+        && String.is_substring src ~substring:provenance));
+  in_leg ~leg:cpu_leg "the requested-geometry rendering matches the serial twin bitwise"
+    (fun label ->
+      let got, _, _ = Lazy.force requested in
+      p_all2 label got want ~f:Float.equal);
+  (* A geometry minted for a narrower file (gh-ocannl-1317): half the narrowest width the file's own
+     ladder ranks -- 16 bytes on a 32- or 64-byte file, 8 on a 16-byte one -- a width the renderer's
+     model never picks here, which only a request minted elsewhere names. An 8-byte file, the
+     narrowest the renderer accepts, contains no narrower one. *)
+  let narrower = lazy (List.last_exn (Lazy.force setup).ladder / 2) in
+  let narrower_leg =
+    Verdict.sub_leg cpu_leg
+      ~when_:(lazy (not (Lazy.force narrower * elt_bytes < 8)))
+      ~on:backend_name
+  in
+  let minted =
+    lazy
+      (let minted = { RT.rm = 4; rn = (Lazy.force setup).req.RT.rn; lanes = Lazy.force narrower } in
+       let%op minted_t = ma * mb in
+       let got_n, census_n =
+         compile_run ~name:"tmg_narrower" ~leg:(Tensorized (Some minted)) minted_t
+       in
+       (minted, got_n, census_n))
+  in
+  in_leg ~leg:narrower_leg
+    "a geometry minted for a narrower vector file renders register-tiled under its own header"
+    (fun label ->
+      let minted, _, census_n = Lazy.force minted in
+      p label
         (register_tiled census_n
-        && String.is_substring (Generated.read "tmg_narrower") ~substring:(header minted));
-      p_all2 n_parity got_n want ~f:Float.equal
-    end;
-    (* One vector column past what the budget admits beside four rows, at the narrowest width the
-       file's ladder ranks, so that the budget rule — not the width rule — is the one that fires. *)
-    let over_budget =
-      {
-        RT.rm = 4;
-        rn = ((RT.budget ~vector_registers:file.registers - 4) / 5) + 1;
-        lanes = List.last_exn ladder;
-      }
-    in
-    p "an over-budget request is refused by the fit rules"
-      (match RT.check ~file ~elt_bytes ~m:n ~n over_budget with
-      | Error why -> String.is_substring why ~substring:"budget"
-      | Ok () -> false);
-    let got_ob, census_ob =
-      compile_run ~name:"tmg_over_budget" ~leg:(Tensorized (Some over_budget)) ob_t
-    in
-    p "an over-budget request declines to the scalar fallback" (scalar_fallback census_ob);
-    p "the declined routine is labeled scalar-fallback, not tensorized"
-      (Ir.C_syntax.equal_tensorization census_ob.Ir.C_syntax.tensorization
-         Ir.C_syntax.Scalar_fallback);
-    p_all2 "the declined routine still computes the serial values" got_ob want ~f:Float.equal;
-    let over_width = { RT.rm = 1; rn = (n / lanes) + 1; lanes } in
-    let _, census_ow =
-      compile_run ~name:"tmg_over_width" ~leg:(Tensorized (Some over_width)) ow_t
-    in
-    p "an over-width request declines to the scalar fallback" (scalar_fallback census_ow);
-    (* The relationship: the unrequested rendering IS [Register_tile.default] of the site. *)
-    let dflt = Option.value_exn (RT.default ~file ~elt_bytes ~m:n ~n) in
-    let _, census_d = compile_run ~name:"tmg_default" ~leg:(Tensorized None) dflt_t in
-    let src_d = Generated.read "tmg_default" in
-    p "the unrequested rendering carries the model's default geometry"
-      (register_tiled census_d && String.is_substring src_d ~substring:(header dflt));
-    p "the unrequested header does not claim a schedule provenance"
-      (not (String.is_substring src_d ~substring:provenance));
-    (* The two-row twin of this site's default (gh-ocannl-947): the widest two-row tile the file's
-       budget admits: 2x10 of 4 lanes on NEON and 2x5 of 8 on AVX2, each with a 24-column tail at n
-       = 64, and 2x4 of 16 on AVX-512, where the column extent caps it tail-free. *)
-    let twin = Option.value_exn (RT.rm_twin ~file ~elt_bytes ~m:n ~n) in
-    let%op twin_t = ma * mb in
-    let got_tw, census_tw = compile_run ~name:"tmg_rm_twin" ~leg:(Tensorized (Some twin)) twin_t in
-    let src_tw = Generated.read "tmg_rm_twin" in
-    p "the two-row twin renders register-tiled under its own header"
-      (register_tiled census_tw && String.is_substring src_tw ~substring:(header twin));
-    p_all2 "the two-row twin matches the serial twin bitwise" got_tw want ~f:Float.equal
-  end
+        && String.is_substring (Generated.read "tmg_narrower") ~substring:(header minted)));
+  in_leg ~leg:narrower_leg "the narrower-file rendering matches the serial twin bitwise"
+    (fun label ->
+      let _, got_n, _ = Lazy.force minted in
+      p_all2 label got_n want ~f:Float.equal);
+  (* One vector column past what the budget admits beside four rows, at the narrowest width the
+     file's ladder ranks, so that the budget rule — not the width rule — is the one that fires. *)
+  let over_budget =
+    lazy
+      (let s = Lazy.force setup in
+       {
+         RT.rm = 4;
+         rn = ((RT.budget ~vector_registers:s.file.registers - 4) / 5) + 1;
+         lanes = List.last_exn s.ladder;
+       })
+  in
+  in_leg ~leg:cpu_leg "an over-budget request is refused by the fit rules" (fun label ->
+      p label
+        (match
+           RT.check ~file:(Lazy.force setup).file ~elt_bytes ~m:n ~n (Lazy.force over_budget)
+         with
+        | Error why -> String.is_substring why ~substring:"budget"
+        | Ok () -> false));
+  let declined =
+    lazy
+      (compile_run ~name:"tmg_over_budget"
+         ~leg:(Tensorized (Some (Lazy.force over_budget)))
+         (Lazy.force setup).ob_t)
+  in
+  in_leg ~leg:cpu_leg "an over-budget request declines to the scalar fallback" (fun label ->
+      let _, census_ob = Lazy.force declined in
+      p label (scalar_fallback census_ob));
+  in_leg ~leg:cpu_leg "the declined routine is labeled scalar-fallback, not tensorized"
+    (fun label ->
+      let _, census_ob = Lazy.force declined in
+      p label
+        (Ir.C_syntax.equal_tensorization census_ob.Ir.C_syntax.tensorization
+           Ir.C_syntax.Scalar_fallback));
+  in_leg ~leg:cpu_leg "the declined routine still computes the serial values" (fun label ->
+      let got_ob, _ = Lazy.force declined in
+      p_all2 label got_ob want ~f:Float.equal);
+  in_leg ~leg:cpu_leg "an over-width request declines to the scalar fallback" (fun label ->
+      let s = Lazy.force setup in
+      let lanes = s.req.RT.lanes in
+      let over_width = { RT.rm = 1; rn = (n / lanes) + 1; lanes } in
+      let _, census_ow =
+        compile_run ~name:"tmg_over_width" ~leg:(Tensorized (Some over_width)) s.ow_t
+      in
+      p label (scalar_fallback census_ow));
+  (* The relationship: the unrequested rendering IS [Register_tile.default] of the site. *)
+  let unrequested =
+    lazy
+      (let s = Lazy.force setup in
+       let dflt = Option.value_exn (RT.default ~file:s.file ~elt_bytes ~m:n ~n) in
+       let _, census_d = compile_run ~name:"tmg_default" ~leg:(Tensorized None) s.dflt_t in
+       (dflt, census_d, Generated.read "tmg_default"))
+  in
+  in_leg ~leg:cpu_leg "the unrequested rendering carries the model's default geometry" (fun label ->
+      let dflt, census_d, src_d = Lazy.force unrequested in
+      p label (register_tiled census_d && String.is_substring src_d ~substring:(header dflt)));
+  in_leg ~leg:cpu_leg "the unrequested header does not claim a schedule provenance" (fun label ->
+      let _, _, src_d = Lazy.force unrequested in
+      p label (not (String.is_substring src_d ~substring:provenance)));
+  (* The two-row twin of this site's default (gh-ocannl-947): the widest two-row tile the file's
+     budget admits: 2x10 of 4 lanes on NEON and 2x5 of 8 on AVX2, each with a 24-column tail at n =
+     64, and 2x4 of 16 on AVX-512, where the column extent caps it tail-free. *)
+  let two_row =
+    lazy
+      (let s = Lazy.force setup in
+       let twin = Option.value_exn (RT.rm_twin ~file:s.file ~elt_bytes ~m:n ~n) in
+       let%op twin_t = ma * mb in
+       let got_tw, census_tw =
+         compile_run ~name:"tmg_rm_twin" ~leg:(Tensorized (Some twin)) twin_t
+       in
+       (twin, got_tw, census_tw, Generated.read "tmg_rm_twin"))
+  in
+  in_leg ~leg:cpu_leg "the two-row twin renders register-tiled under its own header" (fun label ->
+      let twin, _, census_tw, src_tw = Lazy.force two_row in
+      p label (register_tiled census_tw && String.is_substring src_tw ~substring:(header twin)));
+  in_leg ~leg:cpu_leg "the two-row twin matches the serial twin bitwise" (fun label ->
+      let _, got_tw, _, _ = Lazy.force two_row in
+      p_all2 label got_tw want ~f:Float.equal)
 
 (* === The tails (gh-ocannl-620) === *)
 (* Until gh-ocannl-620 the columns [rn * lanes] did not cover, and the rows [rm] did not, were
@@ -484,192 +537,190 @@ type tail_result = { tiled : bool; header : bool; no_scalar : bool; partial : bo
 
 let () =
   let m, nt, k = (6, 19, 5) in
-  let claims =
-    [
-      "a site the tile divides in neither dimension renders register-tiled";
-      "the header names the column tail and the two-row band";
-      "no scalar accumulator is emitted";
-      "the partial column is a zeroed register filled at exactly its width";
-      "the tails match the serial twin bitwise";
-    ]
+  (* The machine's vector file, the host-width tile and the narrower widths: read where the
+     C-backend leg is open. *)
+  let hw =
+    lazy
+      (let limits = Context.hardware_limits (Context.auto ()) in
+       let file = limits.Ir.Backend_intf.simd_vector in
+       let ladder = RT.simd_lane_ladder ~vector_bytes:file.bytes ~elt_bytes in
+       (* A 16-column width at [lanes] -- [4x1] of 16, [4x2] of 8, [4x4] of 4, [4x8] of 2 -- capped
+          at the widest four-row tile the register file holds: a 16-register file at 4 lanes (SSE,
+          or x86 at a forced 16 bytes) takes [4x3] of 4, whose 12 columns leave a two-vector tail
+          rather than one (gh-ocannl-1285), and a 32-register file at 2 lanes takes [4x6]. Whatever
+          the tile, the 19 - [n_full] leftover columns end in a PARTIAL vector and 6 - 4 = 2 rows
+          form the band; the header the tile must state, and the partial's width, are derived from
+          {!RT.coverage}. *)
+       let tile_at lanes =
+         { RT.rm = 4; rn = min (16 / lanes) (RT.rn_cap ~vector_registers:file.registers); lanes }
+       in
+       let tile = tile_at (List.hd_exn ladder) in
+       (* The f32 lane counts of every narrower file this one contains -- each halving of its width
+          down to the 8-byte floor every rendering file meets -- that its own ladder does not rank.
+          Derived from the files, not read from [RT.renderable_lanes]: that is the rule under test,
+          and a gate reading it would turn its regression into a skip. *)
+       let narrower =
+         let rec halvings bytes = if bytes < 8 then [] else bytes :: halvings (bytes / 2) in
+         halvings (file.bytes / 2)
+         |> List.map ~f:(fun bytes -> bytes / elt_bytes)
+         |> List.filter ~f:(fun lanes -> lanes < List.last_exn ladder)
+       in
+       (file, tile_at, tile, narrower))
   in
-  let names tag = List.map claims ~f:(fun c -> tag ^ ": " ^ c) in
-  let narrower_tag tag = tag ^ " at every narrower file's width" in
-  let tags = [ "f32"; "bf16"; "half"; "half_ns" ] and narrower_tags = [ "f32"; "bf16"; "half" ] in
-  if not on_cpu then (
-    List.iter tags ~f:(fun tag -> List.iter (names tag) ~f:skipped);
-    List.iter narrower_tags ~f:(fun tag -> List.iter (names (narrower_tag tag)) ~f:skipped))
-  else begin
-    let limits = Context.hardware_limits (Context.auto ()) in
-    let file = limits.Ir.Backend_intf.simd_vector in
-    let ladder = RT.simd_lane_ladder ~vector_bytes:file.bytes ~elt_bytes in
-    (* A 16-column width at [lanes] -- [4x1] of 16, [4x2] of 8, [4x4] of 4, [4x8] of 2 -- capped at
-       the widest four-row tile the register file holds: a 16-register file at 4 lanes (SSE, or x86
-       at a forced 16 bytes) takes [4x3] of 4, whose 12 columns leave a two-vector tail rather than
-       one (gh-ocannl-1285), and a 32-register file at 2 lanes takes [4x6]. Whatever the tile, the
-       19 - [n_full] leftover columns end in a PARTIAL vector and 6 - 4 = 2 rows form the band; the
-       header the tile must state, and the partial's width, are derived from {!RT.coverage}. *)
-    let tile_at lanes =
-      { RT.rm = 4; rn = min (16 / lanes) (RT.rn_cap ~vector_registers:file.registers); lanes }
+  (* Exact in bf16 and half: cells are the multiples of 1/2 in [-1.5, 1.5], so products are
+     multiples of 1/4 and the five-term sums at most 11.25 — six significand bits. That both
+     operands vary with both axes is not argued here but ENFORCED: [Ll_test.cycle] raises when the
+     modulus divides a row-major stride, i.e. when an axis cancels, and 7 is coprime to both row
+     strides (A's k = 5, B's n = 19). The hand-rolled fixture this replaces cancelled along A's rows
+     once, and a row-band pass reading the wrong A row would still have matched the serial twin. *)
+  let av = Ll_test.cycle ~dims:[| m; k |] ~modulus:7 ~offset:(-3.) ~stride:0.5 in
+  let bv = Ll_test.cycle ~dims:[| k; nt |] ~modulus:7 ~offset:(-3.) ~stride:0.5 in
+  (* The tail geometry [tile] renders at this site, as the emission spells it: the partial vector is
+     the tail pass's last column -- its accumulator, and its address as the tail's first column plus
+     the column's lane offset -- and [width] is how many of its lanes are real. *)
+  let geometry (t : RT.t) =
+    let cov = RT.coverage ~m ~n:nt t in
+    let tail_vectors = List.length cov.tail_widths in
+    let acc = Printf.sprintf "tmma_c_0_%d__" (tail_vectors - 1) in
+    let at = Printf.sprintf "%d + %d" cov.n_full ((tail_vectors - 1) * t.lanes) in
+    let width = Option.value (List.last cov.tail_widths) ~default:0 in
+    let header =
+      Printf.sprintf "; column tail %d in %d vector%s; row tail %d)" (nt - cov.n_full) tail_vectors
+        (if tail_vectors = 1 then "" else "s")
+        (m - cov.m_full)
     in
-    let tile = tile_at (List.hd_exn ladder) in
-    (* The f32 lane counts of every narrower file this one contains -- each halving of its width
-       down to the 8-byte floor every rendering file meets -- that its own ladder does not rank.
-       Derived from the files, not read from [RT.renderable_lanes]: that is the rule under test, and
-       a gate reading it would turn its regression into a skip. *)
-    let narrower =
-      let rec halvings bytes = if bytes < 8 then [] else bytes :: halvings (bytes / 2) in
-      halvings (file.bytes / 2)
-      |> List.map ~f:(fun bytes -> bytes / elt_bytes)
-      |> List.filter ~f:(fun lanes -> lanes < List.last_exn ladder)
+    (acc, at, width, header)
+  in
+  (* At f32: a zeroed register initialized from exactly [width] lanes and storing exactly those. *)
+  let f32_partial (t : RT.t) has =
+    let acc, at, width, _ = geometry t in
+    let lane l = Printf.sprintf "(&tmma_d__[(tmma_i__ + 0) * %d + %s])[%d]" nt at l in
+    let last = width - 1 in
+    0 < width && width < t.lanes
+    && has (acc ^ " = {" ^ lane 0)
+    && has (lane last ^ "};")
+    && has (Printf.sprintf "%s = %s[%d];" (lane last) acc last)
+    && not (has (lane width))
+  in
+  (* Through the bridges: the partial column's storage bits are staged in a whole vector, [width]
+     lanes in and [width] lanes out, and the bridge macro converts it at the full lane count -- for
+     half, bit-cast to a vector of [HALF_T] first, so the macro's per-lane fallback reads
+     [HALF_T]s. *)
+  let narrow_partial ~bridged ~via (t : RT.t) has =
+    let acc, at, width, _ = geometry t in
+    let bits ~qual l =
+      Printf.sprintf "((%socannl_u16_alias *)&tmma_d__[(tmma_i__ + 0) * %d + %s])[%d]" qual nt at l
     in
-    (* Exact in bf16 and half: cells are the multiples of 1/2 in [-1.5, 1.5], so products are
-       multiples of 1/4 and the five-term sums at most 11.25 — six significand bits. That both
-       operands vary with both axes is not argued here but ENFORCED: [Ll_test.cycle] raises when the
-       modulus divides a row-major stride, i.e. when an axis cancels, and 7 is coprime to both row
-       strides (A's k = 5, B's n = 19). The hand-rolled fixture this replaces cancelled along A's
-       rows once, and a row-band pass reading the wrong A row would still have matched the serial
-       twin. *)
-    let av = Ll_test.cycle ~dims:[| m; k |] ~modulus:7 ~offset:(-3.) ~stride:0.5 in
-    let bv = Ll_test.cycle ~dims:[| k; nt |] ~modulus:7 ~offset:(-3.) ~stride:0.5 in
-    (* The tail geometry [tile] renders at this site, as the emission spells it: the partial vector
-       is the tail pass's last column -- its accumulator, and its address as the tail's first column
-       plus the column's lane offset -- and [width] is how many of its lanes are real. *)
-    let geometry (t : RT.t) =
-      let cov = RT.coverage ~m ~n:nt t in
-      let tail_vectors = List.length cov.tail_widths in
-      let acc = Printf.sprintf "tmma_c_0_%d__" (tail_vectors - 1) in
-      let at = Printf.sprintf "%d + %d" cov.n_full ((tail_vectors - 1) * t.lanes) in
-      let width = Option.value (List.last cov.tail_widths) ~default:0 in
-      let header =
-        Printf.sprintf "; column tail %d in %d vector%s; row tail %d)" (nt - cov.n_full)
-          tail_vectors
-          (if tail_vectors = 1 then "" else "s")
-          (m - cov.m_full)
-      in
-      (acc, at, width, header)
+    let last = width - 1 in
+    0 < width && width < t.lanes
+    && has ("ocannl_pv__ = {" ^ bits ~qual:"const " 0)
+    && has (bits ~qual:"const " last ^ "};")
+    && has (Printf.sprintf "%s = ocannl_pv__[%d];" (bits ~qual:"" last) last)
+    && has (Printf.sprintf "%d, %s, (const %s *)&%s);" t.lanes acc bridged via)
+    && not (has (bits ~qual:"const " width) || has (bits ~qual:"" width))
+  in
+  (* One serial twin per precision, then one tiled rendering per requested tile. *)
+  let render ?b_label ~tag ~prec ~partial tiles =
+    let a = NTDSL.init ~l:("tmt_a_" ^ tag) ~prec ~i:[ k ] ~o:[ m ] ~f:av () in
+    let b_label = Option.value b_label ~default:("tmt_b_" ^ tag) in
+    let b = NTDSL.init ~l:b_label ~prec ~i:[ nt ] ~o:[ k ] ~f:bv () in
+    let%op serial = a * b in
+    Tn.update_prec serial.Tensor.value prec;
+    let want, _ = compile_run ~simd_width:nt ~name:("tmt_" ^ tag ^ "_serial") ~leg:Serial serial in
+    let want = nonzero ("tmt_" ^ tag ^ "_serial") want in
+    List.map tiles ~f:(fun (name, (t : RT.t)) ->
+        let%op tiled = a * b in
+        Tn.update_prec tiled.Tensor.value prec;
+        let got, census = compile_run ~simd_width:nt ~name ~leg:(Tensorized (Some t)) tiled in
+        let src = Generated.read name in
+        let has s = String.is_substring src ~substring:s in
+        let _, _, _, header = geometry t in
+        ( {
+            tiled = register_tiled census;
+            header = has header;
+            no_scalar = not (has "tmma_acc__");
+            partial = partial t has;
+            parity = Array.equal Float.equal got want;
+          },
+          got,
+          want ))
+  in
+  (* The five tail claims of one rendering family, written once for both families: [each label f]
+     claims [f] of what ran, and [parity label] the values' parity. *)
+  let tail_claims ~prefix ~each ~parity =
+    in_legf ~leg:cpu_leg "%s: a site the tile divides in neither dimension renders register-tiled"
+      prefix (fun label -> each label (fun r -> r.tiled));
+    in_legf ~leg:cpu_leg "%s: the header names the column tail and the two-row band" prefix
+      (fun label -> each label (fun r -> r.header));
+    in_legf ~leg:cpu_leg "%s: no scalar accumulator is emitted" prefix (fun label ->
+        each label (fun r -> r.no_scalar));
+    in_legf ~leg:cpu_leg "%s: the partial column is a zeroed register filled at exactly its width"
+      prefix (fun label -> each label (fun r -> r.partial));
+    in_legf ~leg:cpu_leg "%s: the tails match the serial twin bitwise" prefix parity
+  in
+  (* The host-width legs: one rendering each, claimed as it ran, parity with its first differing
+     cell named. *)
+  let host_leg ?b_label ~tag ~prec ~partial () =
+    let rendered =
+      lazy
+        (let _, _, tile, _ = Lazy.force hw in
+         let b_label = Option.map b_label ~f:(fun f -> f tile) in
+         match render ?b_label ~tag ~prec ~partial [ ("tmt_" ^ tag, tile) ] with
+         | [ rendered ] -> rendered
+         | _ -> assert false)
     in
-    (* At f32: a zeroed register initialized from exactly [width] lanes and storing exactly
-       those. *)
-    let f32_partial (t : RT.t) has =
-      let acc, at, width, _ = geometry t in
-      let lane l = Printf.sprintf "(&tmma_d__[(tmma_i__ + 0) * %d + %s])[%d]" nt at l in
-      let last = width - 1 in
-      0 < width && width < t.lanes
-      && has (acc ^ " = {" ^ lane 0)
-      && has (lane last ^ "};")
-      && has (Printf.sprintf "%s = %s[%d];" (lane last) acc last)
-      && not (has (lane width))
+    tail_claims ~prefix:tag
+      ~each:(fun label f ->
+        let r, _, _ = Lazy.force rendered in
+        p label (f r))
+      ~parity:(fun label ->
+        let _, got, want = Lazy.force rendered in
+        p_all2 label got want ~f:Float.equal)
+  in
+  (* The narrower-width legs: one rendering per narrower width, each claim over all of them. *)
+  let narrower_leg ~tag ~prec ~partial () =
+    let results =
+      lazy
+        (let _, tile_at, _, narrower = Lazy.force hw in
+         if List.is_empty narrower then []
+         else
+           List.map
+             ~f:(fun (r, _, _) -> r)
+             (render ~tag:(tag ^ "_nw") ~prec ~partial
+                (List.map narrower ~f:(fun lanes ->
+                     (Printf.sprintf "tmt_%s_nw%d" tag lanes, tile_at lanes)))))
     in
-    (* Through the bridges: the partial column's storage bits are staged in a whole vector, [width]
-       lanes in and [width] lanes out, and the bridge macro converts it at the full lane count --
-       for half, bit-cast to a vector of [HALF_T] first, so the macro's per-lane fallback reads
-       [HALF_T]s. *)
-    let narrow_partial ~bridged ~via (t : RT.t) has =
-      let acc, at, width, _ = geometry t in
-      let bits ~qual l =
-        Printf.sprintf "((%socannl_u16_alias *)&tmma_d__[(tmma_i__ + 0) * %d + %s])[%d]" qual nt at
-          l
-      in
-      let last = width - 1 in
-      0 < width && width < t.lanes
-      && has ("ocannl_pv__ = {" ^ bits ~qual:"const " 0)
-      && has (bits ~qual:"const " last ^ "};")
-      && has (Printf.sprintf "%s = ocannl_pv__[%d];" (bits ~qual:"" last) last)
-      && has (Printf.sprintf "%d, %s, (const %s *)&%s);" t.lanes acc bridged via)
-      && not (has (bits ~qual:"const " width) || has (bits ~qual:"" width))
-    in
-    (* One serial twin per precision, then one tiled rendering per requested tile. *)
-    let leg ?b_label ~tag ~prec ~partial tiles =
-      let a = NTDSL.init ~l:("tmt_a_" ^ tag) ~prec ~i:[ k ] ~o:[ m ] ~f:av () in
-      let b_label = Option.value b_label ~default:("tmt_b_" ^ tag) in
-      let b = NTDSL.init ~l:b_label ~prec ~i:[ nt ] ~o:[ k ] ~f:bv () in
-      let%op serial = a * b in
-      Tn.update_prec serial.Tensor.value prec;
-      let want, _ =
-        compile_run ~simd_width:nt ~name:("tmt_" ^ tag ^ "_serial") ~leg:Serial serial
-      in
-      let want = nonzero ("tmt_" ^ tag ^ "_serial") want in
-      List.map tiles ~f:(fun (name, (t : RT.t)) ->
-          let%op tiled = a * b in
-          Tn.update_prec tiled.Tensor.value prec;
-          let got, census = compile_run ~simd_width:nt ~name ~leg:(Tensorized (Some t)) tiled in
-          let src = Generated.read name in
-          let has s = String.is_substring src ~substring:s in
-          let _, _, _, header = geometry t in
-          ( {
-              tiled = register_tiled census;
-              header = has header;
-              no_scalar = not (has "tmma_acc__");
-              partial = partial t has;
-              parity = Array.equal Float.equal got want;
-            },
-            got,
-            want ))
-    in
-    (* The host-width legs: one rendering each, claimed as it ran, parity with its first differing
-       cell named. *)
-    let host_leg ?b_label ~tag ~prec ~partial () =
-      match leg ?b_label ~tag ~prec ~partial [ ("tmt_" ^ tag, tile) ] with
-      | [ (r, got, want) ] -> (
-          match names tag with
-          | [ n_tiled; n_header; n_scalar; n_partial; n_parity ] ->
-              p n_tiled r.tiled;
-              p n_header r.header;
-              p n_scalar r.no_scalar;
-              p n_partial r.partial;
-              p_all2 n_parity got want ~f:Float.equal
-          | _ -> assert false)
-      | _ -> assert false
-    in
-    (* The narrower-width legs: one rendering per narrower width, each claim over all of them. *)
-    let narrower_leg ~tag ~prec ~partial () =
-      let results =
-        if List.is_empty narrower then []
-        else
-          List.map
-            ~f:(fun (r, _, _) -> r)
-            (leg ~tag:(tag ^ "_nw") ~prec ~partial
-               (List.map narrower ~f:(fun lanes ->
-                    (Printf.sprintf "tmt_%s_nw%d" tag lanes, tile_at lanes))))
-      in
+    let each label f =
+      let results = Lazy.force results in
+      let file, _, _, narrower = Lazy.force hw in
       let on = Printf.sprintf "a %d-byte vector file, which contains no narrower one" file.bytes in
-      List.iter2_exn
-        (names (narrower_tag tag))
-        [
-          (fun r -> r.tiled);
-          (fun r -> r.header);
-          (fun r -> r.no_scalar);
-          (fun r -> r.partial);
-          (fun r -> r.parity);
-        ]
-        ~f:(fun label f ->
-          gated_all ~aggregation:`Environment ~min:(List.length narrower)
-            ~when_:(not (List.is_empty narrower))
-            ~on label results ~f)
+      gated_all ~aggregation:`Environment ~min:(List.length narrower)
+        ~when_:(not (List.is_empty narrower))
+        ~on label results ~f
     in
-    host_leg ~tag:"f32" ~prec:Ir.Ops.single ~partial:f32_partial ();
-    (* The narrow legs request the f32 leg's geometry at the same lanes: the lane count follows the
-       COMPUTE precision, f32 for bf16 and — under the default policy — for half too, so a width the
-       narrow storage's element size picked would be declined. They used to leave the geometry to
-       the renderer, which stopped meaning a one-vector tail when NEON's 19-column default became
-       the 4x3 tile of a two-vector tail (gh-ocannl-1180). *)
-    let bf16_partial = narrow_partial ~bridged:"unsigned short" ~via:"ocannl_pv__" in
-    let half_partial = narrow_partial ~bridged:"HALF_T" ~via:"ocannl_pc__" in
-    host_leg ~tag:"bf16" ~prec:Ir.Ops.bfloat16 ~partial:bf16_partial ();
-    host_leg ~tag:"half" ~prec:Ir.Ops.half ~partial:half_partial ();
-    (* The same half leg with its B operand labeled like the staging typedef the tile declares
-       ([ocannl_vec<lanes>hs]) ahead of its operand pointers: [ocannl_] is the emitter's namespace,
-       so the node's code name takes the [n<id>_] form and the kernel compiles (gh-ocannl-1102). A
-       bare name there would be shadowed by the typedef and the pointer's initializer would not
-       parse. *)
-    host_leg
-      ~b_label:(Printf.sprintf "ocannl_vec%dhs" tile.lanes)
-      ~tag:"half_ns" ~prec:Ir.Ops.half ~partial:half_partial ();
-    narrower_leg ~tag:"f32" ~prec:Ir.Ops.single ~partial:f32_partial ();
-    narrower_leg ~tag:"bf16" ~prec:Ir.Ops.bfloat16 ~partial:bf16_partial ();
-    narrower_leg ~tag:"half" ~prec:Ir.Ops.half ~partial:half_partial ()
-  end
+    tail_claims ~prefix:(tag ^ " at every narrower file's width") ~each ~parity:(fun label ->
+        each label (fun r -> r.parity))
+  in
+  host_leg ~tag:"f32" ~prec:Ir.Ops.single ~partial:f32_partial ();
+  (* The narrow legs request the f32 leg's geometry at the same lanes: the lane count follows the
+     COMPUTE precision, f32 for bf16 and — under the default policy — for half too, so a width the
+     narrow storage's element size picked would be declined. They used to leave the geometry to the
+     renderer, which stopped meaning a one-vector tail when NEON's 19-column default became the 4x3
+     tile of a two-vector tail (gh-ocannl-1180). *)
+  let bf16_partial = narrow_partial ~bridged:"unsigned short" ~via:"ocannl_pv__" in
+  let half_partial = narrow_partial ~bridged:"HALF_T" ~via:"ocannl_pc__" in
+  host_leg ~tag:"bf16" ~prec:Ir.Ops.bfloat16 ~partial:bf16_partial ();
+  host_leg ~tag:"half" ~prec:Ir.Ops.half ~partial:half_partial ();
+  (* The same half leg with its B operand labeled like the staging typedef the tile declares
+     ([ocannl_vec<lanes>hs]) ahead of its operand pointers: [ocannl_] is the emitter's namespace, so
+     the node's code name takes the [n<id>_] form and the kernel compiles (gh-ocannl-1102). A bare
+     name there would be shadowed by the typedef and the pointer's initializer would not parse. *)
+  host_leg
+    ~b_label:(fun (tile : RT.t) -> Printf.sprintf "ocannl_vec%dhs" tile.lanes)
+    ~tag:"half_ns" ~prec:Ir.Ops.half ~partial:half_partial ();
+  narrower_leg ~tag:"f32" ~prec:Ir.Ops.single ~partial:f32_partial ();
+  narrower_leg ~tag:"bf16" ~prec:Ir.Ops.bfloat16 ~partial:bf16_partial ();
+  narrower_leg ~tag:"half" ~prec:Ir.Ops.half ~partial:half_partial ()
 
 (* === The seeding === *)
 let () =
@@ -743,37 +794,35 @@ let () =
   p "the gate adds exactly the model's two-row twin after the alternatives"
     (List.equal (Option.equal RT.equal) gated (tiles @ [ RT.rm_twin ~file ~elt_bytes ~m ~n:nn ])
     && Option.is_some (RT.rm_twin ~file ~elt_bytes ~m ~n:nn));
-  if not on_cpu then
-    skipped "a seeded alternative instantiates through the sketch and renders its geometry"
-  else begin
-    (* Under the machine's own limits the alternative must fit its register file. *)
-    let limits = Context.hardware_limits (Context.auto ()) in
-    let seeds = Autotune.sketch_seed_params ~is_gpu:false ~is_cpu:true ~limits opt in
-    match
-      List.find seeds ~f:(fun p ->
-          p.Autotune.sk_mma && p.Autotune.sk_bk = 0 && p.Autotune.sk_bm = 0
-          && Option.is_some p.Autotune.sk_tile)
-    with
-    | None ->
-        (* Only where the machine's width divides 512 into a single affordable geometry. *)
-        skipped "a seeded alternative instantiates through the sketch and renders its geometry"
-    | Some seed ->
-        let t = Option.value_exn seed.Autotune.sk_tile in
-        let%op sc2 = a * b in
-        let comp = named "tmg_seeded" (Train.forward sc2) in
-        let ctx, routine =
-          Context.compile
-            ~lowered_transform:(fun o ->
-              [ Sched.apply (Autotune.sketch_schedule ~accum_prec ~p:seed o) o ])
-            ctx comp Ir.Indexing.Empty
-        in
-        let _ctx = Context.run ctx routine in
-        let src = Generated.read "tmg_seeded" in
-        p "a seeded alternative instantiates through the sketch and renders its geometry"
-          (register_tiled routine.Context.mma
-          && String.is_substring src ~substring:(header t)
-          && String.is_substring src ~substring:provenance)
-  end
+  in_leg ~leg:cpu_leg
+    "a seeded alternative instantiates through the sketch and renders its geometry" (fun label ->
+      (* Under the machine's own limits the alternative must fit its register file. *)
+      let limits = Context.hardware_limits (Context.auto ()) in
+      let seeds = Autotune.sketch_seed_params ~is_gpu:false ~is_cpu:true ~limits opt in
+      match
+        List.find seeds ~f:(fun p ->
+            p.Autotune.sk_mma && p.Autotune.sk_bk = 0 && p.Autotune.sk_bm = 0
+            && Option.is_some p.Autotune.sk_tile)
+      with
+      | None ->
+          (* Only where the machine's width divides 512 into a single affordable geometry. *)
+          skipped label
+      | Some seed ->
+          let t = Option.value_exn seed.Autotune.sk_tile in
+          let%op sc2 = a * b in
+          let comp = named "tmg_seeded" (Train.forward sc2) in
+          let ctx, routine =
+            Context.compile
+              ~lowered_transform:(fun o ->
+                [ Sched.apply (Autotune.sketch_schedule ~accum_prec ~p:seed o) o ])
+              ctx comp Ir.Indexing.Empty
+          in
+          let _ctx = Context.run ctx routine in
+          let src = Generated.read "tmg_seeded" in
+          p label
+            (register_tiled routine.Context.mma
+            && String.is_substring src ~substring:(header t)
+            && String.is_substring src ~substring:provenance))
 
 (* === The cache format === *)
 let () =

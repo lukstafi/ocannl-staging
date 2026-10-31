@@ -61,42 +61,11 @@ let on_cpu = Ir.Schedule.backend_is_cpu backend_name
 let wave k = Float.of_int ((k * 37 % 19) - 9) /. 8.
 let nd debug dims f = Ir.Ndarray.init_array ~debug Ir.Ops.single ~dims ~padding:None ~f
 
-let claims_census =
-  [ "census: the whole routine is censused"; "census: fission segments are censused" ]
-
-let claims_parity =
-  [
-    "parity: at least one seed of a keyed segment executes";
-    "parity: every executed seed matches the default pipeline's step";
-    "parity: no seed fails to reach its segment, or raises";
-    "negative control: at least one perturbed seed executes";
-    "negative control: every executed perturbed seed is reported a mismatch";
-    "negative control: no perturbed seed fails to reach its segment, raises, or has nothing to \
-     perturb";
-    "negative control: every perturbed seed renders its tensor-core statements as it does \
-     unperturbed";
-  ]
-
 (* Image 0's pattern repeats down every row, so it flips two cells of each pool window on columns
    2-3 in every row band and out-channel: 1376 flipped decision cells on CUDA's tf32 arm, within the
    fraction stated here but far above the default bound (one in a hundred thousand), which is sized
    for real graphs. *)
 let replay_fraction = 0.05
-
-let claim_persistent =
-  "persistent fragment: some executed conv seed holds its accumulator in a persistent-fragment \
-   scope, the region the negative control keeps"
-
-let claims_tf32 =
-  [
-    "tf32: some executed seed's reference is rounded to tf32";
-    "tf32 control: against the plain reference, nothing replayed, some tf32-rounded conv seed \
-     mismatches";
-    "tf32 replay: against the plain reference, the tied-at-zero window's flip is replayed and that \
-     seed matches";
-    "tf32 negative control: every seed whose reference is rounded to tf32 is still rounded, at the \
-     same nodes, when perturbed";
-  ]
 
 (* Image 0 is a tied-at-zero pool window, the shape a residual's pre-activation near 0 gives real
    graphs (gh-ocannl-1602: cifar_resnet's u31). Every row of image 0 holds, column by column, 0, a,
@@ -162,8 +131,8 @@ let () =
   let census = P.census_lines ctx ~static_indices opt in
   List.iter census ~f:(fun l -> Stdio.eprintf "%s (not part of the golden)\n" l);
   let censused what = List.exists census ~f:(String.is_substring ~substring:what) in
-  p (List.nth_exn claims_census 0) (censused "where=\"tune whole-routine\"");
-  p (List.nth_exn claims_census 1) (censused "where=\"tune coarse segment ");
+  p "census: the whole routine is censused" (censused "where=\"tune whole-routine\"");
+  p "census: fission segments are censused" (censused "where=\"tune coarse segment ");
   (* The parity mode, and its negative control. *)
   let gpu_withheld =
     match Lazy.force tensorized_capability with
@@ -187,72 +156,99 @@ let () =
           (Autotune.mma_tile_for_precisions_in_scope mma ~scope:Ir.Backend_intf.Mma_fragment_scope
              ~a_prec:Ir.Ops.single ~b_prec:Ir.Ops.single ~d_prec:Ir.Ops.single)
   in
-  match gpu_withheld with
-  | Some aggregation ->
-      List.iter
-        ((claims_parity @ [ claim_persistent ]) @ claims_tf32)
-        ~f:(Verdict.skipped ~aggregation ~backend:backend_name)
-  | None -> (
-      let parity ?(round = true) ?(replay = true) ?(select = P.any_seed) ~perturb () =
-        snd
-          (P.parity ~perturb ~round ~replay ~replay_fraction ~select
-             ~on_result:(fun r ->
-               Stdio.eprintf "%s%s%s (not part of the golden)\n"
-                 (if perturb then "perturbed " else "")
-                 (if round then ""
-                  else if replay then "plain reference, replay: "
-                  else "plain reference: ")
-                 (P.verdict_line r))
-             ctx step bindings
-             ~bind:(fun r -> IDX.find_exn r.Context.bindings batch_n := 0)
-             ~static_indices opt)
-      in
-      let executed =
-        List.filter ~f:(fun r -> match r.P.verdict with Match _ | Mismatch _ -> true | _ -> false)
-      in
-      let results = parity ~perturb:false () in
-      let matched = function { P.verdict = Match _; _ } -> true | _ -> false in
-      let mismatched = function { P.verdict = Mismatch _; _ } -> true | _ -> false in
-      let broken = function
-        | { P.verdict = Not_applied | Unjudged _ | Failed _ | Not_perturbed; _ } -> true
-        | _ -> false
-      in
-      p (List.nth_exn claims_parity 0) (not (List.is_empty (executed results)));
-      p_all (List.nth_exn claims_parity 1) (executed results) ~f:matched;
-      p_none (List.nth_exn claims_parity 2) results ~f:broken;
-      let perturbed = parity ~perturb:true () in
-      p (List.nth_exn claims_parity 3) (not (List.is_empty (executed perturbed)));
-      p_all (List.nth_exn claims_parity 4) (executed perturbed) ~f:mismatched;
-      p_none (List.nth_exn claims_parity 5) perturbed ~f:broken;
-      p_none (List.nth_exn claims_parity 6) perturbed ~f:(function
+  (* Off the seeder's f32 capability every parity claim is skipped by name, and off an arm that
+     reads f32 as tf32 every tf32 claim, in the order this one sequence makes them
+     (gh-ocannl-1703). *)
+  let leg =
+    Verdict.leg ?aggregation:gpu_withheld ~when_:(Option.is_none gpu_withheld) ~on:backend_name ()
+  in
+  let tf32_leg =
+    Verdict.sub_leg ?aggregation:tf32_withheld leg
+      ~when_:(lazy (Option.is_none tf32_withheld))
+      ~on:backend_name
+  in
+  let parity ?(round = true) ?(replay = true) ?(select = P.any_seed) ~perturb () =
+    snd
+      (P.parity ~perturb ~round ~replay ~replay_fraction ~select
+         ~on_result:(fun r ->
+           Stdio.eprintf "%s%s%s (not part of the golden)\n"
+             (if perturb then "perturbed " else "")
+             (if round then ""
+              else if replay then "plain reference, replay: "
+              else "plain reference: ")
+             (P.verdict_line r))
+         ctx step bindings
+         ~bind:(fun r -> IDX.find_exn r.Context.bindings batch_n := 0)
+         ~static_indices opt)
+  in
+  let executed =
+    List.filter ~f:(fun r -> match r.P.verdict with Match _ | Mismatch _ -> true | _ -> false)
+  in
+  let results = lazy (parity ~perturb:false ()) in
+  let matched = function { P.verdict = Match _; _ } -> true | _ -> false in
+  let mismatched = function { P.verdict = Mismatch _; _ } -> true | _ -> false in
+  let broken = function
+    | { P.verdict = Not_applied | Unjudged _ | Failed _ | Not_perturbed; _ } -> true
+    | _ -> false
+  in
+  in_leg ~leg "parity: at least one seed of a keyed segment executes" (fun label ->
+      p label (not (List.is_empty (executed (Lazy.force results)))));
+  in_leg ~leg "parity: every executed seed matches the default pipeline's step" (fun label ->
+      p_all label (executed (Lazy.force results)) ~f:matched);
+  in_leg ~leg "parity: no seed fails to reach its segment, or raises" (fun label ->
+      p_none label (Lazy.force results) ~f:broken);
+  let perturbed = lazy (parity ~perturb:true ()) in
+  in_leg ~leg "negative control: at least one perturbed seed executes" (fun label ->
+      p label (not (List.is_empty (executed (Lazy.force perturbed)))));
+  in_leg ~leg "negative control: every executed perturbed seed is reported a mismatch" (fun label ->
+      p_all label (executed (Lazy.force perturbed)) ~f:mismatched);
+  in_leg ~leg
+    "negative control: no perturbed seed fails to reach its segment, raises, or has nothing to \
+     perturb" (fun label -> p_none label (Lazy.force perturbed) ~f:broken);
+  in_leg ~leg
+    "negative control: every perturbed seed renders its tensor-core statements as it does \
+     unperturbed" (fun label ->
+      p_none label (Lazy.force perturbed) ~f:(function
         | { P.verdict = Rerendered _; _ } -> true
-        | _ -> false);
-      (* gh-ocannl-1707: the smoke must reach the region gh-ocannl-1677's control dissolved, or the
-         negative control above judges no seed on it: on CUDA every seed of the 8-wide step was
-         pad-masked (16-row wmma tiles), and a masked accumulator is never a persistent fragment.
-         The census counts the scopes the fragment hook rendered, so the claim is the renderer's
-         own. *)
-      Verdict.gated_exists ~when_:fragment_scope_advertised ~on:backend_name claim_persistent
-        (executed results) ~f:(fun r -> r.P.conv && r.P.mma.Ir.C_syntax.fragment_scopes > 0);
-      match tf32_withheld with
-      | Some aggregation ->
-          List.iter claims_tf32 ~f:(Verdict.skipped ~aggregation ~backend:backend_name)
-      | None ->
-          let rounded r = not (List.is_empty r.P.rounded) in
-          p_exists (List.nth_exn claims_tf32 0) (executed results) ~f:rounded;
-          let rounded_labels =
-            List.filter_map results ~f:(fun r -> if rounded r then Some r.P.label else None)
-          in
-          let ours r = List.mem rounded_labels r.P.label ~equal:String.equal in
-          let plain = parity ~round:false ~replay:false ~select:P.conv_seed ~perturb:false () in
-          p_exists (List.nth_exn claims_tf32 1) plain ~f:(fun r -> mismatched r && ours r);
-          let replayed = parity ~round:false ~select:P.conv_seed ~perturb:false () in
-          p_exists (List.nth_exn claims_tf32 2) replayed ~f:(fun r ->
-              matched r && ours r && r.P.replayed && r.P.flipped > 0);
-          (* gh-ocannl-1677: the control judges the tensor-core path the seed takes -- a perturbed
-             seed whose statements fell back to the scalar rendering has no rounded reference. Not
-             vacuous: the first tf32 claim has some seed rounded. *)
-          p_all (List.nth_exn claims_tf32 3) (List.filter results ~f:rounded) ~f:(fun r ->
-              List.exists perturbed ~f:(fun q ->
-                  String.equal q.P.label r.P.label && mismatched q
-                  && List.equal String.equal q.P.rounded r.P.rounded)))
+        | _ -> false));
+  (* gh-ocannl-1707: the smoke must reach the region gh-ocannl-1677's control dissolved, or the
+     negative control above judges no seed on it: on CUDA every seed of the 8-wide step was
+     pad-masked (16-row wmma tiles), and a masked accumulator is never a persistent fragment. The
+     census counts the scopes the fragment hook rendered, so the claim is the renderer's own. *)
+  in_leg ~leg
+    "persistent fragment: some executed conv seed holds its accumulator in a persistent-fragment \
+     scope, the region the negative control keeps" (fun label ->
+      Verdict.gated_exists ~when_:fragment_scope_advertised ~on:backend_name label
+        (executed (Lazy.force results))
+        ~f:(fun r -> r.P.conv && r.P.mma.Ir.C_syntax.fragment_scopes > 0));
+  let rounded r = not (List.is_empty r.P.rounded) in
+  in_leg ~leg:tf32_leg "tf32: some executed seed's reference is rounded to tf32" (fun label ->
+      p_exists label (executed (Lazy.force results)) ~f:rounded);
+  let rounded_labels =
+    lazy
+      (List.filter_map (Lazy.force results) ~f:(fun r -> if rounded r then Some r.P.label else None))
+  in
+  let ours r = List.mem (Lazy.force rounded_labels) r.P.label ~equal:String.equal in
+  let plain = lazy (parity ~round:false ~replay:false ~select:P.conv_seed ~perturb:false ()) in
+  in_leg ~leg:tf32_leg
+    "tf32 control: against the plain reference, nothing replayed, some tf32-rounded conv seed \
+     mismatches" (fun label ->
+      p_exists label (Lazy.force plain) ~f:(fun r -> mismatched r && ours r));
+  let replayed = lazy (parity ~round:false ~select:P.conv_seed ~perturb:false ()) in
+  in_leg ~leg:tf32_leg
+    "tf32 replay: against the plain reference, the tied-at-zero window's flip is replayed and that \
+     seed matches" (fun label ->
+      p_exists label (Lazy.force replayed) ~f:(fun r ->
+          matched r && ours r && r.P.replayed && r.P.flipped > 0));
+  (* gh-ocannl-1677: the control judges the tensor-core path the seed takes -- a perturbed seed
+     whose statements fell back to the scalar rendering has no rounded reference. Not vacuous: the
+     first tf32 claim has some seed rounded. *)
+  in_leg ~leg:tf32_leg
+    "tf32 negative control: every seed whose reference is rounded to tf32 is still rounded, at the \
+     same nodes, when perturbed" (fun label ->
+      p_all label
+        (List.filter (Lazy.force results) ~f:rounded)
+        ~f:(fun r ->
+          List.exists (Lazy.force perturbed) ~f:(fun q ->
+              String.equal q.P.label r.P.label && mismatched q
+              && List.equal String.equal q.P.rounded r.P.rounded)))

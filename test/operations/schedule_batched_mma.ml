@@ -46,7 +46,6 @@ let nonzero name (a : float array) =
   a
 
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
-let skipped = Verdict.skipped ~backend:backend_name
 let on_gpu = Sched.backend_is_gpu backend_name
 
 module Generated = Test_utils.Generated
@@ -115,36 +114,43 @@ let with_lowering ~name tensor ~(transform : LL.optimized -> LL.optimized) =
 
 (* The whole-triple CPU tensorized sketch selected from the public seeding API, executed against the
    serial twin. On GPU backends only the lowering capture runs (identity transform; the routine is
-   compiled but not executed). *)
+   compiled but not executed), and the execution claims, written once in a leg open off a GPU, are
+   skipped by name (gh-ocannl-1703). *)
+let cpu_leg = Verdict.leg ~when_:(not on_gpu) ~on:backend_name ()
+
 let check_leg ~tag ~serial ~tensorized =
   let want = compile_serial ~name:(tag ^ "_serial") serial in
-  if on_gpu then (
-    let opt, _ctx, _routine = with_lowering ~name:(tag ^ "_mma") tensorized ~transform:Fn.id in
-    p (tag ^ ": cpu mma seeds present") (not (List.is_empty (cpu_mma_seeds opt)));
-    skipped (tag ^ " tensorized matches the serial twin bitwise");
-    skipped (tag ^ " tensorized structure as expected");
-    opt)
-  else
-    let seed = ref None in
-    let transform opt =
-      let q =
-        List.find_exn (cpu_mma_seeds opt) ~f:(fun q -> q.Autotune.sk_bm = 0 && q.Autotune.sk_bk = 0)
+  let opt, present, compiled =
+    if on_gpu then
+      let opt, _ctx, _routine = with_lowering ~name:(tag ^ "_mma") tensorized ~transform:Fn.id in
+      (opt, not (List.is_empty (cpu_mma_seeds opt)), None)
+    else
+      let seed = ref None in
+      let transform opt =
+        let q =
+          List.find_exn (cpu_mma_seeds opt) ~f:(fun q ->
+              q.Autotune.sk_bm = 0 && q.Autotune.sk_bk = 0)
+        in
+        seed := Some q;
+        Sched.apply (Autotune.sketch_schedule ~accum_prec ~p:q opt) opt
       in
-      seed := Some q;
-      Sched.apply (Autotune.sketch_schedule ~accum_prec ~p:q opt) opt
-    in
-    let opt, ctx, routine = with_lowering ~name:(tag ^ "_mma") tensorized ~transform in
-    p (tag ^ ": cpu mma seeds present") (Option.is_some !seed);
-    let ctx = Context.run ctx routine in
-    let got = Context.get_values ctx tensorized.Tensor.value in
-    p_all2 (tag ^ " tensorized matches the serial twin bitwise") got want ~f:Float.equal;
-    (* Which way the statements rendered is the census's to say (gh-ocannl-1316): the register
-       tiling, every one of them, not the lane-0 scalar fallback its guard also wraps. *)
-    p
-      (tag ^ " tensorized structure as expected")
-      (Ll_test.all_rendered ~what:(tag ^ "_mma") Ir.C_syntax.Mma_register_tiled
-         (Ll_test.renderings routine.Context.mma));
-    opt
+      let opt, ctx, routine = with_lowering ~name:(tag ^ "_mma") tensorized ~transform in
+      (opt, Option.is_some !seed, Some (ctx, routine))
+  in
+  p (tag ^ ": cpu mma seeds present") present;
+  in_leg ~leg:cpu_leg (tag ^ " tensorized matches the serial twin bitwise") (fun label ->
+      let ctx, routine = Option.value_exn compiled in
+      let ctx = Context.run ctx routine in
+      let got = Context.get_values ctx tensorized.Tensor.value in
+      p_all2 label got want ~f:Float.equal);
+  (* Which way the statements rendered is the census's to say (gh-ocannl-1316): the register tiling,
+     every one of them, not the lane-0 scalar fallback its guard also wraps. *)
+  in_leg ~leg:cpu_leg (tag ^ " tensorized structure as expected") (fun label ->
+      let _, routine = Option.value_exn compiled in
+      p label
+        (Ll_test.all_rendered ~what:(tag ^ "_mma") Ir.C_syntax.Mma_register_tiled
+           (Ll_test.renderings routine.Context.mma)));
+  opt
 
 let () =
   let bt = 2 and ss = 16 and kk = 8 and jj = 32 in

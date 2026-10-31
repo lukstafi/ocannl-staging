@@ -5,28 +5,26 @@
    control that the wrapper still returns a code object. *)
 
 open Base
-open Verdict.Claims
-
-let claims =
-  [
-    "a hiprtc compile failure carries the effective option vector";
-    "a valid HIP kernel still compiles through the instrumented path";
-  ]
 
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 
-let check_hiprtc () =
-  Hip.init ();
-  let target_archs =
-    List.init (Hip.Device.get_count ()) ~f:(fun ordinal ->
-        (Hip.Device.get_attributes (Hip.Device.get ~ordinal)).gcn_arch_name)
-  in
-  let expected_options =
-    Ir.Compiler_options.hiprtc ~target_archs
-      ~hip_include_options:(Hip_backend.hip_include_options ())
-      ~rocwmma_include_options:[] ~uses_rocwmma:false ~with_debug:(Utils.with_runtime_debug ())
-  in
-  let expected_suffix = "\nhiprtc options: " ^ Ir.Compiler_options.render expected_options in
+(* The options hiprtc is expected to report, once the runtime is initialized. *)
+let expected_suffix =
+  lazy
+    (Hip.init ();
+     let target_archs =
+       List.init (Hip.Device.get_count ()) ~f:(fun ordinal ->
+           (Hip.Device.get_attributes (Hip.Device.get ~ordinal)).gcn_arch_name)
+     in
+     let expected_options =
+       Ir.Compiler_options.hiprtc ~target_archs
+         ~hip_include_options:(Hip_backend.hip_include_options ())
+         ~rocwmma_include_options:[] ~uses_rocwmma:false ~with_debug:(Utils.with_runtime_debug ())
+     in
+     "\nhiprtc options: " ^ Ir.Compiler_options.render expected_options)
+
+let failure_has_options () =
+  let expected_suffix = Lazy.force expected_suffix in
   let failure_message =
     match Hip_backend.Impl.hip_to_code ~name:"hiprtc_options_invalid" "this is not HIP C++" with
     | _ -> None
@@ -37,7 +35,9 @@ let check_hiprtc () =
   in
   if not failure_has_options then
     Option.iter failure_message ~f:(Stdio.eprintf "hiprtc failure: %s\n");
-  p (List.nth_exn claims 0) failure_has_options;
+  failure_has_options
+
+let valid_compiles () =
   let valid_source = {|extern "C" __global__ void hiprtc_options_valid() {}|} in
   let valid_error =
     try
@@ -48,8 +48,9 @@ let check_hiprtc () =
     with exn -> Some (Exn.to_string exn)
   in
   Option.iter valid_error ~f:(Stdio.eprintf "valid HIP source failed: %s\n");
-  p (List.nth_exn claims 1) (Option.is_none valid_error)
+  Option.is_none valid_error
 
 let () =
-  if String.equal backend_name "hip" then check_hiprtc ()
-  else List.iter claims ~f:(Verdict.skipped ~backend:backend_name)
+  Hip_compile_failure_options_claims.run
+    ~leg:(Verdict.leg ~when_:(String.equal backend_name "hip") ~on:backend_name ())
+    ~failure_has_options ~valid_compiles

@@ -119,82 +119,89 @@ let targets (compiles : Mma.ptx_compile list) =
 
 let native_arch (c : Mma.ptx_compile) = "sm_" ^ Int.to_string c.Mma.device_cc
 
-let claims =
-  [
-    "a whole-routine GPU seed pads the row to the mma tile";
-    "every variant's floor and native compiles agree bit for bit";
-    "every variant with floor PTX for another arch compiled native PTX, all for the device's arch";
-    "some variant's floor compile compiled PTX for another arch";
-    "every seed's routine is labeled tensorized at both targets";
-  ]
-
+(* Off an f32 tensor-core tile, or where its compile recorded no PTX, every claim is skipped by
+   name, in the order this one sequence makes them (gh-ocannl-1703). *)
 let () =
+  let leg = Verdict.leg ~when_:gpu_capable ~on:backend_name () in
   (* Compiled only where an f32 tensor-core tile can seed at all. *)
   let natural_floor =
-    if gpu_capable then
-      Some (run ~target:Mma.Floor ~name:"ptp_nat_f" ~transform:(fun opt -> [ opt ]))
-    else None
+    lazy (run ~target:Mma.Floor ~name:"ptp_nat_f" ~transform:(fun opt -> [ opt ]))
   in
-  match natural_floor with
-  | None | Some (_, _, []) ->
-      (* No f32 tensor-core tile to seed, or no PTX compiled: the backend has no floor/native
-         distinction to compare. *)
-      List.iter claims ~f:(Verdict.skipped ~backend:backend_name)
-  | Some ((_, _, natural_compiles) as natural_floor) ->
-      let device_cc = (List.hd_exn natural_compiles).Mma.device_cc in
-      Stdio.eprintf "ptx_target_parity (not part of the golden): backend %s, device compute %d\n%!"
-        backend_name device_cc;
-      let seeds =
-        Autotune.sketch_seed_params ~is_gpu:true ~is_cpu:false ~limits (whole_lowering ())
-      in
-      p_exists (List.nth_exn claims 0) seeds ~f:(fun sp ->
-          sp.Autotune.sk_bm = 0 && sp.Autotune.sk_tm > 0);
-      let variants =
-        ("natural", fun opt -> [ opt ])
-        :: List.map seeds ~f:(fun sp ->
-            ( Autotune.sketch_params_label sp,
-              fun opt -> [ Sched.apply (Autotune.sketch_schedule ~accum_prec ~p:sp opt) opt ] ))
-      in
-      let results =
-        List.mapi variants ~f:(fun i (label, transform) ->
-            let floor =
-              if i = 0 then natural_floor
-              else run ~target:Mma.Floor ~name:(Printf.sprintf "ptp_v%d_f" i) ~transform
-            in
-            let native = run ~target:Mma.Native ~name:(Printf.sprintf "ptp_v%d_n" i) ~transform in
-            let (fv, _, fc), (nv, _, nc) = (floor, native) in
-            let agree = bitwise_equal fv nv in
-            Stdio.eprintf
-              "ptx_target_parity (not part of the golden): %s: floor PTX %s, native PTX %s, %s\n%!"
-              label (targets fc) (targets nc)
-              (if agree then "bitwise equal"
-               else if Array.length fv <> Array.length nv then "shape mismatch"
-               else
-                 Printf.sprintf "%d of %d cells differ"
-                   (Array.counti fv ~f:(fun j x -> not (Float.equal x nv.(j))))
-                   (Array.length fv));
-            (i, agree, floor, native))
-      in
-      let _, _, (reference, _, _), _ = List.hd_exn results in
-      if not (Array.exists reference ~f:(fun v -> Float.(v <> 0.))) then
-        failwith "ptx_target_parity: the natural form is all zeros, so the comparison is vacuous";
-      p_all (List.nth_exn claims 1) results ~f:(fun (_, agree, _, _) -> agree);
-      (* A variant whose floor compiles already targeted the device's arch (an sm_80 device's tf32
-         seeds) has the same option list at both targets, so its native compile may be served by the
-         kernel code cache and record nothing: only the others must compile at native. *)
-      let at_native (c : Mma.ptx_compile) =
-        Option.equal String.equal c.Mma.target (Some (native_arch c))
-      in
-      p_all (List.nth_exn claims 2)
-        (List.filter results ~f:(fun (_, _, (_, _, fc), _) -> not (List.for_all fc ~f:at_native)))
+  let natural_compiles () =
+    let _, _, compiles = Lazy.force natural_floor in
+    compiles
+  in
+  (* No PTX compiled: the backend has no floor/native distinction to compare. *)
+  let leg =
+    Verdict.sub_leg leg ~when_:(lazy (not (List.is_empty (natural_compiles ())))) ~on:backend_name
+  in
+  let seeds =
+    lazy
+      (let device_cc = (List.hd_exn (natural_compiles ())).Mma.device_cc in
+       Stdio.eprintf "ptx_target_parity (not part of the golden): backend %s, device compute %d\n%!"
+         backend_name device_cc;
+       Autotune.sketch_seed_params ~is_gpu:true ~is_cpu:false ~limits (whole_lowering ()))
+  in
+  in_leg ~leg "a whole-routine GPU seed pads the row to the mma tile" (fun label ->
+      p_exists label (Lazy.force seeds) ~f:(fun sp ->
+          sp.Autotune.sk_bm = 0 && sp.Autotune.sk_tm > 0));
+  let results =
+    lazy
+      (let variants =
+         ("natural", fun opt -> [ opt ])
+         :: List.map (Lazy.force seeds) ~f:(fun sp ->
+             ( Autotune.sketch_params_label sp,
+               fun opt -> [ Sched.apply (Autotune.sketch_schedule ~accum_prec ~p:sp opt) opt ] ))
+       in
+       let results =
+         List.mapi variants ~f:(fun i (label, transform) ->
+             let floor =
+               if i = 0 then Lazy.force natural_floor
+               else run ~target:Mma.Floor ~name:(Printf.sprintf "ptp_v%d_f" i) ~transform
+             in
+             let native = run ~target:Mma.Native ~name:(Printf.sprintf "ptp_v%d_n" i) ~transform in
+             let (fv, _, fc), (nv, _, nc) = (floor, native) in
+             let agree = bitwise_equal fv nv in
+             Stdio.eprintf
+               "ptx_target_parity (not part of the golden): %s: floor PTX %s, native PTX %s, %s\n%!"
+               label (targets fc) (targets nc)
+               (if agree then "bitwise equal"
+                else if Array.length fv <> Array.length nv then "shape mismatch"
+                else
+                  Printf.sprintf "%d of %d cells differ"
+                    (Array.counti fv ~f:(fun j x -> not (Float.equal x nv.(j))))
+                    (Array.length fv));
+             (i, agree, floor, native))
+       in
+       let _, _, (reference, _, _), _ = List.hd_exn results in
+       if not (Array.exists reference ~f:(fun v -> Float.(v <> 0.))) then
+         failwith "ptx_target_parity: the natural form is all zeros, so the comparison is vacuous";
+       results)
+  in
+  in_leg ~leg "every variant's floor and native compiles agree bit for bit" (fun label ->
+      p_all label (Lazy.force results) ~f:(fun (_, agree, _, _) -> agree));
+  (* A variant whose floor compiles already targeted the device's arch (an sm_80 device's tf32
+     seeds) has the same option list at both targets, so its native compile may be served by the
+     kernel code cache and record nothing: only the others must compile at native. *)
+  let at_native (c : Mma.ptx_compile) =
+    Option.equal String.equal c.Mma.target (Some (native_arch c))
+  in
+  in_leg ~leg
+    "every variant with floor PTX for another arch compiled native PTX, all for the device's arch"
+    (fun label ->
+      p_all label
+        (List.filter (Lazy.force results) ~f:(fun (_, _, (_, _, fc), _) ->
+             not (List.for_all fc ~f:at_native)))
         ~f:(fun (_, _, _, (_, _, nc)) ->
           (not (List.is_empty nc))
           && List.for_all nc ~f:(fun c ->
-              Option.equal String.equal c.Mma.target (Some (native_arch c))));
-      p_exists (List.nth_exn claims 3) results ~f:(fun (_, _, (_, _, fc), _) ->
+              Option.equal String.equal c.Mma.target (Some (native_arch c)))));
+  in_leg ~leg "some variant's floor compile compiled PTX for another arch" (fun label ->
+      p_exists label (Lazy.force results) ~f:(fun (_, _, (_, _, fc), _) ->
           List.exists fc ~f:(fun c ->
-              not (Option.equal String.equal c.Mma.target (Some (native_arch c)))));
-      p_all (List.nth_exn claims 4)
-        (List.filter results ~f:(fun (i, _, _, _) -> i > 0))
+              not (Option.equal String.equal c.Mma.target (Some (native_arch c))))));
+  in_leg ~leg "every seed's routine is labeled tensorized at both targets" (fun label ->
+      p_all label
+        (List.filter (Lazy.force results) ~f:(fun (i, _, _, _) -> i > 0))
         ~f:(fun (_, _, (_, fm, _), (_, nm, _)) ->
-          Ll_test.rendered_tensorized fm && Ll_test.rendered_tensorized nm)
+          Ll_test.rendered_tensorized fm && Ll_test.rendered_tensorized nm))

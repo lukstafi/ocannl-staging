@@ -41,7 +41,6 @@ open Verdict.Claims
 
 let () = Utils.settings.output_debug_files_in_build_directory <- true
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
-let skipped = Verdict.skipped ~backend:backend_name
 let on_metal = String.is_substring backend_name ~substring:"metal"
 
 module Generated = Test_utils.Generated
@@ -183,36 +182,6 @@ let describe_failure leg =
   | Error (SO.Classified c) -> Sexp.to_string_hum (SO.sexp_of_classified_cause c)
   | Error (SO.Fatal { exn; _ }) -> "fatal: " ^ Exn.to_string exn
 
-let claim_r_control =
-  "R control: tiles of exactly the limit, no converted boundary, compile and run"
-
-let claim_r_control_source =
-  "R control: the unconverted kernel is tensorized and declares no coordinate table"
-
-let claim_scratch =
-  "the converted half boundary charges a positive scratch, once per kernel however many scopes"
-
-let claim_r_refused =
-  "R wide: the same tiles plus the scope scratch are refused at Hardware_limits, requesting \
-   exactly tiles + scratch"
-
-let claim_f_estimate =
-  "F wide: tiles of limit - scratch with two converted scopes make the estimate exactly the limit"
-
-let claim_f_runs = "F wide: the at-limit estimate compiles, links and runs, computing the product"
-let claim_f_scopes = "F wide: the source declares one table for its two converted scopes"
-
-let all_claims =
-  [
-    claim_scratch;
-    claim_r_control;
-    claim_r_control_source;
-    claim_r_refused;
-    claim_f_estimate;
-    claim_f_runs;
-    claim_f_scopes;
-  ]
-
 (* The scopes the per-kernel term is handed, structurally and on every backend (Codex round 1 on
    staging#1010): a materializing loop transform that duplicates a fragment region keeps the same
    fragment node in each copy, and each copy renders its own scope, so the estimate hands the
@@ -321,110 +290,154 @@ let () =
   p_all claim_seed_refuted judged ~f:(fun (sexp, est) ->
       (not (kept ~capabilities:charging (est - 1) sexp)) && kept (est - 1) sexp)
 
+(* Off a Metal device with tile MMA and a workgroup-memory limit every claim is skipped by name, and
+   on a device where the near-limit shapes do not land every claim after the scratch's, in the order
+   this one sequence makes them (gh-ocannl-1703). *)
 let () =
   let limits = Context.hardware_limits (Context.auto ()) in
   let mma = Option.is_some limits.Ir.Backend_intf.mma in
-  match (on_metal && mma, limits.max_workgroup_memory_bytes) with
-  | true, Some limit ->
-      let scratch, scratch_twice =
-        let saved = Numerics.get () in
-        Numerics.set_policy { saved with fp16_arithmetic = Numerics.Fp16_wide };
-        Exn.protect
-          ~f:(fun () ->
-            let bytes =
-              (Context.codegen_capabilities (Context.auto ())).mma_kernel_workgroup_bytes
-            in
-            let h = Ir.Ops.half in
-            (bytes ~triples:[ (h, h, h) ], bytes ~triples:[ (h, h, h); (h, h, h) ]))
-          ~finally:(fun () -> Numerics.set_policy saved)
+  let leg =
+    Verdict.leg
+      ~when_:(on_metal && mma && Option.is_some limits.max_workgroup_memory_bytes)
+      ~on:backend_name ()
+  in
+  let limit () = Option.value_exn limits.max_workgroup_memory_bytes in
+  let scratches =
+    lazy
+      (let saved = Numerics.get () in
+       Numerics.set_policy { saved with fp16_arithmetic = Numerics.Fp16_wide };
+       Exn.protect
+         ~f:(fun () ->
+           let bytes =
+             (Context.codegen_capabilities (Context.auto ())).mma_kernel_workgroup_bytes
+           in
+           let h = Ir.Ops.half in
+           (bytes ~triples:[ (h, h, h) ], bytes ~triples:[ (h, h, h); (h, h, h) ]))
+         ~finally:(fun () -> Numerics.set_policy saved))
+  in
+  let scratch () = fst (Lazy.force scratches) in
+  in_leg ~leg
+    "the converted half boundary charges a positive scratch, once per kernel however many scopes"
+    (fun label ->
+      let scratch, scratch_twice = Lazy.force scratches in
+      p label (scratch > 0 && scratch_twice = scratch));
+  (* R: [bk] so that the unpadded tiles total exactly [limit]. F: one k block narrower, the A tile's
+     stride padded until the tiles total [limit - scratch]. *)
+  let tile_row = half_bytes * (bm + n) in
+  let bk_r () = limit () / tile_row in
+  let bk_f () = bk_r () - 8 in
+  let pad_bytes () = limit () - scratch () - staged_bytes ~bk:(bk_f ()) ~a_ld:(bk_f ()) in
+  let a_pad () = pad_bytes () / (half_bytes * bm) in
+  let shapes_leg =
+    Verdict.sub_leg leg ~on:backend_name
+      ~when_:
+        (lazy
+          (let limit = limit () and scratch = scratch () in
+           let bk_r = bk_r () and bk_f = bk_f () and pad_bytes = pad_bytes () in
+           let shapes_ok =
+             limit % tile_row = 0
+             && bk_r % 8 = 0
+             && bk_f > 0 && pad_bytes > 0
+             && pad_bytes % (half_bytes * bm) = 0
+             && staged_bytes ~bk:bk_f ~a_ld:(bk_f + a_pad ()) = limit - scratch
+             && m <= 2 * bk_f
+           in
+           (* The arithmetic above assumes the M-series limit (32 KiB) and a scratch that is a whole
+              number of padded A-tile columns; a device where it does not land says so rather than
+              testing a different boundary. *)
+           if not shapes_ok then
+             Stdio.eprintf
+               "schedule_mma_scope_scratch: no exact near-limit shapes for limit %d, scratch %d\n%!"
+               limit scratch;
+           shapes_ok))
+  in
+  let r_auto =
+    lazy (compile_leg ~name:"scratch_r_auto" ~fp16:Numerics.Fp16_auto ~bk:(bk_r ()) ~a_pad:None ())
+  in
+  let r_values =
+    lazy
+      (let r_auto = Lazy.force r_auto in
+       let r_values = run_values r_auto in
+       if Option.is_none r_values then
+         Stdio.eprintf "schedule_mma_scope_scratch: R control: %s\n%!" (describe_failure r_auto);
+       r_values)
+  in
+  in_leg ~leg:shapes_leg
+    "R control: tiles of exactly the limit, no converted boundary, compile and run" (fun label ->
+      let r_values = Lazy.force r_values in
+      p label
+        ((Lazy.force r_auto).estimate = limit ()
+        && Option.value_map r_values ~default:false ~f:(fun got ->
+            Array.equal Float.equal got expected)));
+  in_leg ~leg:shapes_leg
+    "R control: the unconverted kernel is tensorized and declares no coordinate table" (fun label ->
+      let r_auto = Lazy.force r_auto in
+      (* Without the intrinsic census a scalar-fallback rendering would also lack the table. *)
+      let tensorized =
+        match r_auto.result with
+        | Ok (_, routine) ->
+            let census = List.map routine.Context.mma.Ir.C_syntax.renderings ~f:snd in
+            (not (List.is_empty census))
+            && List.for_all census ~f:(Ir.C_syntax.equal_mma_rendering Ir.C_syntax.Mma_intrinsics)
+        | Error _ -> false
       in
-      p claim_scratch (scratch > 0 && scratch_twice = scratch);
-      (* R: [bk] so that the unpadded tiles total exactly [limit]. *)
-      let tile_row = half_bytes * (bm + n) in
-      let bk_r = limit / tile_row in
-      (* F: one k block narrower, the A tile's stride padded until the tiles total [limit -
-         scratch]. *)
-      let bk_f = bk_r - 8 in
-      let pad_bytes = limit - scratch - staged_bytes ~bk:bk_f ~a_ld:bk_f in
-      let a_pad = pad_bytes / (half_bytes * bm) in
-      let shapes_ok =
-        limit % tile_row = 0
-        && bk_r % 8 = 0
-        && bk_f > 0 && pad_bytes > 0
-        && pad_bytes % (half_bytes * bm) = 0
-        && staged_bytes ~bk:bk_f ~a_ld:(bk_f + a_pad) = limit - scratch
-        && m <= 2 * bk_f
+      p label
+        (Option.is_some (Lazy.force r_values)
+        && tensorized
+        && not (String.is_substring (Generated.read r_auto.routine) ~substring:"ocannl_mma_rc8")));
+  in_leg ~leg:shapes_leg
+    "R wide: the same tiles plus the scope scratch are refused at Hardware_limits, requesting \
+     exactly tiles + scratch" (fun label ->
+      let r_wide =
+        compile_leg ~name:"scratch_r_wide" ~fp16:Numerics.Fp16_wide ~bk:(bk_r ()) ~a_pad:None ()
       in
-      if not shapes_ok then (
-        (* The arithmetic above assumes the M-series limit (32 KiB) and a scratch that is a whole
-           number of padded A-tile columns; a device where it does not land says so rather than
-           testing a different boundary. *)
-        Stdio.eprintf
-          "schedule_mma_scope_scratch: no exact near-limit shapes for limit %d, scratch %d\n%!"
-          limit scratch;
-        List.iter all_claims ~f:(fun c -> if not (String.equal c claim_scratch) then skipped c))
-      else
-        let r_auto =
-          compile_leg ~name:"scratch_r_auto" ~fp16:Numerics.Fp16_auto ~bk:bk_r ~a_pad:None ()
-        in
-        let r_values = run_values r_auto in
-        if Option.is_none r_values then
-          Stdio.eprintf "schedule_mma_scope_scratch: R control: %s\n%!" (describe_failure r_auto);
-        p claim_r_control
-          (r_auto.estimate = limit
-          && Option.value_map r_values ~default:false ~f:(fun got ->
-              Array.equal Float.equal got expected));
-        (* Without the intrinsic census a scalar-fallback rendering would also lack the table. *)
-        let tensorized =
-          match r_auto.result with
-          | Ok (_, routine) ->
-              let census = List.map routine.Context.mma.Ir.C_syntax.renderings ~f:snd in
-              (not (List.is_empty census))
-              && List.for_all census ~f:(Ir.C_syntax.equal_mma_rendering Ir.C_syntax.Mma_intrinsics)
-          | Error _ -> false
-        in
-        p claim_r_control_source
-          (Option.is_some r_values && tensorized
-          && not (String.is_substring (Generated.read r_auto.routine) ~substring:"ocannl_mma_rc8"));
-        let r_wide =
-          compile_leg ~name:"scratch_r_wide" ~fp16:Numerics.Fp16_wide ~bk:bk_r ~a_pad:None ()
-        in
-        let refused =
-          match r_wide.result with
-          | Error
-              (SO.Classified
-                 {
-                   phase = SO.Hardware_limits;
-                   cause =
-                     SO.Resource_exceeded
-                       { resource = SO.Workgroup_memory; requested; limit = Some l; _ };
-                   _;
-                 }) ->
-              requested = limit + scratch && l = limit && r_wide.estimate = requested
-          | _ ->
-              Stdio.eprintf "schedule_mma_scope_scratch: R wide: %s\n%!" (describe_failure r_wide);
-              false
-        in
-        p claim_r_refused refused;
-        let f_wide =
-          compile_leg ~scopes:2 ~name:"scratch_f_wide" ~fp16:Numerics.Fp16_wide ~bk:bk_f
-            ~a_pad:(Some a_pad) ()
-        in
-        p claim_f_estimate (f_wide.estimate = limit);
-        let f_values = run_values f_wide in
-        if Option.is_none f_values then
-          Stdio.eprintf "schedule_mma_scope_scratch: F wide: %s\n%!" (describe_failure f_wide);
-        p claim_f_runs
-          (Option.value_map f_values ~default:false ~f:(fun got ->
-               Array.equal Float.equal got expected));
-        p claim_f_scopes
-          (Option.is_some f_values
-          &&
-          let src = Generated.read f_wide.routine in
-          let count pattern =
-            List.length (String.substr_index_all src ~may_overlap:false ~pattern)
-          in
-          count "threadgroup float ocannl_mma_rc8[" = 1
-          && count "{ /* simdgroup fragment " = 2
-          && scratch = f_wide.estimate - staged_bytes ~bk:bk_f ~a_ld:(bk_f + a_pad))
-  | _ -> List.iter all_claims ~f:skipped
+      let refused =
+        match r_wide.result with
+        | Error
+            (SO.Classified
+               {
+                 phase = SO.Hardware_limits;
+                 cause =
+                   SO.Resource_exceeded
+                     { resource = SO.Workgroup_memory; requested; limit = Some l; _ };
+                 _;
+               }) ->
+            requested = limit () + scratch () && l = limit () && r_wide.estimate = requested
+        | _ ->
+            Stdio.eprintf "schedule_mma_scope_scratch: R wide: %s\n%!" (describe_failure r_wide);
+            false
+      in
+      p label refused);
+  let f_wide =
+    lazy
+      (compile_leg ~scopes:2 ~name:"scratch_f_wide" ~fp16:Numerics.Fp16_wide ~bk:(bk_f ())
+         ~a_pad:(Some (a_pad ()))
+         ())
+  in
+  in_leg ~leg:shapes_leg
+    "F wide: tiles of limit - scratch with two converted scopes make the estimate exactly the limit"
+    (fun label -> p label ((Lazy.force f_wide).estimate = limit ()));
+  let f_values =
+    lazy
+      (let f_wide = Lazy.force f_wide in
+       let f_values = run_values f_wide in
+       if Option.is_none f_values then
+         Stdio.eprintf "schedule_mma_scope_scratch: F wide: %s\n%!" (describe_failure f_wide);
+       f_values)
+  in
+  in_leg ~leg:shapes_leg
+    "F wide: the at-limit estimate compiles, links and runs, computing the product" (fun label ->
+      p label
+        (Option.value_map (Lazy.force f_values) ~default:false ~f:(fun got ->
+             Array.equal Float.equal got expected)));
+  in_leg ~leg:shapes_leg "F wide: the source declares one table for its two converted scopes"
+    (fun label ->
+      let f_wide = Lazy.force f_wide in
+      p label
+        (Option.is_some (Lazy.force f_values)
+        &&
+        let src = Generated.read f_wide.routine in
+        let count pattern = List.length (String.substr_index_all src ~may_overlap:false ~pattern) in
+        count "threadgroup float ocannl_mma_rc8[" = 1
+        && count "{ /* simdgroup fragment " = 2
+        && scratch () = f_wide.estimate - staged_bytes ~bk:(bk_f ()) ~a_ld:(bk_f () + a_pad ())))
