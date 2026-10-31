@@ -126,6 +126,15 @@ files.
   1 and lowering died in `Indexing.prod_project_for`). A new fresh re-elaboration of a spec needs
   the same tie: operand equalities reach only labels an operand row carries. A padded kernel
   nothing sizes is refused in `Row.get_proj_equations` (the `Conv_input` arm) naming the kernel.
+  The audit of every fresh elaboration (gh-ocannl-1734) found four environments, all tied:
+  `einsum_n_constraints` (einsum, ternary, block) and the `Permute` arm rebind captures through
+  `bind_delayed_vars_to_envs` (in a projection re-solve, the closure-published value as a sizing
+  constraint), `product_space_shape` adds `capture_ties_for_proxy`, and `of_spec` takes no captures;
+  the binary route with a kernel neither operand carries executes in `padded_operand_offset_windows`.
+  `Row.dim_to_proj` reads a window's kernel extent through `proj_env.v_env` and refuses an unsized
+  or symbolic one as `get_proj_equations` does (`unsized_kernel_error`); no `Shape` route is known
+  to hand it a variable kernel, so `test/operations/affine_dim_index_kernel` builds the environment
+  by hand.
 - Use-site row resolution is opt-in (gh-ocannl-544): an operation result's open row variables
   close DOWN to its arguments' shapes; a use site broadcasts the result in but cannot widen it.
   The resolve-at-use mark (`Row.add_resolve_at_use`, propagated through unification) grants the
