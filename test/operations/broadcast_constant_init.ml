@@ -7,11 +7,12 @@ open Ocannl.Operation.DSL_modules
 open Verdict.Claims
 module Asgns = Ir.Assignments
 
-let rec fetches tn = function
-  | Asgns.Fetch { array; _ } -> Ir.Tnode.equal tn array
-  | Seq (a, b) -> fetches tn a || fetches tn b
-  | Block_comment (_, a) -> fetches tn a
-  | Noop | Accum_op _ | Set_vec_unop _ -> false
+let fetches tn asgns =
+  Asgns.fold_leaves asgns ~init:false ~f:(fun found leaf ->
+      match leaf with
+      | Asgns.Fetch { array; _ } -> found || Ir.Tnode.equal tn array
+      | Accum_op _ | Set_vec_unop _ -> found
+      | Noop | Seq _ | Block_comment _ -> found)
 
 let values ctx t expected label =
   Verdict.pass_fail_all2 label (Context.get_values ctx t.Tensor.value) expected ~f:Float.equal

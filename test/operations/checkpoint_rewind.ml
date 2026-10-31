@@ -314,11 +314,11 @@ let lifecycle () =
   let ck = Tensor.checkpoint ~label:"ck_pending_step" () in
   ignore
     (outcome (fun () -> TDSL.O.( + ) (leaf "ck_p2" 2) (leaf "ck_p3" 3)) : (unit, string) Result.t);
-  let rec find_accum = function
-    | Ir.Assignments.Accum_op { projections; _ } -> Some projections
-    | Ir.Assignments.Seq (a, b) -> Option.first_some (find_accum a) (find_accum b)
-    | Ir.Assignments.Block_comment (_, body) -> find_accum body
-    | _ -> None
+  let find_accum asgns =
+    Ir.Assignments.fold_leaves asgns ~init:None ~f:(fun found leaf ->
+        match leaf with
+        | Ir.Assignments.Accum_op { projections; _ } -> Option.first_some found (Some projections)
+        | _ -> found)
   in
   p "tainted: forcing the pending assignment's projections raises"
     (match find_accum code.Ir.Assignments.asgns with

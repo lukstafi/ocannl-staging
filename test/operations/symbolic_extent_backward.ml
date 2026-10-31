@@ -32,11 +32,12 @@ module LL = Ir.Low_level
 module Tn = Ir.Tnode
 open Verdict.Claims
 
-let rec find_accum ~f = function
-  | Asgns.Accum_op { rhs; _ } as a when f rhs -> Some a
-  | Asgns.Seq (a, b) -> Option.first_some (find_accum ~f a) (find_accum ~f b)
-  | Asgns.Block_comment (_, body) -> find_accum ~f body
-  | Asgns.Accum_op _ | Asgns.Noop | Asgns.Set_vec_unop _ | Asgns.Fetch _ -> None
+let find_accum ~f asgns =
+  Asgns.fold_leaves asgns ~init:None ~f:(fun found leaf ->
+      match leaf with
+      | Asgns.Accum_op { rhs; _ } when f rhs -> Option.first_some found (Some leaf)
+      | Asgns.Accum_op _ | Asgns.Set_vec_unop _ | Asgns.Fetch _ -> found
+      | Asgns.Noop | Asgns.Seq _ | Asgns.Block_comment _ -> found)
 
 let rejection f = match f () with () -> None | exception Utils.User_error msg -> Some msg
 

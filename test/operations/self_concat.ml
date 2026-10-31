@@ -31,11 +31,12 @@ module LL = Ir.Low_level
 open Verdict.Claims
 
 (* The first [Accum_op] of [asgns] whose right-hand side satisfies [f]. *)
-let rec find_accum ~f = function
-  | Asgns.Accum_op { rhs; _ } as a -> Option.some_if (f rhs) a
-  | Asgns.Seq (a, b) -> Option.first_some (find_accum ~f a) (find_accum ~f b)
-  | Asgns.Block_comment (_, body) -> find_accum ~f body
-  | Asgns.Noop | Asgns.Set_vec_unop _ | Asgns.Fetch _ -> None
+let find_accum ~f asgns =
+  Asgns.fold_leaves asgns ~init:None ~f:(fun found leaf ->
+      match leaf with
+      | Asgns.Accum_op { rhs; _ } when f rhs -> Option.first_some found (Some leaf)
+      | Asgns.Accum_op _ | Asgns.Set_vec_unop _ | Asgns.Fetch _ -> found
+      | Asgns.Noop | Asgns.Seq _ | Asgns.Block_comment _ -> found)
 
 let ndarray ~grad dims values =
   Tensor.ndarray
