@@ -7,8 +7,12 @@ fp8_twin_plain: the kernel loads through ldmatrix exactly the operands the capab
 fp8_a_trans_gather: the kernel loads through ldmatrix exactly the operands the capability names: true
 f16_wmma: the kernel loads through ldmatrix exactly the operands the capability names: true
 on CUDA some leg's capability answers (true, true): true
+structural: under CUDA's operand-load rule some leg answers (true, true): true
 on CUDA some leg's capability answers (true, false): true
+structural: under CUDA's operand-load rule some leg answers (true, false): true
 on CUDA some leg's capability answers (false, true): true
+structural: under CUDA's operand-load rule some leg answers (false, true): true
 on CUDA some leg's capability answers (false, false): true
+structural: under CUDA's operand-load rule some leg answers (false, false): true
 only a swizzled shared operand is ever loaded through ldmatrix: true
 off CUDA the capability answers (false, false) everywhere: true

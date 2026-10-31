@@ -37,6 +37,9 @@ no sketch of the folded single segment escapes as an unclassified exception: tru
 the routine-local product's reference has positive cells: true
 the routine-local product's reference has relu-clamped cells: true
 the tuner's segmentation under a synthetic GPU folds the routine-local product's zero per cell: true
+synthetic GPU: the product is not materialized in the folded segment: true
+synthetic GPU: the folded segment seeds tensorized fused-epilogue twins: true
+synthetic GPU control: advertising no matrix unit, the folded segment seeds no tensorized twin: true
 the tuner's segmentation folds the routine-local product's zero per cell into one segment: true
 the product is not materialized in the folded segment: true
 the routine-local product's folded segment seeds tensorized fused-epilogue twins: true

@@ -29,6 +29,8 @@ without f32 MMA units the preset emits no Fold_mma: true
 a grid cap of 1 keeps the scalar fold: no Fold_mma emitted, no Tile_mma: true
 under the grid cap the output matches the composed output within 1e-4 relative: true
 under the device's limits the output matches the composed output within 1e-4 relative: true
+structural: under the GPU preset at limits advertising f32 MMA units the preset emits Fold_mma for the fold: true
+structural: under the GPU preset a grid cap of 1 keeps the scalar fold: no Fold_mma emitted: true
 --- leg 3: the training step, the fold forward under the fused backward ---
 the step's fold renders both contractions as intrinsics: true
 a parameter gradient agrees with the composed step within 1e-4 relative: true

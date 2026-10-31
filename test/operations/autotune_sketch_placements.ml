@@ -134,6 +134,44 @@ let twins segments =
           List.find_mapi segments ~f:(fun j (kind', d', _) ->
               Option.some_if (j > i && Poly.equal kind' `Normal && String.equal d d') (i, j)))
 
+(* The structural leg (gh-ocannl-1626): per-PR CI runs cc, where the [differ] leg below is skipped.
+   Its premise -- twins of one structure that differ in placements -- is the tuner's segmentation,
+   computed on the host, so it is computed here by the tuner's own pipeline under a synthetic GPU
+   target whatever the host ([Ll_test.tuner_segments]), on the lowering this host captures. The
+   controls: the [agree] chain's twins agree in placements under the same target, and under the CPU
+   pipeline the [differ] chain has no twins (the header's C-backend case), so the premise is the GPU
+   pipeline's. *)
+let () =
+  let segments ~target ~materialized =
+    let _, tuples =
+      Ll_test.tuner_segments ~target (Ll_test.captured_lowering (chain ~materialized ()))
+    in
+    List.map tuples ~f:(fun (kind, pre, _, _) ->
+        let digest with_placements = SC.digest (SC.canonicalize ~with_placements pre) in
+        (kind, digest false, digest true))
+  in
+  let placed_alike segs =
+    Option.map (twins segs) ~f:(fun (i, j) ->
+        let placements k = Option.value_map (List.nth segs k) ~default:"" ~f:(fun (_, _, d) -> d) in
+        String.equal (placements i) (placements j))
+  in
+  let gpu = Ll_test.synthetic_gpu () in
+  let cpu =
+    { Ll_test.is_gpu = false; is_cpu = true; limits = Ir.Backend_intf.no_hardware_limits }
+  in
+  p
+    "structural differ: under a synthetic GPU target two matmul segments share a structural digest \
+     and differ in placements"
+    (Option.equal Bool.equal
+       (placed_alike (segments ~target:gpu ~materialized:[ 2; 3 ]))
+       (Some false));
+  p "structural control: under the same target the agree chain's twins agree in placements"
+    (Option.equal Bool.equal
+       (placed_alike (segments ~target:gpu ~materialized:[ 1; 2; 3 ]))
+       (Some true));
+  p "structural control: under the CPU pipeline the differ chain has no twins"
+    (Option.is_none (twins (segments ~target:cpu ~materialized:[ 2; 3 ])))
+
 (* One search, every window scripted alike; the per-segment singles of the coarse segmentation it
    timed, as (label, schedule digest components). *)
 let singles comp =

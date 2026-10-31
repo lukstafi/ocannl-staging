@@ -122,12 +122,16 @@ ckt_f16: every tensorized contraction seed renders tensorized per its mma census
 ckf: the relu discriminates: the reference has positive and zero cells: true
 ckf: every fused scalar contraction twin applies and validates: true
 ckf: every fused scalar contraction twin drops the tail statement its unfused sibling keeps: true
+ckf: every fused tensorized (synthetic f32 tile) contraction twin applies and validates: true
+ckf: every fused tensorized (synthetic f32 tile) contraction twin drops the tail statement its unfused sibling keeps: true
 ckf: every fused scalar contraction twin executes to the reference bitwise: true
 ckf: every fused tensorized contraction twin executes to the reference bitwise: true
 ckf: every fused tensorized contraction twin renders tensorized per its mma census: true
 ckf_odd: the relu discriminates: the reference has positive and zero cells: true
 ckf_odd: every fused scalar contraction twin applies and validates: true
 ckf_odd: every fused scalar contraction twin drops the tail statement its unfused sibling keeps: true
+ckf_odd: every fused tensorized (synthetic f32 tile) contraction twin applies and validates: true
+ckf_odd: every fused tensorized (synthetic f32 tile) contraction twin drops the tail statement its unfused sibling keeps: true
 ckf_odd: every fused scalar contraction twin executes to the reference bitwise: true
 ckf_odd: every fused tensorized contraction twin executes to the reference bitwise: true
 ckf_odd: every fused tensorized contraction twin renders tensorized per its mma census: true

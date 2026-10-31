@@ -1,3 +1,17 @@
+cm8 (structural): the whole routine and its merged conv segment carry three or more real statements: true
+cm8 (structural): the GPU leg seeds the whole routine: true
+cm8 (structural): the GPU leg seeds the merged segment: true
+cm8 (structural) control: no whole-routine GPU seed pads the row the tile divides: true
+cm16 (structural): the whole routine and its merged conv segment carry three or more real statements: true
+cm16 (structural): the GPU leg seeds the whole routine: true
+cm16 (structural): the GPU leg seeds the merged segment: true
+cm8w (structural): the whole routine and its merged conv segment carry three or more real statements: true
+cm8w (structural): the GPU leg seeds the whole routine: true
+cm8w (structural): the GPU leg seeds the merged segment: true
+cm6w (structural): the whole routine and its merged conv segment carry three or more real statements: true
+cm6w (structural): the GPU leg seeds the whole routine: true
+cm6w (structural): the GPU leg seeds the merged segment: true
+cm6w (structural): a whole-routine GPU seed pads the row to the mma tile: true
 cm8: the whole routine and its merged conv segment carry three or more real statements: true
 cm8: the GPU leg seeds the whole routine: true
 cm8: the GPU leg seeds the merged segment: true

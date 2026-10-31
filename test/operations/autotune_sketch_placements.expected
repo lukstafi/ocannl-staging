@@ -1,3 +1,6 @@
+structural differ: under a synthetic GPU target two matmul segments share a structural digest and differ in placements: true
+structural control: under the same target the agree chain's twins agree in placements: true
+structural control: under the CPU pipeline the differ chain has no twins: true
 differ: two matmul segments share a structural digest: true
 differ: every single compiles the enumerated segmentation: true
 differ: a single is seeded on another segment: true

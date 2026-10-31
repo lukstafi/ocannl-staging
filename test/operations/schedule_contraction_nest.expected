@@ -64,6 +64,10 @@ three_axis_companion: every CPU seed compiles and runs: true
 three_axis_companion: every CPU candidate matches the serial reference bitwise: true
 three_axis_companion: every CPU tensorized candidate renders tensorized per its mma census: true
 out_proj bf16 inputs: every cell's products share a sign and every partial sum is exact in bf16: true
+out_proj bf16 (structural): at a synthetic tile advertising depth 2, no pipelined twin is seeded below the async arms' 4-byte element floor: true
+out_proj bf16 (structural): the multi-axis site seeds the unstaged shape: true
+out_proj bf16 (structural): the multi-axis site seeds the staged shape: true
+out_proj bf16 (structural): the multi-axis site seeds the batch-grid shape: true
 out_proj bf16: the multi-axis site seeds the backend's advertised tile: true
 out_proj bf16: no pipelined twin is seeded below the async arms' 4-byte element floor: true
 out_proj bf16: the unstaged candidate compiles and runs: true

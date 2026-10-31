@@ -84,9 +84,10 @@ let make_merged ?(oc = 16) ~rows tag =
   let%op y3 = y2 *. 0.5 in
   y3
 
-let gpu_seeds seg = Autotune.sketch_seed_params ~is_gpu:true ~is_cpu:false ~limits seg
+let gpu_seeds ?(limits = limits) seg =
+  Autotune.sketch_seed_params ~is_gpu:true ~is_cpu:false ~limits seg
 
-let gpu_real_stmts seg =
+let gpu_real_stmts ?(limits = limits) seg =
   match fst (Autotune.family_seeding ~is_gpu:true ~is_cpu:false ~limits seg) with
   | Autotune.Seeding_conv { real_stmts; _ } -> Some real_stmts
   | Autotune.Seeding_matmul _ | Autotune.Seeding_none -> None
@@ -95,7 +96,7 @@ let is_conv_segment (seg : LL.optimized) = Option.is_some (Autotune.detect_conv 
 
 (* The routine's whole lowering and its merged conv segment -- the tuner's own segmentation
    ([Ll_test.tuner_segments], gh-ocannl-1483) -- captured on the way through a compile. *)
-let lowerings ~name y =
+let lowerings ?target ~name y =
   let captured = ref None in
   ignore
     (Context.compile
@@ -108,7 +109,7 @@ let lowerings ~name y =
   let whole = Option.value_exn !captured in
   let segment =
     List.find_map
-      (snd (Ll_test.tuner_segments whole))
+      (snd (Ll_test.tuner_segments ?target whole))
       ~f:(fun (_, pre, _, _) -> Option.some_if (is_conv_segment pre) pre)
   in
   (whole, segment)
@@ -241,6 +242,42 @@ let merged_leg ~leg ?oc ?(row_masked = false) ~tag ~rows () =
   in_leg ~leg (tag ^ ": every GPU seed's routine is labeled tensorized") (fun label ->
       let whole_results, seg_results = Lazy.force results in
       p_all label (whole_results @ seg_results) ~f:tensorized)
+
+(* The structural leg (gh-ocannl-1626): per-PR CI runs cc, where every leg above is skipped. The
+   real-statement counts, the seeds and the merged segment are the seeder's and the tuner's,
+   computed on the host, so they are computed here on every backend under a synthetic GPU target
+   whose matrix unit is an f32 8x8x8 tile -- the tuner's own pipeline ([Ll_test.tuner_segments]) and
+   the GPU seeder at those limits, on the lowering this host captures. The control for the
+   row-padded flavor: at 8 rows, which the tile divides, no whole-routine seed pads the row. *)
+let () =
+  let synthetic_limits = Ll_test.f32_mma_limits in
+  let target = Ll_test.synthetic_gpu ~limits:synthetic_limits () in
+  let structural ?oc ~tag ~rows () =
+    let whole, segment =
+      lowerings ~target ~name:(tag ^ "_sprobe") (make_merged ?oc ~rows (tag ^ "s"))
+    in
+    let tag = tag ^ " (structural)" in
+    let real_stmts opt = Option.value (gpu_real_stmts ~limits:synthetic_limits opt) ~default:0 in
+    let whole_seeds = gpu_seeds ~limits:synthetic_limits whole in
+    p
+      (tag ^ ": the whole routine and its merged conv segment carry three or more real statements")
+      (real_stmts whole >= 3 && Option.exists segment ~f:(fun s -> real_stmts s >= 3));
+    p (tag ^ ": the GPU leg seeds the whole routine") (not (List.is_empty whole_seeds));
+    p
+      (tag ^ ": the GPU leg seeds the merged segment")
+      (Option.exists segment ~f:(fun s ->
+           not (List.is_empty (gpu_seeds ~limits:synthetic_limits s))));
+    whole_seeds
+  in
+  let pads (sp : Autotune.sketch_params) = sp.sk_bm = 0 && sp.sk_tm > 0 in
+  p_none "cm8 (structural) control: no whole-routine GPU seed pads the row the tile divides"
+    (structural ~tag:"cm8" ~rows:8 ())
+    ~f:pads;
+  ignore (structural ~tag:"cm16" ~rows:16 () : Autotune.sketch_params list);
+  ignore (structural ~tag:"cm8w" ~rows:8 ~oc:64 () : Autotune.sketch_params list);
+  p_exists "cm6w (structural): a whole-routine GPU seed pads the row to the mma tile"
+    (structural ~tag:"cm6w" ~rows:6 ~oc:64 ())
+    ~f:pads
 
 let () =
   (* A GPU withholding the capability says which aggregation lifts it (tf32 off on CUDA). *)

@@ -106,6 +106,58 @@ let advertised = Ll_test.advertised ~backend_name
 let census_agrees_with_capability = Ll_test.census_agrees_with_capability ~backend_name
 
 (* Named once so a degraded run explains itself on the channel the golden does not see. *)
+
+(* The structural leg of the wide-accumulator seeding claims (gh-ocannl-1626): per-PR CI runs cc,
+   whose GPU claims about which emission scopes the wide arm seeds are skipped. Seeding is
+   host-side, so the wide-policy lowering [opt] is seeded here under [policy] at a synthetic uniform
+   [format] 8x8x8 tile advertising each subset of the two emission scopes in turn (through
+   [with_scopes]), against the claim's own predicate: unstaged forms exactly where per-statement
+   scope is advertised, staged forms where either is. The empty subset is the control. *)
+let wide_scope_legs ~policy ~format ~with_scopes opt =
+  let saved = Numerics.get () in
+  Numerics.set_policy policy;
+  Exn.protect
+    ~finally:(fun () -> Numerics.set_policy saved)
+    ~f:(fun () ->
+      let per_statement = Ir.Backend_intf.Mma_per_statement
+      and fragment = Ir.Backend_intf.Mma_fragment_scope in
+      List.map
+        [ []; [ per_statement ]; [ fragment ]; [ per_statement; fragment ] ]
+        ~f:(fun scopes ->
+          let limits =
+            {
+              Ir.Backend_intf.no_hardware_limits with
+              mma =
+                Some
+                  (with_scopes
+                     {
+                       Ir.Backend_intf.minimal_mma_capability with
+                       mma_tile = (8, 8, 8);
+                       mma_format_tiles = [ ((format, format, format), (8, 8, 8)) ];
+                     }
+                     scopes);
+            }
+          in
+          let seeds = Autotune.sketch_seed_params ~is_gpu:true ~is_cpu:false ~limits opt in
+          let has predicate =
+            List.exists seeds ~f:(fun p -> p.Autotune.sk_mma && predicate p.Autotune.sk_bk)
+          in
+          let advertised scope =
+            List.mem scopes scope ~equal:Ir.Backend_intf.equal_mma_emission_scope
+          in
+          let ok =
+            Bool.equal (has (( = ) 0)) (advertised per_statement)
+            && Bool.equal (has (fun bk -> bk > 0)) (advertised per_statement || advertised fragment)
+          in
+          if not ok then
+            Stdio.eprintf "wide scopes [%s]: unstaged %b staged %b\n"
+              (String.concat ~sep:","
+                 (List.map scopes ~f:(fun s ->
+                      Sexp.to_string (Ir.Backend_intf.sexp_of_mma_emission_scope s))))
+              (has (( = ) 0))
+              (has (fun bk -> bk > 0));
+          ok))
+
 let () =
   if on_hip && not (Lazy.force hip_mma) then
     Stdio.eprintf
@@ -531,6 +583,27 @@ let () =
         && String.is_substring src_t ~substring:"matrix_a, 16, 16, 8"
         && String.is_substring src_t ~substring:"col_major"
         && String.is_substring src_t ~substring:(Lazy.force tf32_marker)));
+  (* The structural leg of the two seeding claims above (gh-ocannl-1626): per-PR CI runs cc, which
+     advertises no tf32 tile, so they are skipped there. [tf32_mma_seeded] already seeds at the
+     synthetic [tf32_limits], and the lowerings are the host's, so the claims are evaluated here on
+     every backend under the policy each one names. The control: policy-on at the policy-off leg's
+     k, the same tile seeds, so the policy is what the off claim reads. *)
+  (let seeded ~tf32 ~tag ~k =
+     let saved = Numerics.get () in
+     Numerics.set_policy { saved with tf32_matmuls = tf32 };
+     Exn.protect
+       ~finally:(fun () -> Numerics.set_policy saved)
+       ~f:(fun () ->
+         let a, b = tf32_inputs ~tag ~k in
+         let%op c = a * b in
+         tf32_mma_seeded (Ll_test.captured_lowering (named (tag ^ "capture") (Train.forward c))))
+   in
+   p "tf32 (structural): policy-off, autotune omits tensorized candidates"
+     (not (seeded ~tf32:false ~tag:"tf32_s_off_" ~k:n));
+   p "tf32 (structural) control: policy-on at the same k, it seeds them"
+     (seeded ~tf32:true ~tag:"tf32_s_on_" ~k:n);
+   p "tf32 (structural): k=24, policy-on, autotune seeds tensorized candidates"
+     (seeded ~tf32:true ~tag:"tf32_s_k24_" ~k:24));
 
   let%op mc1 = ma * mb in
   let mma_comp = named "mm_mma" (Train.forward mc1) in
@@ -785,10 +858,11 @@ let () =
   let want_hw = compile_serial ~name:"mm_h_wide_serial" mchw0 in
   let%op mchw1 = mwa * mwb in
   Tn.update_prec mchw1.Tensor.value Ir.Ops.half;
-  let wide_seed_scopes = ref None in
+  let wide_seed_scopes = ref None and wide_opt = ref None in
   let got_hw, census_hw =
     compile_mma_with_census
       ~inspect:(fun opt ->
+        wide_opt := Some (Ll_test.hermetic_copy opt);
         let ctx = Context.auto () in
         let limits = Context.hardware_limits ctx in
         let seeds = Autotune.sketch_seed_params ~is_gpu:on_gpu ~is_cpu:(not on_gpu) ~limits opt in
@@ -827,6 +901,15 @@ let () =
                 || advertised Ir.Backend_intf.Mma_fragment_scope))
      | None -> p claim false
    else skipped claim);
+  p_all
+    "Fp16_wide (structural): at a synthetic f16 tile, the mma seeds match each advertised set of \
+     emission scopes"
+    (Option.value_map !wide_opt ~default:[]
+       ~f:
+         (wide_scope_legs ~policy:{ saved_policy with fp16_arithmetic = Numerics.Fp16_wide }
+            ~format:Ir.Backend_intf.Mma_f16 ~with_scopes:(fun m scopes ->
+              { m with Ir.Backend_intf.mma_f16_wide_acc_scopes = scopes })))
+    ~f:Fn.id;
   (let src = Generated.read "mm_h_wide_mma" in
    let has s = String.is_substring src ~substring:s in
    let intrinsics () =
@@ -1147,10 +1230,11 @@ let () =
   Numerics.set_policy saved_policy;
   Numerics.set_policy { saved_policy with bf16_arithmetic = Numerics.Bf16_wide };
   let want_bw = compile_serial ~name:"mm_bw_wide_serial" (bf16_uniform_mma ()) in
-  let bw_seed_scopes = ref None in
+  let bw_seed_scopes = ref None and bw_opt = ref None in
   let got_bw, census_bw =
     compile_mma_with_census
       ~inspect:(fun opt ->
+        bw_opt := Some (Ll_test.hermetic_copy opt);
         let limits = Context.hardware_limits (Context.auto ()) in
         let seeds = Autotune.sketch_seed_params ~is_gpu:on_gpu ~is_cpu:(not on_gpu) ~limits opt in
         let has_mma_with predicate =
@@ -1222,6 +1306,15 @@ let () =
                 || bf16_wide_advertised Ir.Backend_intf.Mma_fragment_scope))
      | None -> p claim false
    else skipped claim);
+  p_all
+    "Bf16_wide (structural): at a synthetic bf16 tile, the mma seeds match each advertised set of \
+     emission scopes"
+    (Option.value_map !bw_opt ~default:[]
+       ~f:
+         (wide_scope_legs ~policy:{ saved_policy with bf16_arithmetic = Numerics.Bf16_wide }
+            ~format:Ir.Backend_intf.Mma_bf16 ~with_scopes:(fun m scopes ->
+              { m with Ir.Backend_intf.mma_bf16_wide_acc_scopes = scopes })))
+    ~f:Fn.id;
   (let src = Generated.read "mm_bw_wide_mma" in
    let has s = String.is_substring src ~substring:s in
    let intrinsics () =

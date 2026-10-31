@@ -1167,23 +1167,15 @@ let int_out_proj ~tag ~prec ~bb ~ss ~jj ~hh ~ee () =
 let tensorized_contraction_seeds ?capabilities ~limits opt =
   contraction_seeds ?capabilities ~limits opt |> List.filter ~f:(fun q -> q.Autotune.sk_mma)
 
+(* A synthetic f32 8x8x8 tile on a 32-wide simdgroup: tensorized structure on every host. *)
+let synthetic_f32_tile = Ll_test.f32_mma_limits
+
 (* Structure, machine-independent: a synthetic f32 8x8x8 tile on a 32-wide simdgroup. *)
 let () =
   let tag = "ckt" and bb = 2 and ss = 32 and jj = 64 and hh = 4 and ee = 16 in
   let cand, w, att = int_out_proj ~tag ~prec:Ir.Ops.single ~bb ~ss ~jj ~hh ~ee () in
   let opt = capture (named (tag ^ "_sched") (Train.forward cand)) in
-  let synthetic =
-    {
-      Ir.Backend_intf.no_hardware_limits with
-      mma =
-        Some
-          {
-            Ir.Backend_intf.minimal_mma_capability with
-            mma_tile = (8, 8, 8);
-            mma_format_tiles = [ (Ir.Backend_intf.(Mma_f32, Mma_f32, Mma_f32), (8, 8, 8)) ];
-          };
-    }
-  in
+  let synthetic = synthetic_f32_tile in
   let seeds = tensorized_contraction_seeds ~limits:synthetic opt in
   p_all ~min:1 "ckt: every tensorized contraction seed is staged" seeds ~f:(fun q ->
       q.Autotune.sk_bk > 0);
@@ -1431,6 +1423,12 @@ let fused_leg ~tag ~bb ~ss ~jj ~hh ~ee =
       let fused seeds = List.filter seeds ~f:(fun q -> q.Autotune.sk_epilogue) in
       let scalar_seeds = fused (contraction_seeds opt) |> List.filter ~f:blocktile in
       structural "scalar" scalar_seeds;
+      (* Tensorized twins' structure (gh-ocannl-1626): the executed tensorized claims below are
+         gated on the device's tile, so per-PR CI (cc) never builds a tensorized fused twin; the
+         seeds and schedules are host-side, so they are built here at [ckt]'s synthetic f32 8x8x8
+         tile whatever the host. *)
+      structural "tensorized (synthetic f32 tile)"
+        (fused (tensorized_contraction_seeds ~limits:synthetic_f32_tile opt));
       let ctx = Context.auto () in
       let limits = Context.hardware_limits ctx in
       let capabilities = Context.codegen_capabilities ctx in

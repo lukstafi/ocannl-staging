@@ -119,7 +119,7 @@ let zero_sched _tns = []
 
 (* The fissioned, scheduled segments of the code [site]'s prelude produces, as the search's
    [F_split] candidates compile it. *)
-let split_segments opt site =
+let split_segments ?(preset = preset) opt site =
   let opt = Sched.apply (Autotune.split_reduce_prelude [ (site, 32) ]) opt in
   let _, tuples = Sched.fission_segmented ~preset ~zero_sched ~static_indices:[] opt in
   List.map tuples ~f:(fun (_, _, _, post) -> post)
@@ -158,23 +158,45 @@ let () =
           p "control: the block loop runs inside it" (mentions c_idcs.(0) c_next)
       | _ -> p "both preludes leave a first pass of two or more loops" false);
       (* The lanes, under this device's default GPU preset. *)
-      let lanes s =
-        List.find_map (split_segments opt s) ~f:(fun post -> first_pass post.LL.llc)
+      let lanes ?preset s =
+        let scratch =
+          {
+            opt with
+            LL.traced_store = Hashtbl.copy opt.LL.traced_store;
+            optimize_ctx = LL.copy_optimize_ctx opt.LL.optimize_ctx;
+          }
+        in
+        List.find_map (split_segments ?preset scratch s) ~f:(fun post -> first_pass post.LL.llc)
         |> Option.map ~f:(fun (loops, idcs) ->
             (List.filter loops ~f:(fun (_, ty) -> LL.equal_axis_type ty LL.Workgroup), idcs))
       in
+      let walks ?preset ~component s =
+        match lanes ?preset s with
+        | Some ((_ :: _ as wg), idcs) ->
+            List.exists wg ~f:(mentions idcs.(component))
+            && not (List.exists wg ~f:(mentions idcs.(1 - component)))
+        | _ -> false
+      in
       let lane_claim ~what ~component s =
-        Verdict.gated ~when_:is_gpu ~on:backend_name what
-          (match lanes s with
-          | Some ((_ :: _ as wg), idcs) ->
-              List.exists wg ~f:(mentions idcs.(component))
-              && not (List.exists wg ~f:(mentions idcs.(1 - component)))
-          | _ -> false)
+        Verdict.gated ~when_:is_gpu ~on:backend_name what (walks ~component s)
       in
       lane_claim ~component:1 site
         ~what:"hoisted: the first pass's lanes walk the cell axis, not the blocks";
       lane_claim ~component:0 control
         ~what:"control: the unhoisted first pass's lanes walk the blocks, not the cell axis";
+      (* The structural leg (gh-ocannl-1626): per-PR CI runs cc, where the two claims above are
+         skipped. The lanes are the GPU preset's mapping, computed on the host, so they are computed
+         here under [Sched.default_gpu] at no hardware limits whatever the host. The hoisted and
+         unhoisted first passes are each other's control: each claim fails on the other's site. *)
+      let synthetic o = Sched.default_gpu ~limits:Ir.Backend_intf.no_hardware_limits o in
+      p
+        "structural: under the GPU preset the hoisted first pass's lanes walk the cell axis, not \
+         the blocks"
+        (walks ~preset:synthetic ~component:1 site);
+      p
+        "structural: under the GPU preset the unhoisted first pass's lanes walk the blocks, not \
+         the cell axis"
+        (walks ~preset:synthetic ~component:0 control);
       let hoisted = run_split site and unhoisted = run_split control in
       Stdio.eprintf "max error vs f64: hoisted %g (not part of the golden)\n"
         (Array.foldi hoisted ~init:0. ~f:(fun o m v -> Float.max m (Float.abs (v -. exact.(o)))));

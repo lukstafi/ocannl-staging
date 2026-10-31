@@ -155,7 +155,15 @@ let leg ~tag ~a ~b ~d_prec ?(bm = 16) ?(bk = 16) ?(ta = false) ?(tb = false) ~sw
        (Poly.equal emitted promised
        && (not (List.is_empty census))
        && Bool.equal ldm_census (fst promised || snd promised)));
-  promised
+  (* What CUDA's capability answers for the same places: CUDA's [mma_operand_loads] is
+     [Cuda_mma.operand_loads] itself, a pure rule, so the structural leg below asks it on every
+     host. *)
+  let cuda =
+    Ir.Cuda_mma.operand_loads ~a_prec ~b_prec ~d_prec ~scope:BI.Mma_per_statement ~ta ~tb
+      ~a:(`Shared, layout swz_a)
+      ~b:(`Shared, layout swz_b)
+  in
+  (promised, cuda)
 
 let cycle = Ll_test.cycle ~dims:[| n; n |]
 
@@ -201,13 +209,18 @@ let () =
       ]
   in
   (* The legs discriminate: on CUDA they reach all four answers, so a capability stuck at one value
-     (or a test whose legs all share one) fails here rather than agreeing with itself. *)
+     (or a test whose legs all share one) fails here rather than agreeing with itself. The
+     structural leg (gh-ocannl-1626) asks CUDA's rule on every host, since per-PR CI runs cc. *)
   List.iter
     [ (true, true); (true, false); (false, true); (false, false) ]
     ~f:(fun want ->
       gated_exists ~when_:on_cuda ~on:backend_name
         (Printf.sprintf "on CUDA some leg's capability answers (%b, %b)" (fst want) (snd want))
-        answers ~f:(Poly.equal want));
+        (List.map answers ~f:fst) ~f:(Poly.equal want);
+      p_exists
+        (Printf.sprintf "structural: under CUDA's operand-load rule some leg answers (%b, %b)"
+           (fst want) (snd want))
+        (List.map answers ~f:snd) ~f:(Poly.equal want));
   (* The capability over every storage triple, emission scope, orientation and operand place: an
      operand that is not a swizzled shared tile never loads through ldmatrix on any backend, and off
      CUDA none does. *)

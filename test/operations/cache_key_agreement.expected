@@ -3,6 +3,7 @@ every key utils.ml resolves into Utils.settings is flipped through restore_setti
 every Keyed key the running backend hashes moves its own component when flipped: true
 and no Keyed flip moves a component its classification does not account for: true
 every Keyed key outside the running backend's scope moves nothing when flipped: true
+structural: every GPU-scoped Keyed key the shared key computation reads for cuda moves its own component when flipped there: true
 no key outside the Keyed class is read while the cache key is computed: true
 the key computation reads its Keyed keys per lookup, so the trace sees reads: true
 no unflippable Keyed key is read per lookup by the key computation: true

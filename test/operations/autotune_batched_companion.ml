@@ -203,6 +203,33 @@ let () =
   in
   p_none "bc: the j-blocking detector rejects the CPU pipelines, which block the row axis instead"
     cpu_scheds ~f:(fun s -> blocks_j bounds s);
+  (* The structural leg of the tensorized claim (gh-ocannl-1626): per-PR CI runs cc, which
+     advertises no GPU tile, so the claim above is skipped there and the claims after it see scalar
+     seeds only. Seeding and schedule construction are host-side, so the tensorized seeds are
+     proposed here at limits advertising an f32 8x8x8 matrix unit whatever the host, and held to the
+     same two claims. The control: at the host-independent limits advertising no matrix unit, no
+     tensorized seed is proposed, so the census is the stand-in tile's. *)
+  let synthetic_limits = Ll_test.f32_mma_limits in
+  let tensorized limits =
+    List.filter (Autotune.sketch_seed_params ~is_gpu:true ~is_cpu:false ~limits opt) ~f:(fun p ->
+        p.Autotune.sk_gpu && p.Autotune.sk_mma && not p.Autotune.sk_epilogue)
+  in
+  p_all
+    "bc (structural): at a stand-in f32 tile every tensorized GPU seed constructs a schedule that \
+     Grid-blocks the minor output axis"
+    (tensorized synthetic_limits) ~f:(fun sp ->
+      match Autotune.sketch_schedule ~accum_prec ~p:sp opt with
+      | sched -> blocks_j bounds sched
+      | exception exn ->
+          Stdio.eprintf "bc (structural) decline: %s\n" (Exn.to_string exn);
+          false);
+  p_empty
+    "bc (structural) control: advertising no matrix unit, no tensorized GPU seed is proposed among \
+     its GPU seeds"
+    ~over:
+      (Autotune.sketch_seed_params ~is_gpu:true ~is_cpu:false
+         ~limits:Ir.Backend_intf.no_hardware_limits opt)
+    (tensorized Ir.Backend_intf.no_hardware_limits);
 
   (* Executable parity, seed by seed, on backends that can run shared staging. Skipped on cc --
      reported as a skip, so it is not mistaken for coverage; the golden stays

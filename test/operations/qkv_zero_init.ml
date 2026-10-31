@@ -529,6 +529,26 @@ let () =
      segment: this claim is false under it, and under a pipeline that drops the fold. *)
   p "the tuner's segmentation under a synthetic GPU folds the routine-local product's zero per cell"
     (Option.is_some (folded_per_cell (fission opt)));
+  (* The rest of the gated structural claims below, under the same synthetic target
+     (gh-ocannl-1626): the segment the fold leaves and its seeds are the tuner's, computed on the
+     host, and the tensorized twins are proposed from the synthetic matrix unit [mma_limits]
+     advertises. The control: the same segment seeds no tensorized twin at limits advertising no
+     matrix unit. *)
+  let synthetic_pre =
+    folded_per_cell
+      (snd (Ll_test.tuner_segments ~target:(Ll_test.synthetic_gpu ~limits:mma_limits ()) opt))
+  in
+  p "synthetic GPU: the product is not materialized in the folded segment"
+    (Option.exists synthetic_pre ~f:(fun pre ->
+         not
+           (Ir.Tnode.Placements.is_materialized_peek pre.LL.optimize_ctx.LL.placements
+              prod.Tensor.value)));
+  let synthetic_seeds limits = Option.value_map synthetic_pre ~default:[] ~f:(gpu_seeds ~limits) in
+  p_exists "synthetic GPU: the folded segment seeds tensorized fused-epilogue twins"
+    (synthetic_seeds mma_limits) ~f:(fun q -> q.Autotune.sk_mma && q.Autotune.sk_epilogue);
+  p_none
+    "synthetic GPU control: advertising no matrix unit, the folded segment seeds no tensorized twin"
+    (synthetic_seeds Ir.Backend_intf.no_hardware_limits) ~f:(fun q -> q.Autotune.sk_mma);
   (* Off a GPU backend these claims are skipped by name, in the order this one sequence makes them
      (gh-ocannl-1703). *)
   let on_gpu = Sched.backend_is_gpu backend_name in
