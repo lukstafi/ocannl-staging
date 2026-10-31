@@ -155,6 +155,11 @@ let take_forward_code t =
 (* Global singleton for random seed, used in init_params and random number generation *)
 let random_seed : t option ref = ref None
 
+(* Every seed singleton [set_random_seed] created this session, newest first: a graph built under a
+   scoped seed ([with_saved_random_seed]) keeps drawing from it after the singleton is restored, so
+   the singleton alone does not say which seeds the session's graphs draw from (gh-ocannl-1727). *)
+let random_seeds_created : t list ref = ref []
+
 type checkpoint = {
   mutable ck_mark : int;
   mutable ck_fwd : t Map.M(Int).t;
@@ -1303,6 +1308,7 @@ let set_random_seed ?seed () =
   (* The seed singleton is restored by a rewind, so replacing it counts (gh-ocannl-1573); [bits]
      above already counted, through [op]. *)
   Row.note_mutation ();
+  random_seeds_created := res :: !random_seeds_created;
   random_seed := Some res
 
 let rec get_random_seed () =
@@ -1324,6 +1330,15 @@ let with_saved_random_seed f =
     ()
 [@@mutation_serial.boundary
   "a scoped restore: puts back the seed saved at entry, on return and on a raise alike"]
+
+let random_seeds () =
+  List.rev !random_seeds_created
+  |> List.filter ~f:(fun t -> Option.is_none (discarded_by t.value))
+  |> List.map ~f:(fun t ->
+      (* Read back from the seed's own [bits] constant: no second copy to keep in step. *)
+      match t.forward.asgns with
+      | Ir.Assignments.Fetch { fetch_op = Constant_bits i; _ } -> Int64.to_int_exn i
+      | _ -> failwith "Tensor.random_seeds: a random seed is not a bits constant")
 
 let install_validity_check () =
   Tn.validity_check :=
@@ -1367,6 +1382,7 @@ let%track5_sexp unsafe_reinitialize ?(namespace = Tn.default_namespace) () : uni
   install_validity_check ();
   param_postprocess := Fn.id;
   random_seed := None;
+  random_seeds_created := [];
   Tn.Registry.clear Tn.registry;
   (* The analysis cache retains recent routines' lowered code (gh-560): release the old session's
      nodes promptly. Stale entries could never alias fresh nodes anyway (uids are not reused). *)

@@ -56,7 +56,11 @@ files.
   with its written set, unioned over `routine.segments` (their traced stores are slices of the
   routine's one store, so the flags are routine-wide). The host progress rides in the
   `Persistence` header's `metadata` field, published in the same atomic write; restore refuses a
-  state set differing from the recorded one. Executed oracle: `test/training/resume_checkpoint.ml`
+  state set differing from the recorded one, and a program whose `Tensor.random_seeds` differ from
+  the recorded ones (gh-ocannl-1727). Every seed the session created, not the current singleton: a
+  graph built under `with_saved_random_seed` (`Parallel.data_parallel`'s shards) keeps its scoped
+  seed after the singleton is restored. A format-1 checkpoint, which predates the seeds, restores
+  with a stderr warning instead. Executed oracle: `test/training/resume_checkpoint.ml`
   (fresh-process resume, bit for bit on cc, with momentum- and RNG-dropping controls).
 - `Train.to_routine` returns `Context.t * Context.routine` (gh-ocannl-772), like `Context.compile`
   and `Train.run_once`. `routine.Context.context` is the same value, so both spellings work; prefer

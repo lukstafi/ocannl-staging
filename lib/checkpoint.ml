@@ -44,11 +44,16 @@ let training_state ?(extra = []) ~routines loss =
 (* The header keys this module owns. The user's [extra] pairs live under their own prefix, so no
    choice of user key can shadow one of these. *)
 let format_key = "ocannl.training_checkpoint"
-let format_version = "1"
+let format_version = "2"
+
+(* Version 1 (gh-ocannl-96) predates the recorded random seed (gh-ocannl-1727); it is read with the
+   seed check skipped, and a warning. *)
+let unseeded_format_version = "1"
 let step_key = "ocannl.step"
 let epoch_key = "ocannl.epoch"
 let position_key = "ocannl.position"
 let host_rng_key = "ocannl.host_rng"
+let random_seeds_key = "ocannl.random_seeds"
 let state_key = "ocannl.state"
 let extra_prefix = "extra."
 
@@ -81,6 +86,7 @@ let save ~ctx ~progress state path =
       (step_key, Int.to_string progress.step);
       (epoch_key, Int.to_string progress.epoch);
       (position_key, Int.to_string progress.position);
+      (random_seeds_key, String.concat ~sep:" " (List.map (Tensor.random_seeds ()) ~f:Int.to_string));
       (state_key, String.concat ~sep:" " (state_keys state));
     ]
     @ Option.value_map progress.host_rng ~default:[] ~f:(fun rng ->
@@ -91,17 +97,21 @@ let save ~ctx ~progress state path =
 
 let read_progress path metadata =
   let find key = List.Assoc.find metadata key ~equal:String.equal in
-  (match find format_key with
-  | Some v when String.equal v format_version -> ()
-  | Some v ->
-      failwith
-        ("Checkpoint.restore: " ^ path ^ ": unsupported training-checkpoint version " ^ v
-       ^ " (this build reads version " ^ format_version ^ ")")
-  | None ->
-      failwith
-        ("Checkpoint.restore: " ^ path
-       ^ " is not a training checkpoint: it records no progress (a plain Persistence.save writes \
-          tensors only; use Persistence.restore for it)"));
+  let seeded =
+    match find format_key with
+    | Some v when String.equal v format_version -> true
+    | Some v when String.equal v unseeded_format_version -> false
+    | Some v ->
+        failwith
+          ("Checkpoint.restore: " ^ path ^ ": unsupported training-checkpoint version " ^ v
+         ^ " (this build reads versions " ^ unseeded_format_version ^ " and " ^ format_version ^ ")"
+          )
+    | None ->
+        failwith
+          ("Checkpoint.restore: " ^ path
+         ^ " is not a training checkpoint: it records no progress (a plain Persistence.save writes \
+            tensors only; use Persistence.restore for it)")
+  in
   let int_field key =
     match Option.bind (find key) ~f:Int.of_string_opt with
     | Some v -> v
@@ -120,8 +130,53 @@ let read_progress path metadata =
             Option.map (String.chop_prefix k ~prefix:extra_prefix) ~f:(fun k -> (k, v)));
     }
   in
+  let random_seeds =
+    if not seeded then None
+    else
+      let malformed () =
+        failwith ("Checkpoint.restore: " ^ path ^ ": missing or malformed " ^ random_seeds_key)
+      in
+      match find random_seeds_key with
+      | None -> malformed ()
+      | Some v ->
+          Some
+            (String.split v ~on:' '
+            |> List.filter ~f:(Fn.non String.is_empty)
+            |> List.map ~f:(fun s -> Option.value_or_thunk (Int.of_string_opt s) ~default:malformed)
+            )
+  in
   let recorded = Option.value_map (find state_key) ~default:[] ~f:(String.split ~on:' ') in
-  (progress, List.filter recorded ~f:(Fn.non String.is_empty))
+  (progress, random_seeds, List.filter recorded ~f:(Fn.non String.is_empty))
+
+(* Device randomness is counter-based (threefry over the seed, the node and a counter), so the
+   restored state continues the saved run only under the seeds it was saved with: under another,
+   every random draw after the resume (dropout, noise) differs from the uninterrupted run's. The
+   seeds are every one the session created, not only the current singleton: a graph built under a
+   scoped seed ([Tensor.with_saved_random_seed], as [Parallel.data_parallel] builds its shards)
+   draws from its own. *)
+let show_seeds = function
+  | [] -> "no random seed"
+  | [ seed ] -> "random seed " ^ Int.to_string seed
+  | seeds -> "random seeds " ^ String.concat ~sep:", " (List.map seeds ~f:Int.to_string)
+
+let check_random_seeds path saved =
+  let current = Tensor.random_seeds () in
+  match saved with
+  | Some saved when List.equal Int.equal saved current -> ()
+  | Some saved ->
+      failwith
+        ("Checkpoint.restore: " ^ path ^ ": the checkpoint was saved under " ^ show_seeds saved
+       ^ ", but this program was built under " ^ show_seeds current
+       ^ ": device randomness is counter-based over the seed, so the run would not continue as it \
+          was (build the program under the saved seeds: fixed_state_for_init, \
+          Tensor.set_random_seed)")
+  | None ->
+      Stdio.eprintf
+        "Checkpoint.restore: %s: warning: a version-%s checkpoint records no random seed, so the \
+         resume is not checked against this program's (%s); it continues the saved run only if \
+         those are the seeds it was saved under.\n\
+         %!"
+        path unseeded_format_version (show_seeds current)
 
 let restore ~ctx state path =
   let given = state_keys state in
@@ -129,7 +184,7 @@ let restore ~ctx state path =
   (* Validated inside the restore, from the header it reads the payloads with: one snapshot of the
      file, and nothing uploaded when a check fails. *)
   let check metadata =
-    let p, recorded = read_progress path metadata in
+    let p, random_seeds, recorded = read_progress path metadata in
     if not (List.equal String.equal recorded given) then begin
       let recorded_set = Set.of_list (module String) recorded in
       let given_set = Set.of_list (module String) given in
@@ -142,6 +197,7 @@ let restore ~ctx state path =
         ^ "; given only: "
         ^ show (Set.diff given_set recorded_set))
     end;
+    check_random_seeds path random_seeds;
     progress := Some p
   in
   let ctx = Persistence.restore ~ctx ~check_metadata:check state path in

@@ -353,6 +353,11 @@ val get_random_seed : unit -> t
     seed, e.g. using [get_random_seed ()] not separated by a call to {!unsafe_reinitialize}, must
     descend from the first caller's optimization context. *)
 
+val random_seeds : unit -> int list
+(** The seeds of the random-seed singletons this session created ({!set_random_seed}, directly or
+    lazily through {!get_random_seed}), oldest first, without one a rewind discarded: every seed the
+    session's graphs can draw from, including those built under {!with_saved_random_seed}. *)
+
 val with_saved_random_seed : (unit -> 'a) -> 'a
 (** Runs [f], restoring the global random-seed singleton (the one {!get_random_seed} returns) to its
     prior value afterwards, even on exception. Use this to scope {!set_random_seed} mutations — e.g.

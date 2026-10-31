@@ -9,4 +9,10 @@ a resume restoring the parameters but not the momentum ends elsewhere: true
 a resume restarting the host generator ends elsewhere: true
 restoring a state set without the momentum is refused, naming the difference: true
 a plain Persistence checkpoint is refused as recording no progress: true
+the checkpoint records the one random seed it was saved under: true
+a resume under a different random seed is refused, naming both seeds: true
+a checkpoint of a graph built under a scoped seed restores under that scoped seed: true
+a resume whose graph was built under another scoped seed is refused, naming both: true
+a format-1 checkpoint, recording no seed, restores under another seed with a warning: true
+a format-2 checkpoint missing its seed is refused as malformed: true
 an appending save replaces the metadata key it names and keeps the others: true
