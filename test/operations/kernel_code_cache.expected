@@ -88,3 +88,4 @@ cold scope: what the scope published is discarded: true
 cold scope: a cache created inside ends empty: true
 cold scope: an exception propagates out of the scope: true
 cold scope: and the entries are put back all the same: true
+cold scope: the registry keeps no dropped cache's code alive: true

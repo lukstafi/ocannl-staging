@@ -458,3 +458,17 @@ let () =
   p "cold scope: an exception propagates out of the scope" raised;
   p "cold scope: and the entries are put back all the same"
     (Option.is_some (K.find c "shared1") && Option.is_none (K.find c "raised"))
+
+(* The registry [with_cold_caches] reads holds its caches weakly: a cache its owner dropped is
+   collected, with the code it retained. *)
+let () =
+  let w = Stdlib.Weak.create 1 in
+  let[@inline never] make () =
+    let c : string ref K.t = K.create ~capacity_bytes:(fun () -> 1000) in
+    let v = ref "dropped program" in
+    K.publish c ~entries:[ ("dropped", v) ] ~bytes:1;
+    Stdlib.Weak.set w 0 (Some v)
+  in
+  make ();
+  Stdlib.Gc.full_major ();
+  p "cold scope: the registry keeps no dropped cache's code alive" (not (Stdlib.Weak.check w 0))
