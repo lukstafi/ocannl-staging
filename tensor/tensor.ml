@@ -1541,16 +1541,15 @@ module For_testing = struct
 
   let checkpoint_differences ck =
     let { g_forward_roots; g_backprop_roots; g_random_seed; g_random_seeds_created; g_open_nodes } =
-    ck.ck_globals
-  in
+      ck.ck_globals
+    in
     let now = capture_globals () in
     List.filter_map
       [
         ("Tensor forward roots", phys_equal now.g_forward_roots g_forward_roots);
         ("Tensor backprop roots", phys_equal now.g_backprop_roots g_backprop_roots);
         ("Tensor random seed", phys_equal now.g_random_seed g_random_seed);
-        ( "Tensor random seeds created",
-          phys_equal now.g_random_seeds_created g_random_seeds_created );
+        ("Tensor random seeds created", phys_equal now.g_random_seeds_created g_random_seeds_created);
         ("Tensor open nodes", phys_equal now.g_open_nodes g_open_nodes);
       ]
       ~f:(fun (name, same) -> if same then None else Some name)
