@@ -347,6 +347,12 @@ let grain_exponent x =
     single product included), is a multiple of [2^g] no larger in magnitude than the whole sum: an
     integer count of grains at most [2^sig_bits], which [sig_bits] bits hold exactly.
 
+    [~any_sign:true] drops the first condition, for a reduction no tensor unit runs — an f32 or f64
+    one, which HIP declines to WMMA (docs/agent-notes/backend-precision-and-simd.md), on a scalar or
+    SIMD path. An IEEE adder needs no sign condition: every subset of the products sums to a
+    magnitude at most that of their magnitudes' sum, so the bound alone keeps it exact. A leg that
+    can render tensorized on half or bf16 operands keeps the default.
+
     It is SUFFICIENT, not necessary: [false] does not exhibit an inexact partial sum (a cell can
     exceed the bound and still land only on representable values), so a claim that data DO leave
     exactness — a discrimination claim — exhibits the crossing instead, as {!cycle}'s doc says.
@@ -356,13 +362,15 @@ let grain_exponent x =
     data of these tests always are). The host computes each product in f64, exactly whenever the
     operands' significant bits add up to at most 53, as two f32 values' do. [sig_bits] is at most
     52, so the f64 sum of the magnitudes cannot round past the bound and accept a cell beyond it. *)
-let exact_partials ~sig_bits products =
+let exact_partials ?(any_sign = false) ~sig_bits products =
   if sig_bits < 1 || sig_bits > 52 then
     invalid_arg (Printf.sprintf "Ll_test.exact_partials: ~sig_bits:%d is outside 1 .. 52" sig_bits);
   let nonzero = List.filter products ~f:(fun x -> Float.(x <> 0.)) in
   let grains = List.filter_map nonzero ~f:grain_exponent in
   let one_sign =
-    List.for_all nonzero ~f:Float.is_positive || List.for_all nonzero ~f:Float.is_negative
+    any_sign
+    || List.for_all nonzero ~f:Float.is_positive
+    || List.for_all nonzero ~f:Float.is_negative
   in
   match List.min_elt grains ~compare:Int.compare with
   | None -> List.is_empty nonzero
@@ -380,6 +388,15 @@ let matmul_products ~m ~n ~k a b =
   List.init (m * n) ~f:(fun t ->
       let i = t / n and j = t % n in
       List.init k ~f:(fun kk -> a [| i; kk |] *. b [| kk; j |]))
+
+(** [reduction_cells ~out ~over term] is the cells of a reduction of any shape, row-major over the
+    output index space [out], each as the terms it sums: [term o r] for every index [r] of the
+    reduced space [over]. The general form of {!matmul_products}, for a contraction whose operands
+    index otherwise — [term] reads the operands' own init functions at [o] and [r]. *)
+let reduction_cells ~out ~over term =
+  let indices dims = List.init (Array.fold dims ~init:1 ~f:( * )) ~f:(unflat ~dims) in
+  let reduced = indices over in
+  List.map (indices out) ~f:(fun o -> List.map reduced ~f:(term o))
 
 (** {1 Optimization} *)
 

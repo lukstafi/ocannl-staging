@@ -143,6 +143,10 @@ module Operand_key_scan = Operand_key_scan
 (** Finding operand fixtures that mint values from a hand-rolled modulus of a multi-axis key instead
     of going through [Ll_test.cycle]'s blind-axis guard (gh-ocannl-1018). *)
 
+module Exact_partials_scan = Exact_partials_scan
+(** Prose claiming the exactness of partial sums, and whether an [Ll_test.exact_partials] derivation
+    stands beside it (gh-ocannl-1729). *)
+
 module Mutation_serial_scan = Mutation_serial_scan
 (** Holding every write to the inference session's module-level mutable state to
     [Row.note_mutation], or to an in-place classification (gh-ocannl-1506). *)

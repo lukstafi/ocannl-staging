@@ -30,8 +30,9 @@
    - A fission segment's site, the form the real step searches: its [Zero_out] lands in a segment of
    its own, and the unzeroed site coalesces by its own [Coalesce] alone.
 
-   Inputs vary with every index and keep every partial sum exactly representable in f32, so bitwise
-   equality is required whatever order a tiling accumulates in. *)
+   Inputs vary with every index, and each leg comparing executed values derives from its own inputs
+   that every association of its sums is exact in f32 (an [Ll_test.exact_partials] claim over its
+   cells), so bitwise equality is required whatever order a tiling accumulates in. *)
 
 open Base
 open Ocannl
@@ -49,6 +50,10 @@ open Verdict.Claims
 
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 let on_gpu = Sched.backend_is_gpu backend_name
+
+(* A hand-built leg's seeded value of [tn] at [idcs]. *)
+let seeded seed tn ~dims idcs =
+  (List.Assoc.find_exn seed ~equal:Ir.Tnode.equal tn).(L.flat ~dims idcs)
 
 let raises_with ~substring f =
   match f () with
@@ -136,6 +141,13 @@ let () =
         Option.equal Ir.Indexing.equal_axis_index (Sched.add_symbol it tile)
           (Some (Ir.Indexing.affine ~symbols:[ (1, tile); (1, merged) ] ~offset:0))
     | None -> false);
+  (* The bitwise premise, from the seeds. At f32 no gfx11 WMMA runs a leg of this file's hand-built
+     nests (HIP tensorizes half and bf16 alone), so mixed signs need no sign condition. *)
+  p_all "control: every partial sum of every cell is exact in f32"
+    (L.reduction_cells ~out:[| bb; ss; hh; ee |] ~over:[| kk |] (fun o r ->
+         seeded seed w ~dims:[| hh; ee; kk |] [| o.(2); o.(3); r.(0) |]
+         *. seeded seed x ~dims:[| bb; ss; kk |] [| o.(0); o.(1); r.(0) |]))
+    ~f:(Ll_test.exact_partials ~any_sign:true ~sig_bits:24);
   let run name o = List.hd_exn (L.execute ~name o ~seed:(List.take seed 2) ~read:[ d ]) in
   let want = run "co_plain_run" o in
   let got = run "co_merged_run" oc in
@@ -232,6 +244,10 @@ let () =
     let ctx = List.fold seed ~init:ctx ~f:(fun ctx (tn, vs) -> Context.set_values ctx tn vs) in
     Context.get_values (Context.run ctx routine) d
   in
+  p_all "split-reduce: every partial sum of every cell is exact in f32"
+    (L.reduction_cells ~out:[| hh; ee |] ~over:[| kk |] (fun o r ->
+         seeded seed x ~dims:[| kk; hh; ee |] [| r.(0); o.(0); o.(1) |]))
+    ~f:(Ll_test.exact_partials ~any_sign:true ~sig_bits:24);
   let want = run "cs_plain_run" o (fun o -> [ o ]) in
   let got =
     run "cs_split_run" os
@@ -310,6 +326,10 @@ let () =
     ~f:(fun idcs -> (Ir.Affine.axis_extents ~dims:[| kk; hh; ee |] idcs).(2) = hh * ee);
   p_all "privatize: the transfers' accesses of the coalesced target stay flattened" !d_accesses
     ~f:(fun idcs -> (Ir.Affine.axis_extents ~dims:[| hh; ee |] idcs).(1) = hh * ee);
+  p_all "stage+privatize: every partial sum of every cell is exact in f32"
+    (L.reduction_cells ~out:[| hh; ee |] ~over:[| kk |] (fun o r ->
+         seeded seed x ~dims:[| kk; hh; ee |] [| r.(0); o.(0); o.(1) |]))
+    ~f:(Ll_test.exact_partials ~any_sign:true ~sig_bits:24);
   let want = List.hd_exn (L.execute ~name:"cp_plain_run" o ~seed ~read:[ d ]) in
   let got = List.hd_exn (L.execute ~name:"cp_packed_run" os ~seed ~read:[ d ]) in
   p "stage+privatize: the coalesced, packed reduction computes the plain one's values bitwise"
@@ -332,8 +352,9 @@ let () =
    contraction; - a weight stored [w[h, j, e]] (the pair not adjacent), a per-head-only operand, and
    a padded inner axis each make [Coalesce] decline.
 
-   Inputs are multiples of 1/4 and 1/2 with partial sums far below 2^24, so every order of
-   accumulation is exact in f32 and the claims are bitwise. *)
+   Inputs are multiples of 1/4 and 1/2, the weight strictly negative and the activation strictly
+   positive; the leg derives from them that every order of accumulation is exact in f32, so the
+   claims are bitwise. *)
 
 let () =
   let ss = 4 and jj = 6 and hh = 3 and ee = 5 and bk = 4 in
@@ -438,6 +459,11 @@ let () =
   (* [bk = 4] divides neither [e = 5] nor [K = 15]: tiles cross heads and the last one runs past
      [K]. A fringe guarded against the head's [e] instead of [K] would zero most of every tile,
      which the bitwise claim below catches. *)
+  p_all "contraction: every partial sum of every cell is exact in f32"
+    (L.reduction_cells ~out:[| ss; jj |] ~over:[| hh; ee |] (fun o r ->
+         seeded seed w ~dims:[| jj; hh; ee |] [| o.(1); r.(0); r.(1) |]
+         *. seeded seed x ~dims:[| ss; hh; ee |] [| o.(0); r.(0); r.(1) |]))
+    ~f:(Ll_test.exact_partials ~sig_bits:24);
   let want_d, want_r, got_d, got_r =
     match
       ( L.execute ~name:"ck_plain_run" o ~seed ~read:[ d; r ],
@@ -537,6 +563,11 @@ let () =
     let ctx = List.fold seed ~init:ctx ~f:(fun ctx (tn, vs) -> Context.set_values ctx tn vs) in
     Context.get_values (Context.run ctx routine) d
   in
+  p_all "contraction split-reduce: every partial sum of every cell is exact in f32"
+    (L.reduction_cells ~out:[| jj |] ~over:[| hh; ee |] (fun o r ->
+         seeded seed w ~dims:[| jj; hh; ee |] [| o.(0); r.(0); r.(1) |]
+         *. seeded seed x ~dims:[| hh; ee |] [| r.(0); r.(1) |]))
+    ~f:(Ll_test.exact_partials ~sig_bits:24);
   let want = run "cks_plain_run" o (fun o -> [ o ]) in
   let got =
     run "cks_split_run" os
@@ -642,15 +673,19 @@ and hh = 4
 and ee = 32
 and kk = 16
 
-let x () =
-  NTDSL.init ~l:"co_x" ~prec:Ir.Ops.single ~o:[ bb; ss; kk ]
-    ~f:(Ll_test.cycle ~dims:[| bb; ss; kk |] ~modulus:13 ~offset:0. ~stride:0.25)
-    ()
+let x_f = Ll_test.cycle ~dims:[| bb; ss; kk |] ~modulus:13 ~offset:0. ~stride:0.25
+let w_f = Ll_test.cycle ~dims:[| hh; ee; kk |] ~modulus:11 ~offset:(-5.) ~stride:0.5
+let x () = NTDSL.init ~l:"co_x" ~prec:Ir.Ops.single ~o:[ bb; ss; kk ] ~f:x_f ()
+let w () = NTDSL.init ~l:"co_w" ~prec:Ir.Ops.single ~o:[ hh; ee; kk ] ~f:w_f ()
 
-let w () =
-  NTDSL.init ~l:"co_w" ~prec:Ir.Ops.single ~o:[ hh; ee; kk ]
-    ~f:(Ll_test.cycle ~dims:[| hh; ee; kk |] ~modulus:11 ~offset:(-5.) ~stride:0.5)
-    ()
+(* The bitwise premise of the projection legs below (the serial reference against every seed, here
+   and over the folded zero), from [x] and [w]'s init functions. At f32 no gfx11 WMMA runs them --
+   HIP tensorizes half and bf16 alone -- so the weight's mixed signs need no sign condition. *)
+let () =
+  p_all "projection: every partial sum of every cell is exact in f32"
+    (Ll_test.reduction_cells ~out:[| bb; ss; hh; ee |] ~over:[| kk |] (fun o r ->
+         x_f [| o.(0); o.(1); r.(0) |] *. w_f [| o.(2); o.(3); r.(0) |]))
+    ~f:(Ll_test.exact_partials ~any_sign:true ~sig_bits:24)
 
 (* The gpt2 q/k/v projection's own layout: [d[b,s,h,e] += x[b,s,k] * w[h,e,k]]. *)
 let projection () =
@@ -887,22 +922,22 @@ let () =
    code re-detects as one k of extent [h * e] with every output role unchanged, and the branch
    enumerates the GPU scalar blocktile family over it. Each seed must construct, validate, keep both
    staged loads on the flattened source address bounded by the merged extent, survive the cache's
-   structural round trip and, on GPU backends, execute to the serial reference bitwise.
+   structural round trip and, on GPU backends, execute to the serial reference bitwise. *)
 
-   Inputs: the weight strictly negative and the activation strictly positive, every product a small
-   multiple of 1/8 and every partial sum far below 2^24, so no cell is zero and every accumulation
-   order is exact in f32. *)
+let out_proj_w ~jj ~hh ~ee =
+  Ll_test.cycle ~dims:[| jj; hh; ee |] ~modulus:11 ~offset:(-11.) ~stride:0.5
+
+let out_proj_att ~bb ~ss ~hh ~ee =
+  Ll_test.cycle ~dims:[| bb; ss; hh; ee |] ~modulus:13 ~offset:1. ~stride:0.25
 
 let out_proj ~tag ~bb ~ss ~jj ~hh ~ee () =
   let w =
     NTDSL.init ~l:(tag ^ "_w") ~prec:Ir.Ops.single ~o:[ jj ] ~i:[ hh; ee ]
-      ~f:(Ll_test.cycle ~dims:[| jj; hh; ee |] ~modulus:11 ~offset:(-11.) ~stride:0.5)
-      ()
+      ~f:(out_proj_w ~jj ~hh ~ee) ()
   in
   let att =
     NTDSL.init ~l:(tag ^ "_att") ~prec:Ir.Ops.single ~b:[ bb; ss ] ~o:[ hh; ee ]
-      ~f:(Ll_test.cycle ~dims:[| bb; ss; hh; ee |] ~modulus:13 ~offset:1. ~stride:0.25)
-      ()
+      ~f:(out_proj_att ~bb ~ss ~hh ~ee) ()
   in
   let%op out = w * att in
   (out, w, att)
@@ -916,6 +951,15 @@ let contraction_seeds ?capabilities ?(limits = Ir.Backend_intf.no_hardware_limit
    those under the device's limits (the executed ones on GPU), for the caller's K-menu claims. *)
 let contraction_leg ~tag ~bb ~ss ~jj ~hh ~ee =
   let kk = hh * ee in
+  (* Inputs: the weight strictly negative and the activation strictly positive, every product a
+     small multiple of 1/8, so no cell is zero, and every partial sum, in any association, is exact
+     in f32 -- derived here from the init functions. *)
+  p_all
+    (tag ^ ": every partial sum of every cell is exact in f32")
+    (Ll_test.reduction_cells ~out:[| bb; ss; jj |] ~over:[| hh; ee |] (fun o r ->
+         out_proj_w ~jj ~hh ~ee [| o.(2); r.(0); r.(1) |]
+         *. out_proj_att ~bb ~ss ~hh ~ee [| o.(0); o.(1); r.(0); r.(1) |]))
+    ~f:(Ll_test.exact_partials ~sig_bits:24);
   let reference, _, _ = out_proj ~tag:(tag ^ "_ref") ~bb ~ss ~jj ~hh ~ee () in
   let want = run_with (named (tag ^ "_ref") (Train.forward reference)) reference Fn.id in
   p
@@ -1146,19 +1190,23 @@ let () =
    depths 64 and 32, both crossing a head boundary, where the uncoalesced site's tiles stop at one
    head.
 
-   Inputs are small integers (the weight in {-3, -2, -1}, the activation in {1, 2, 3}): every
-   product and every partial sum (at most 64 * 9 = 576) is exact in f16, tf32 and f32 in any order,
-   so the candidates must match the serial reference bitwise at either precision. *)
+   Inputs are small integers (the weight in {-3, -2, -1}, the activation in {1, 2, 3}), so every
+   product has one sign; each executed leg derives that its sums are exact in f16, tf32 and f32 in
+   any order, so the candidates must match the serial reference bitwise at either precision. *)
+
+let int_out_proj_w ~jj ~hh ~ee =
+  Ll_test.cycle ~dims:[| jj; hh; ee |] ~modulus:3 ~offset:(-3.) ~stride:1.
+
+let int_out_proj_att ~bb ~ss ~hh ~ee =
+  Ll_test.cycle ~dims:[| bb; ss; hh; ee |] ~modulus:3 ~offset:1. ~stride:1.
 
 let int_out_proj ~tag ~prec ~bb ~ss ~jj ~hh ~ee () =
   let w =
-    NTDSL.init ~l:(tag ^ "_w") ~prec ~o:[ jj ] ~i:[ hh; ee ]
-      ~f:(Ll_test.cycle ~dims:[| jj; hh; ee |] ~modulus:3 ~offset:(-3.) ~stride:1.)
-      ()
+    NTDSL.init ~l:(tag ^ "_w") ~prec ~o:[ jj ] ~i:[ hh; ee ] ~f:(int_out_proj_w ~jj ~hh ~ee) ()
   in
   let att =
     NTDSL.init ~l:(tag ^ "_att") ~prec ~b:[ bb; ss ] ~o:[ hh; ee ]
-      ~f:(Ll_test.cycle ~dims:[| bb; ss; hh; ee |] ~modulus:3 ~offset:1. ~stride:1.)
+      ~f:(int_out_proj_att ~bb ~ss ~hh ~ee)
       ()
   in
   let%op out = w * att in
@@ -1242,6 +1290,14 @@ let () =
    and render tensorized per its routine's mma census, so a scalar fallback cannot pass as one. *)
 let tensorized_leg ~tag ~prec =
   let bb = 2 and ss = 32 and jj = 64 and hh = 4 and ee = 16 in
+  (* The bitwise premise, from the init functions: one sign, and every partial sum, in any
+     association, exact at f16's 11 significant bits -- so at tf32's and f32's too. *)
+  p_all
+    (tag ^ ": every partial sum of every cell is exact in f16, so in tf32 and f32")
+    (Ll_test.reduction_cells ~out:[| bb; ss; jj |] ~over:[| hh; ee |] (fun o r ->
+         int_out_proj_w ~jj ~hh ~ee [| o.(2); r.(0); r.(1) |]
+         *. int_out_proj_att ~bb ~ss ~hh ~ee [| o.(0); o.(1); r.(0); r.(1) |]))
+    ~f:(Ll_test.exact_partials ~sig_bits:11);
   let saved = Ir.Numerics.get () in
   Ir.Numerics.set_policy { saved with tf32_matmuls = true };
   Exn.protect

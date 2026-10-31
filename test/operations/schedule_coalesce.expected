@@ -3,6 +3,7 @@ control: the merged loop spans every head's columns: true
 control: the writes read the merged index flattened over the pair: true
 control: add_symbol refuses the flattened (Sub_axis) component of a coalesced write: true
 control: add_symbol extends the merged iterator of a coalesced write by the tile symbol: true
+control: every partial sum of every cell is exact in f32: true
 control: the coalesced nest computes the uncoalesced one's values bitwise: true
 per-head operand: Coalesce declines because a read does not hold the pair: true
 per-head operand: the oracle proves it illegal: true
@@ -11,9 +12,11 @@ padded inner axis: the oracle proves it illegal: true
 after a flattened run: Coalesce declines because the pair follows a Sub_axis run: true
 after a flattened run: the oracle proves it illegal: true
 split-reduce: every write of the coalesced cell, the combine's included, stays flattened: true
+split-reduce: every partial sum of every cell is exact in f32: true
 split-reduce: the coalesced, split, default-scheduled reduction computes the plain one's values: true
 stage: the load nest's read of the coalesced source stays flattened: true
 privatize: the transfers' accesses of the coalesced target stay flattened: true
+stage+privatize: every partial sum of every cell is exact in f32: true
 stage+privatize: the coalesced, packed reduction computes the plain one's values bitwise: true
 contraction: Coalesce of the contraction pair is Op_legal: true
 contraction: the merged k loop spans the whole contraction: true
@@ -21,6 +24,7 @@ contraction: the accumulator's index is untouched by the coalescing: true
 contraction: both operands are staged through their flattened address: true
 contraction: every staged read spans the merged extent on its flattened axis: true
 contraction: the unrelated second reader keeps reading the activation axis by axis: true
+contraction: every partial sum of every cell is exact in f32: true
 contraction: the coalesced, padded, staged and privatized contraction computes the plain one's values bitwise: true
 contraction: the second reader's values are untouched: true
 contraction hje: Coalesce declines: true
@@ -30,11 +34,13 @@ contraction per_head: the oracle proves it illegal: true
 contraction padded: Coalesce declines: true
 contraction padded: the oracle proves it illegal: true
 contraction split-reduce: the split of the merged k is Op_legal: true
+contraction split-reduce: every partial sum of every cell is exact in f32: true
 contraction split-reduce: the coalesced, split, default-scheduled contraction computes the plain one's values bitwise: true
 fuse-epilogue: the uncoalesced reduction's tail fuses: true
 fuse-epilogue: the relocation declines the coalesced accumulation nest's flattened site: true
 fuse-epilogue: the witness names the flattened site as the reason: true
 fuse-epilogue: the relocation declines the coalesced Privatize tile store-back's flattened site: true
+projection: every partial sum of every cell is exact in f32: true
 projection: the serial reference is not all zeros: true
 projection: the coalesced layout's prefix applies: true
 projection: the prefix expands the zeroing, coalesces its pair, then the site's: true
@@ -58,6 +64,7 @@ folded: the segment's zero nest and site both coalesce: true
 folded: the branch seeds a column tile wider than one head: true
 folded: every coalesced schedule constructs and validates: true
 folded: every coalesced seed executes to the materialized run: true
+ck_proj: every partial sum of every cell is exact in f32: true
 ck_proj: no cell of the serial reference is zero: true
 ck_proj: the columns layout has no interior batch loop to merge here: true
 ck_proj: the contraction prefix is the one Coalesce of the contraction pair: true
@@ -85,6 +92,7 @@ ck_proj: 32 KiB of workgroup memory admits the 64x64x64 tile, exactly at the lim
 ck_proj: a 256-thread cap admits the 64x64 block: true
 ck_proj: a 255-thread cap refutes the 64x64 block: true
 ck_proj: this device admits, and so executed, a 64x64 tile: true
+ck_odd: every partial sum of every cell is exact in f32: true
 ck_odd: no cell of the serial reference is zero: true
 ck_odd: the columns layout has no interior batch loop to merge here: true
 ck_odd: the contraction prefix is the one Coalesce of the contraction pair: true
@@ -111,10 +119,12 @@ ckt: the uncoalesced family's staged tensorized tiles stay within one head: true
 ckt: every tensorized contraction schedule constructs and validates: true
 ckt: every tensorized contraction schedule loads both operands through the flattened address: true
 ckt: the unstaged form behind the contraction prefix is declined by Tensorize on Sub_axis: true
+ckt_f32: every partial sum of every cell is exact in f16, so in tf32 and f32: true
 ckt_f32: no cell of the serial reference is zero: true
 ckt_f32: the device seeds a tensorized contraction tile crossing heads: true
 ckt_f32: every tensorized contraction seed executes to the serial reference bitwise: true
 ckt_f32: every tensorized contraction seed renders tensorized per its mma census: true
+ckt_f16: every partial sum of every cell is exact in f16, so in tf32 and f32: true
 ckt_f16: no cell of the serial reference is zero: true
 ckt_f16: the device seeds a tensorized contraction tile crossing heads: true
 ckt_f16: every tensorized contraction seed executes to the serial reference bitwise: true

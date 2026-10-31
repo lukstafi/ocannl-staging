@@ -49,8 +49,8 @@ struct
   let n = Option.value_map binding_budget ~default:24 ~f:(fun budget -> budget + 8)
   let len = 64
 
-  (* Distinct per parameter and per element, exact in single precision, and every partial sum of the
-     routine below stays an integer far below 2^24. *)
+  (* Distinct per parameter and per element, and integers: [case_packing] derives from them that the
+     routine's sums are exact in single precision. *)
   let value k i = Float.of_int ((k * 1000) + i + 1)
   let values k = Array.init len ~f:(value k)
   let ceil_log2 m = if m <= 1 then 0 else Int.ceil_log2 m
@@ -100,6 +100,11 @@ struct
       | Error msg -> failwith ("svpc_sum did not link: " ^ msg)
     in
     let ctx = Context.run ctx routine in
+    (* The premise of [Float.equal] below: each cell of [sum] adds one value of every parameter, and
+       every partial sum of those, in any association, is exact in f32. *)
+    p_all "every partial sum of every cell's uploads is exact in f32"
+      (List.init len ~f:(fun i -> List.init n ~f:(fun k -> value k i)))
+      ~f:(Ll_test.exact_partials ~sig_bits:24);
     let expected_sum =
       Array.init len ~f:(fun i ->
           List.sum (module Float) (List.init n ~f:Fn.id) ~f:(fun k -> value k i))

@@ -228,6 +228,30 @@ let () =
     "exact_partials refuses mixed signs even where every partial sum is exact (gfx11's WMMA \
      premise)"
     ((not (accepts ~bits:24 [ 1.; -1. ])) && not (accepts ~bits:24 [ 0.5; 0.25; -0.125 ]));
+  (* [~any_sign:true], the scalar reductions' premise: the same oracle over the same cells with
+     their signs alternated, so most of them mix signs. *)
+  let accepts_any ~bits cell = Ll_test.exact_partials ~any_sign:true ~sig_bits:bits cell in
+  let mixed = List.map cells ~f:(List.mapi ~f:(fun t x -> if t % 2 = 1 then Float.neg x else x)) in
+  p_all
+    "exact_partials ~any_sign:true is sound: where it accepts a cell of mixed signs, every partial \
+     sum of every association is exact at that width" (List.cartesian_product widths mixed)
+    ~f:(fun (bits, cell) ->
+      (not (accepts_any ~bits cell))
+      || List.for_all (subset_sums cell) ~f:(fun s -> representable ~bits s));
+  p_all "exact_partials ~any_sign:true accepts some cells of mixed signs at every width" widths
+    ~f:(fun bits ->
+      List.exists mixed ~f:(fun c ->
+          accepts_any ~bits c
+          && List.exists c ~f:Float.is_positive
+          && List.exists c ~f:Float.is_negative));
+  p
+    "exact_partials ~any_sign:true accepts those mixed cells, and bounds the magnitudes: 2^p \
+     grains pass, 2^p + 1 do not"
+    (accepts_any ~bits:24 [ 1.; -1. ]
+    && accepts_any ~bits:24 [ 0.5; 0.25; -0.125 ]
+    && accepts_any ~bits:3 [ 4.; -3.; 1. ]
+    && accepts_any ~bits:3 [ 7.; -1. ]
+    && not (accepts_any ~bits:3 [ 8.; -1. ]));
   p "exact_partials reads zeros as signless, and an empty or all-zero cell as exact"
     (accepts ~bits:8 [ 1.; 0.; 2. ]
     && accepts ~bits:8 [ -1.; -0.; -2. ]

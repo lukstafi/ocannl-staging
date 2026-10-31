@@ -1,0 +1,28 @@
+a sentence holding [partial sum(s)] and [exact] or [exactly] is a claim: true
+its nearest neighbours are not: a negation, another word, a sentence apart: true
+a known gap, pinned: bare [partials] is not the phrase: true
+a decimal point ends no sentence: the phrase and [exact] around 0.5 are one claim: true
+the claim is reported whitespace-collapsed, one per sentence: true
+a comment holding a string with a comment's closing delimiter is one comment: true
+a character literal of a double quote opens no string: true
+a nested comment is read with its parent: true
+a string literal is read decoded: an escape spelling [exact] is the word: true
+code is not prose: an identifier spelling the words is not a claim: true
+a source that does not lex is refused as the input's fault, with its line: true
+and so is one that lexes but does not parse: true
+a comment inside the item that derives the premise is covered: true
+a comment leading the item that derives it is covered: true
+a claim label in the deriving item is covered: true
+a file header ahead of an unrelated item is uncovered, though a later item derives: true
+a derivation named only in prose covers nothing: true
+a bare exact_partials after an open is not the path, so it covers nothing: true
+nor does a module alias's: true
+a trailing comment after the last item has no item to derive it: true
+the reader counts the items that derive: true
+an uncovered sentence in a file without a row is a finding, one per sentence: true
+a row holding the file's count exactly absorbs it: true
+a row holding another count is a finding: a new sentence, or a conversion the row missed: true
+an Every row absorbs any count: true
+a row whose file holds no uncovered sentence is stale, and so is a row naming no source: true
+an earned row is not stale: true
+two rows naming one file are refused: true

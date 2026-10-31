@@ -1,4 +1,5 @@
 --- leg 1: equal widths at one simdgroup, cooperative ---
+lred_coop32: every partial sum of every dp and every K cell is exact in f32: true
 lred_coop32: the mapping probe counts 4096 active threads (a reduce lane adds none): true
 lred_coop32: Grid (h, t, b) and a 32-wide lane: true
 lred_coop32: the lane sits inside the serial query loop: true
@@ -6,6 +7,7 @@ lred_coop32: the reduction loop is Workgroup_reduce: true
 lred_coop32: every cell of K holds the serial reference's exact value: true
 lred_coop32: the emitted kernel spells the all-reduce: true
 --- leg 2: the same nest, duplicated ---
+lred_dup32: every partial sum of every dp and every K cell is exact in f32: true
 lred_dup32: the mapping probe counts 4096 active threads (a reduce lane adds none): true
 lred_dup32: Grid (h, t, b) and a 32-wide lane: true
 lred_dup32: the lane sits inside the serial query loop: true
@@ -13,24 +15,29 @@ lred_dup32: the reduction loop is Serial: true
 lred_dup32: every cell of K holds the serial reference's exact value: true
 lred_dup32: the emitted kernel does not spell the all-reduce: true
 --- leg 3: refused keeps the plain plan ---
+lred_refused32: every partial sum of every dp and every K cell is exact in f32: true
 lred_refused32: no lane inside the serial query loop: true
 lred_refused32: the reduction loop is Serial: true
 lred_refused32: every cell of K holds the serial reference's exact value: true
 lred_refused32: the emitted kernel does not spell the all-reduce: true
 --- leg 4: unequal key and value widths keep the plain plan ---
+lred_e16_d32: every partial sum of every dp and every K cell is exact in f32: true
 lred_e16_d32: no lane inside the serial query loop: true
 lred_e16_d32: the reduction loop is Serial: true
 lred_e16_d32: every cell of K holds the serial reference's exact value: true
 lred_e16_d32: the emitted kernel does not spell the all-reduce: true
+lred_e64_d32: every partial sum of every dp and every K cell is exact in f32: true
 lred_e64_d32: no lane inside the serial query loop: true
 lred_e64_d32: the reduction loop is Serial: true
 lred_e64_d32: every cell of K holds the serial reference's exact value: true
 lred_e64_d32: the emitted kernel does not spell the all-reduce: true
 --- leg 5: a partial simdgroup keeps the plain plan; the renderer declines it too ---
+lred_coop16: every partial sum of every dp and every K cell is exact in f32: true
 lred_coop16: no lane inside the serial query loop: true
 lred_coop16: the reduction loop is Serial: true
 lred_coop16: every cell of K holds the serial reference's exact value: true
 lred_coop16: the emitted kernel does not spell the all-reduce: true
+lred_coop16r: every partial sum of every dp and every K cell is exact in f32: true
 lred_coop16r: the mapping probe counts 2048 active threads (a reduce lane adds none): true
 lred_coop16r: Grid (h, t, b) and a 16-wide lane: true
 lred_coop16r: the lane sits inside the serial query loop: true
@@ -38,10 +45,12 @@ lred_coop16r: the reduction loop is Workgroup_reduce: true
 lred_coop16r: every cell of K holds the serial reference's exact value: true
 lred_coop16r: the emitted kernel does not spell the all-reduce: true
 --- leg 6: several simdgroups, where the device allows them ---
+lred_coop64: every partial sum of every dp and every K cell is exact in f32: true
 lred_coop64: no lane inside the serial query loop: true
 lred_coop64: the reduction loop is Serial: true
 lred_coop64: every cell of K holds the serial reference's exact value: true
 lred_coop64: the emitted kernel does not spell the all-reduce: true
+lred_multi64: every partial sum of every dp and every K cell is exact in f32: true
 lred_multi64: the operands tell each lane's own simdgroup's partial from the whole sum: true
 lred_multi64: the operands tell simdgroup 0's partial from the whole sum: true
 lred_multi64: the mapping probe counts 8192 active threads (a reduce lane adds none): true
@@ -51,6 +60,7 @@ lred_multi64: the reduction loop is Workgroup_reduce: true
 lred_multi64: every cell of K holds the serial reference's exact value: true
 lred_multi64: every cell of K equals the materialized, unscheduled run's: true
 lred_multi64: the emitted kernel spells the all-reduce: true
+lred_multi128: every partial sum of every dp and every K cell is exact in f32: true
 lred_multi128: the operands tell each lane's own simdgroup's partial from the whole sum: true
 lred_multi128: the operands tell simdgroup 0's partial from the whole sum: true
 lred_multi128: the mapping probe counts 16384 active threads (a reduce lane adds none): true
@@ -60,10 +70,12 @@ lred_multi128: the reduction loop is Workgroup_reduce: true
 lred_multi128: every cell of K holds the serial reference's exact value: true
 lred_multi128: every cell of K equals the materialized, unscheduled run's: true
 lred_multi128: the emitted kernel spells the all-reduce: true
+lred_multi128_cap2: every partial sum of every dp and every K cell is exact in f32: true
 lred_multi128_cap2: no lane inside the serial query loop: true
 lred_multi128_cap2: the reduction loop is Serial: true
 lred_multi128_cap2: every cell of K holds the serial reference's exact value: true
 lred_multi128_cap2: the emitted kernel does not spell the all-reduce: true
+lred_coop64r: every partial sum of every dp and every K cell is exact in f32: true
 lred_coop64r: the mapping probe counts 8192 active threads (a reduce lane adds none): true
 lred_coop64r: Grid (h, t, b) and a 64-wide lane: true
 lred_coop64r: the lane sits inside the serial query loop: true
@@ -75,11 +87,13 @@ the fused backward's dp local is not minted without online_softmax_backward: tru
 the dp local minted for the same node at another precision is a node of its own, at that one: true
 the dp local minted again at its own precision is the same node: true
 a node forged with the dp local's namespace and label is not reassociable: true
+lred_plain32: every partial sum of every dp and every K cell is exact in f32: true
 lred_plain32: no lane inside the serial query loop: true
 lred_plain32: the reduction loop is Serial: true
 lred_plain32: every cell of K holds the serial reference's exact value: true
 lred_plain32: the emitted kernel does not spell the all-reduce: true
 --- leg 8: a hand-retyped Workgroup_reduce over an ordinary local keeps its binding ---
+lred_bound32: every partial sum of every dp and every K cell is exact in f32: true
 lred_bound32: the emitted kernel does not spell the all-reduce: true
 lred_bound32: the emitted kernel binds the reduction loop instead of looping it: true
 --- leg 9: auto resolves from the device's economics ---
@@ -88,20 +102,25 @@ auto on an unmeasured device is refused: true
 auto on the run's backend resolves to its measured mode: true
 auto spans one simdgroup on an unmeasured device: true
 auto on the run's backend spans its measured number of simdgroups: true
+lred_auto64: every partial sum of every dp and every K cell is exact in f32: true
 on the run's device a 64-wide head's default schedule is the resolved bound's: true
+lred_auto32: every partial sum of every dp and every K cell is exact in f32: true
 on a cheap-recompute device the default schedule is the resolved mode's: true
 on an unmeasured device the default schedule is the resolved mode's: true
 on the run's device the default schedule is the resolved mode's: true
 --- leg 10: barriers only under workgroup-uniform control ---
+lred_guard_uniform64: every partial sum of every dp and every K cell is exact in f32: true
 lred_guard_uniform64: a guard on the serial query symbol leaves the site cross-simdgroup: true
 lred_guard_uniform64: the validator's notion lists its barriers at 32-lane shuffles, uniform, and admits them: true
 lred_guard_uniform64: every cell of K holds the serial reference's exact value: true
 lred_guard_uniform64: the emitted kernel spells the cross-simdgroup all-reduce: true
+lred_guard_flag64: every partial sum of every dp and every K cell is exact in f32: true
 lred_guard_flag64: a guard reading a lane-dependent local leaves the site serial: true
 lred_guard_flag64: the validator's notion lists no inserted barrier for the site at 32-lane shuffles: true
 lred_guard_flag64: the validator admits the serial fallback at 32-lane shuffles: true
 lred_guard_flag64: the emitted kernel does not spell the all-reduce: true
 lred_guard_flag64: the emitted kernel loops the reduction in every lane: true
+lred_guard_unrolled64: every partial sum of every dp and every K cell is exact in f32: true
 lred_guard_unrolled64: the unroll leaves one copy of the reduction unguarded beside guarded ones: true
 lred_guard_unrolled64: no copy of the reduction symbol is admitted cross-simdgroup: true
 lred_guard_unrolled64: the emitted kernel spells no all-reduce in any copy: true
@@ -126,9 +145,11 @@ lred_coop32 (structural): under a GPU-like dialect, 0 bytes of partials, admitte
 lred_guard_flag64: 0 bytes of partials, admitted at that limit: true
 lred_guard_flag64 (structural): under a GPU-like dialect, 0 bytes of partials, admitted at that limit: true
 --- leg 12: the butterfly only under warp-uniform control ---
+lred_guard_uniform32: every partial sum of every dp and every K cell is exact in f32: true
 lred_guard_uniform32: the validator's notion lists the butterfly at 32-lane shuffles, uniform, and admits it: true
 lred_guard_uniform32: every cell of K holds the serial reference's exact value: true
 lred_guard_uniform32: the emitted kernel spells the all-reduce: true
+lred_guard_flag32: every partial sum of every dp and every K cell is exact in f32: true
 lred_guard_flag32: the reduction is a lane all-reduce site: true
 lred_guard_flag32: the validator's notion lists no lane collective for the site at 32-lane shuffles: true
 lred_guard_flag32: the validator admits the serial fallback at 32-lane shuffles: true
