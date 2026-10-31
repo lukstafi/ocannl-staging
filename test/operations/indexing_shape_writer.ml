@@ -3,10 +3,13 @@
    [Ir.Indexing.shape_writer]. This executable links no tensor frontend, so no [Shape] claimed the
    writer: the first claim here succeeds (the positive control), the guards behind it are exercised
    directly, and a second claim is refused (the negative control; capture_per_call holds the same
-   refusal in a process where [Shape] holds the writer). *)
+   refusal in a process where [Shape] holds the writer). It also pins [Tnode]'s sealed delayed
+   precision: each write that changes it reports once to [Tnode.prec_write_hook], and a no-op or a
+   refused write reports nothing. *)
 open Base
 open Verdict.Claims
 module Idx = Ir.Indexing
+module Tn = Ir.Tnode
 
 let refused f = match f () with () -> false | exception Utils.User_error _ -> true
 
@@ -47,10 +50,32 @@ let with_writer w =
     (born.used_as_slice && (not born.used_as_extent)
     && refused (fun () -> Idx.commit_role w born `Extent))
 
+(* The sealed delayed precision: a hook counting the writes it reports. *)
+let precision_writes () =
+  let writes = ref 0 in
+  (Tn.prec_write_hook := fun () -> Int.incr writes);
+  let tn =
+    Tn.create (Tn.Default Ir.Ops.single) ~id:0 ~label:[ "isw_prec" ]
+      ~unpadded_dims:(lazy [| 2 |])
+      ~padding:(lazy None)
+      ()
+  in
+  Tn.update_infer_prec tn (lazy Ir.Ops.half);
+  p "a top-down link replacing the default is one counted write" (!writes = 1);
+  Tn.update_prec tn Ir.Ops.half;
+  p "specifying the precision is one more" (!writes = 2);
+  Tn.update_prec tn Ir.Ops.half;
+  Tn.update_infer_prec tn (lazy Ir.Ops.double);
+  p "re-specifying it, or linking under a specified precision, writes and counts nothing"
+    (!writes = 2 && Option.equal Ir.Ops.equal_prec (Tn.get_specified_prec tn) (Some Ir.Ops.half));
+  p "a conflicting precision is refused, and not counted"
+    (refused (fun () -> Tn.update_prec tn Ir.Ops.double) && !writes = 2)
+
 let () =
   let claimed =
     match Idx.claim_shape_writer () with w -> Ok w | exception Utils.User_error msg -> Error msg
   in
   p "with no Shape linked, the first claim of the shape writer succeeds" (Result.is_ok claimed);
   (* Every later leg needs the writer; a failed claim is already the failed verdict above. *)
-  Result.iter claimed ~f:with_writer
+  Result.iter claimed ~f:with_writer;
+  precision_writes ()

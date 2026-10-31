@@ -423,7 +423,7 @@ Construction-time writes on operands' tensor nodes, audited for this contract:
 
 | Write | Verdict |
 |---|---|
-| top-down precision links | deferred until the operation is registered; skipped on closed operands |
+| top-down precision links | deferred until the operation is registered; skipped on closed operands; every precision write that changes a node's precision counts as a session mutation |
 | `uint4x32` precision on operands (`Operation`) | refused when it would change a closed operand |
 | memory mode, context ownership, gradient observability (`Tensor.param`) | `param` over a closed tensor is refused |
 | memory mode, `host_constant` (literals), `slice_of` (`@\|`) | written on the new node only |

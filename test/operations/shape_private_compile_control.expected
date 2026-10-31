@@ -1,5 +1,5 @@
 reading and pattern-matching a shape's fields compiles: true
-reading and matching an update step, a capture reference and its variable_ref, and a static symbol compiles, and so do their public constructors: true
+reading and matching an update step, a capture reference and its variable_ref, a static symbol and a node's delayed precision compiles, and so do their public constructors: true
 assigning the batch field is rejected as a private-type write: true
 assigning the input field is rejected as a private-type write: true
 assigning the output field is rejected as a private-type write: true
@@ -30,4 +30,6 @@ solving a variable_ref without the shape writer is a type error: true
 solving a variable_ref to a symbol without the shape writer is a type error: true
 committing a role without the shape writer is a type error: true
 the shape writer has no constructor to forge it with: true
+assigning a node's delayed precision is rejected: the field is not mutable: true
+a node's precision cell offers no raw setter: true
 deserializing a shape is no longer offered: true

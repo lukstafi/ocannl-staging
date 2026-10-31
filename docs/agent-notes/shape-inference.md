@@ -214,8 +214,11 @@ files.
   take an `Ir.Indexing.shape_writer`: one per process, which `Shape` claims as it initializes, so
   `Delayed_ref` and `finish_inference`'s role commit are their only callers and any other claim
   raises (`indexing_shape_writer` claims it in a Shape-free process; `capture_per_call` holds the
-  refusal). Hand-built IR gives a symbol its role at birth (`make_static_symbol ~used_as`). Reads
-  of committed state
+  refusal). Hand-built IR gives a symbol its role at birth (`make_static_symbol ~used_as`). A
+  `Tnode`'s delayed precision is sealed in `Tnode.Prec_cell`: only `update_prec`/`update_infer_prec`
+  write it, and each changing write calls `Tnode.prec_write_hook`, which `Tensor` sets to
+  `Row.note_mutation` — callers no longer count precision writes themselves. Reads of committed
+  state
   (`to_dims`/`to_padding` of a closed shape, `get_projections` of a committed step) skip
   `finish_inference`: a failed closure of OTHER work would otherwise poison a closed tensor's lazies
   (OCaml lazies re-raise their first exception). Tests that deliberately continue after an

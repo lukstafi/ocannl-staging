@@ -10,3 +10,7 @@ a fresh static symbol holds no role: true
 committing the extent role sets it, and re-committing it is a no-op: true
 the slice role is refused on an extent symbol, leaving it an extent: true
 a role given at birth holds, and excludes the other: true
+a top-down link replacing the default is one counted write: true
+specifying the precision is one more: true
+re-specifying it, or linking under a specified precision, writes and counts nothing: true
+a conflicting precision is refused, and not counted: true

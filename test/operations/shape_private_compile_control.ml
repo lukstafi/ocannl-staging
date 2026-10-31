@@ -2,16 +2,17 @@
    to write a shape. gh-ocannl-1573 extended the same to the rest of gh-ocannl-903's frontier: an
    update step (its projections), a capture reference ([var]) and the [Ir.Indexing.variable_ref] it
    carries ([solved_dim], [solved_sym]). gh-ocannl-1624 closed the frontier: a static symbol's
-   fields (its roles [used_as_extent] / [used_as_slice] above all), and the Indexing setters, which
-   take the shape writer only [Shape] holds. That is a property of the INTERFACE, which nothing
-   executed can observe: this control hands real ocamlc programs against the built Shape interface.
-   Reads and pattern matches must compile; an assignment to each mutable field, a record literal, a
-   record update and the retired [t_of_sexp] must each be rejected with their own diagnostic. Every
-   rejected leg that writes, builds or calls an existing name compiled on the base, where the record
-   was public; the two that name what the implementation keeps hidden (the writer's constructor) was
-   unbound there too, and pin that they stay so. A failed compiler launch or a missing include
-   directory cannot pass as a rejection: the positive leg runs through the same path, and each
-   negative leg names the diagnostic it expects. *)
+   fields (its roles [used_as_extent] / [used_as_slice] above all), a tensor node's delayed
+   precision, and the Indexing setters, which take the shape writer only [Shape] holds. That is a
+   property of the INTERFACE, which nothing executed can observe: this control hands real ocamlc
+   programs against the built Shape interface. Reads and pattern matches must compile; an assignment
+   to each mutable field, a record literal, a record update and the retired [t_of_sexp] must each be
+   rejected with their own diagnostic. Every rejected leg that writes, builds or calls an existing
+   name compiled on the base, where the record was public; the two that name what the implementation
+   keeps hidden (the writer's constructor, the precision cell's raw setter) were unbound there too,
+   and pin that they stay so. A failed compiler launch or a missing include directory cannot pass as
+   a rejection: the positive leg runs through the same path, and each negative leg names the
+   diagnostic it expects. *)
 open Base
 open Stdio
 open Verdict.Claims
@@ -60,7 +61,8 @@ let prelude =
    type step = Ocannl_tensor.Shape.update_step\n\
    type dref = Ocannl_tensor.Shape.delayed_var_ref\n\
    type vref = Ir.Indexing.variable_ref\n\
-   type ssym = Ir.Indexing.static_symbol\n"
+   type ssym = Ir.Indexing.static_symbol\n\
+   type tnode = Ir.Tnode.t\n"
 
 let private_write field = [ "Cannot"; "assign"; "field"; field; "of"; "the"; "private"; "type" ]
 let private_construction = [ "Cannot"; "create"; "values"; "of"; "the"; "private"; "type" ]
@@ -100,12 +102,13 @@ let () =
         let fresh_ssym : ssym =\n\
        \  Ir.Indexing.make_static_symbol ~static_range:2 ~used_as:`Extent (Ir.Indexing.get_symbol \
         ())\n\
-        let range (s : ssym) = Ir.Indexing.set_static_range s (Some 3)\n")
+        let range (s : ssym) = Ir.Indexing.set_static_range s (Some 3)\n\
+        let read_prec (tn : tnode) = Ir.Tnode.Prec_cell.get tn.delayed_prec_unsafe\n")
   in
   if not (Poly.equal frontier (Unix.WEXITED 0)) then eprintf "%s" frontier_log;
   p
-    "reading and matching an update step, a capture reference and its variable_ref, and a static \
-     symbol compiles, and so do their public constructors"
+    "reading and matching an update step, a capture reference and its variable_ref, a static \
+     symbol and a node's delayed precision compiles, and so do their public constructors"
     (Poly.equal frontier (Unix.WEXITED 0));
   let rejected name code expected =
     let status, log = compile ~compiler ~include_dirs (prelude ^ code) in
@@ -165,7 +168,7 @@ let () =
     private_construction;
   rejected "a record update of a variable_ref is rejected as a private-type construction"
     "let copy (v : vref) : vref = { v with solved_dim = Some 1 }\n" private_construction;
-  (* gh-ocannl-1624: a static symbol's fields, and the shape writer. *)
+  (* gh-ocannl-1624: a static symbol's fields, the shape writer, and a node's delayed precision. *)
   List.iter [ "used_as_extent"; "used_as_slice"; "static_range" ] ~f:(fun field ->
       rejected
         (Printf.sprintf "assigning a static symbol's %s is rejected as a private-type write" field)
@@ -212,6 +215,13 @@ let () =
   rejected "the shape writer has no constructor to forge it with"
     "let forge : Ir.Indexing.shape_writer = Ir.Indexing.Shape_writer\n"
     [ "Unbound"; "constructor"; "Ir"; "Indexing"; "Shape_writer" ];
+  rejected "assigning a node's delayed precision is rejected: the field is not mutable"
+    "let write (tn : tnode) = tn.delayed_prec_unsafe <- tn.delayed_prec_unsafe\n"
+    [ "The"; "record"; "field"; "delayed_prec_unsafe"; "is"; "not"; "mutable" ];
+  rejected "a node's precision cell offers no raw setter"
+    "let write (tn : tnode) = Ir.Tnode.Prec_cell.set tn.delayed_prec_unsafe (Ir.Tnode.Specified \
+     Ir.Ops.half)\n"
+    [ "Unbound"; "value"; "Ir"; "Tnode"; "Prec_cell"; "set" ];
   rejected "deserializing a shape is no longer offered"
     "let parse = Ocannl_tensor.Shape.t_of_sexp\n"
     [ "Unbound"; "value"; "Ocannl_tensor"; "Shape"; "t_of_sexp" ]

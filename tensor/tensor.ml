@@ -321,8 +321,7 @@ let check_not_discarded ~what t =
 let prec_update_is_noop t prec =
   let tn = t.value in
   if Lazy.is_val tn.Tn.storage_prec then Ir.Ops.equal_prec (Lazy.force tn.Tn.storage_prec) prec
-  else
-    match tn.Tn.delayed_prec_unsafe with Tn.Specified p -> Ir.Ops.equal_prec p prec | _ -> false
+  else match Tn.get_specified_prec tn with Some p -> Ir.Ops.equal_prec p prec | None -> false
 
 (* A settled precision cannot change either ([Tn.update_prec] would raise): validating it here keeps
    a multi-operand update from writing one operand before another is refused. *)
@@ -344,14 +343,16 @@ let update_operands_prec ts prec =
   Shape.check_untainted ();
   List.iter ts ~f:(check_not_discarded ~what:"operand");
   List.iter ts ~f:(fun t -> check_operand_prec t prec);
-  List.iter ts ~f:(fun t ->
-      if not (prec_update_is_noop t prec) then Row.note_mutation ();
-      Tn.update_prec t.value prec)
+  (* A write that changes a precision counts itself, through [Tn.prec_write_hook]. *)
+  List.iter ts ~f:(fun t -> Tn.update_prec t.value prec)
 
 let update_operand_prec t prec = update_operands_prec [ t ] prec
 
 let () =
   Tn.session_gate := Shape.check_untainted;
+  (* Every write that changes a node's delayed precision is a session mutation (gh-ocannl-1624):
+     top-down links, operand precisions, and a precision set inside a user's construction alike. *)
+  Tn.prec_write_hook := Row.note_mutation;
   (* Installed only once something is discarded, so a session that never rewinds pays nothing. *)
   Tn.validity_check := None
 
@@ -624,10 +625,9 @@ let%track7_sexp op ~(label : string list) ?(ternary_op = Shape.Pointwise_tern)
     (* Instead of just checking prec, we cross-check with dims (needed for code generation), to
        catch prec forcing bugs. A closed operand takes no new links either (gh-ocannl-1301): its
        committed state does not change after its closure, and a link from a consumer a rewind
-       discards would outlive it. *)
-    if not (Lazy.is_val tn.Tn.dims || ti.shape.Shape.closed) then (
-      Row.note_mutation ();
-      Tn.update_infer_prec tn prec)
+       discards would outlive it. A link that changes the precision counts itself, through
+       [Tn.prec_write_hook]. *)
+    if not (Lazy.is_val tn.Tn.dims || ti.shape.Shape.closed) then Tn.update_infer_prec tn prec
   in
   let transpose_op =
     match transpose_op with

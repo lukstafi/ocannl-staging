@@ -82,3 +82,6 @@ the hand-made node shares an open tensor's id and namespace: true
 the open tensors' nodes are discarded: true
 the hand-made node created in the window is not: it is written through the context: true
 and its values read back: true
+a write that changes a node's precision counts as a session mutation: true
+re-setting the precision the node holds is not counted: true
+a conflicting precision is refused, and not counted: true
