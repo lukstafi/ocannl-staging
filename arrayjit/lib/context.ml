@@ -45,6 +45,10 @@ module Fragment_key = struct
   let of_fragment ((tn, side) : Asgns.Fragment.t) = (tn.Tn.uid, side)
 end
 
+(* A routine's tensor-generated part in one gradient's life cycle (gh-ocannl-1744), as the lineage
+   records it: whether it zeroes the gradient, and whether its backprop accumulates into it. *)
+type grad_role = { gr_id : int; gr_name : string; gr_zeroes : bool; gr_accumulates : bool }
+
 type compile_frontier = {
   last_writer : int Map.M(Tn).t;
       (** For each tnode, the routine_id of the most recent routine that writes it. *)
@@ -60,6 +64,11 @@ type compile_frontier = {
           it: an external write supersedes a value, not the code that computes it. *)
   lineage_routines : Set.M(Int).t;
       (** The routines compiled in this lineage: this context's compile ancestry. *)
+  grad_roles : grad_role list Map.M(Int).t;
+      (** For each gradient (by node uid) that a routine of this lineage zeroes or accumulates into
+          through tensor-generated code ({!Asgns.field-zeroes}, {!Asgns.field-accumulates}), those
+          routines, latest first (gh-ocannl-1744). Like [owners], only a successful link adds to it.
+      *)
 }
 (** Immutable compile-time frontier for execution dependency tracking. Each context carries its own
     frontier; only the context returned by [compile] receives the updated frontier. The original
@@ -191,6 +200,7 @@ let empty_frontier =
     merge_buffer_writer = None;
     owners = Map.empty (module Fragment_key);
     lineage_routines = Set.empty (module Int);
+    grad_roles = Map.empty (module Int);
   }
 
 let create_ledger () =
@@ -557,6 +567,18 @@ let finish_link ctx comp wrapped
   ctx.ledger.fragment_registry <-
     Set.fold comp.Asgns.owned ~init:ctx.ledger.fragment_registry ~f:(fun registry fragment ->
         Map.add_multi registry ~key:(Fragment_key.of_fragment fragment) ~data:(id, name));
+  let grad_roles =
+    Set.fold (Set.union comp.Asgns.zeroes comp.Asgns.accumulates) ~init:frontier.grad_roles
+      ~f:(fun roles grad ->
+        Map.add_multi roles ~key:grad.Tn.uid
+          ~data:
+            {
+              gr_id = id;
+              gr_name = name;
+              gr_zeroes = Set.mem comp.Asgns.zeroes grad;
+              gr_accumulates = Set.mem comp.Asgns.accumulates grad;
+            })
+  in
   let new_frontier =
     {
       frontier with
@@ -564,6 +586,7 @@ let finish_link ctx comp wrapped
       last_readers = new_last_readers;
       owners;
       lineage_routines = Set.add frontier.lineage_routines id;
+      grad_roles;
     }
   in
 
@@ -645,6 +668,8 @@ let frontend_gate ?prelowered comp =
              comp.Ir.Assignments.embedded_nodes;
              fragment_nodes comp.Asgns.owned;
              fragment_nodes comp.Asgns.requires;
+             comp.Asgns.zeroes;
+             comp.Asgns.accumulates;
            ])
         ~f:check;
       (* A prelowered program replaces the comp's lowering: its nodes are the ones that run. *)
@@ -686,6 +711,90 @@ let check_no_duplicate_fragments ?name ctx (comp : Asgns.comp) =
              version, compile from a context that does not descend from that routine (a sibling)."
             (match name with None -> "" | Some n -> " (" ^ n ^ ")")
             listed)
+
+(* gh-ocannl-1744: [Tensor.op] carries a shared operand's gradient zeroing in its first-constructed
+   consumer only -- together with the operand's backprop -- while every consumer's own gradient code
+   accumulates into it. Two routines of a lineage that accumulate into one gradient are therefore
+   correct together only under a common reset: a zeroing compiled before both (so it is an execution
+   dependency of the first), carried by neither, and with no other zeroing after the first
+   accumulation (which would discard it). And a contribution compiled after the routine that
+   propagates from the gradient never reaches the gradients below it: the propagation is ordered
+   before it, and the next cycle's reset discards it. Both are refused here, before lowering;
+   [Context.join] (gh-ocannl-1742) is to lift the first by hoisting the zeroing. Siblings are
+   alternatives and never collide. This is compile-time compatibility only: the order of later
+   [run]s is the caller's. *)
+let check_shared_gradient_reset ?name ctx (comp : Asgns.comp) =
+  let this =
+    Option.value_or_thunk name ~default:(fun () ->
+        match Asgns.get_name_exn comp.asgns with
+        | derived -> derived
+        | exception Invalid_argument _ -> "(unnamed)")
+  in
+  let routine { gr_id; gr_name; _ } = Printf.sprintf "%s (id=%d)" gr_name gr_id in
+  let conflict grad =
+    let roles = Map.find_multi ctx.frontier.grad_roles grad.Tn.uid in
+    let accumulators = List.filter roles ~f:(fun r -> r.gr_accumulates) in
+    let propagation = Map.find ctx.frontier.owners (Fragment_key.of_fragment (grad, Asgns.Bprop)) in
+    let shared reason (other : grad_role) =
+      Some
+        (Printf.sprintf "%s, also accumulated into by routine %s: %s" (Tn.debug_name grad)
+           (routine other) reason)
+    in
+    match (propagation, List.last accumulators) with
+    | Some (owner_id, owner), _ when not (Set.mem comp.owned (grad, Asgns.Bprop)) ->
+        Some
+          (Printf.sprintf
+             "%s: routine %s (id=%d) already propagates from it, so this contribution is compiled \
+              after the propagation and never reaches the gradients below it -- compile the \
+              contributing routine first and the one carrying that backprop last"
+             (Tn.debug_name grad) owner owner_id)
+    | _, None -> None
+    | _, Some first -> (
+        let zeroers = List.filter roles ~f:(fun r -> r.gr_zeroes && not r.gr_accumulates) in
+        match
+          ( Set.mem comp.zeroes grad,
+            List.find accumulators ~f:(fun r -> r.gr_zeroes),
+            List.find zeroers ~f:(fun z -> z.gr_id > first.gr_id) )
+        with
+        | true, _, _ ->
+            shared
+              "this computation zeroes it itself, discarding the other's contribution whenever it \
+               runs after it"
+              first
+        | false, Some zeroing, _ ->
+            shared
+              "that routine zeroes it itself, discarding this computation's contribution whenever \
+               it runs after it"
+              zeroing
+        | false, None, Some late ->
+            shared
+              (Printf.sprintf
+                 "routine %s zeroes it after the first accumulation was compiled, discarding that \
+                  contribution"
+                 (routine late))
+              first
+        | false, None, None when List.is_empty zeroers ->
+            shared "no zeroing of it is compiled in this lineage before both" first
+        | false, None, None -> None)
+  in
+  let conflicts = List.filter_map (Set.to_list comp.accumulates) ~f:conflict in
+  if not (List.is_empty conflicts) then
+    raise
+    @@ Utils.User_error
+         (Printf.sprintf
+            "Context.compile (%s): this computation's backprop accumulates into gradients that \
+             another routine of this context's lineage also accumulates into, or already \
+             propagates from, without a common zeroing ordered before both (gh-ocannl-1744): %s. A \
+             tensor shared by two losses (a Require_grad input, a parameter, a trunk) receives \
+             each loss's contribution from that loss's routine, but only its first-constructed \
+             consumer zeroes and propagates its gradient. Compute the objectives in one routine \
+             (one loss over their sum, one Train.grad_update), or compile a zeroing of the shared \
+             gradient first (Train.zero_params_grads ~params) and then routines accumulating into \
+             it that do not zero it (Train.grad_update ~accum_steps). A sibling, compiled from a \
+             context that does not descend from the other routine, is an alternative and is not \
+             refused."
+            this
+            (String.concat ~sep:"; " conflicts))
 
 (* The frontier deciding which routines count as a routine's lineage at run time: the running
    context's, when it descends from the routine's compile -- same root, and the routine among its
@@ -770,6 +879,7 @@ let compile_outcome ?name ?lowered_transform ?prelowered ?reuse ~provenance ?can
   frontend_gate ?prelowered comp;
   (* Likewise lineage-wide, and after the gate, so a discarded node is reported as such. *)
   check_no_duplicate_fragments ?name ctx comp;
+  check_shared_gradient_reset ?name ctx comp;
   (* Compile and link on the backend context; only backend-independent routine components (and the
      rewrapped context) escape the dispatch. Unwrapped rather than through [Backends.with_backend]
      so that a [retain]ed link (gh-ocannl-1440) can rewrap the context it links later. *)

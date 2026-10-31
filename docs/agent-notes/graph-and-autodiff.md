@@ -41,11 +41,25 @@ files.
   `Train.to_routine`, which materializes guessed outputs — the LINK fails first, and
   `Backends.Prior_context_lacks` carries the node to `Context`'s lineage hint; a test that needs
   the run-time check allocates the gradient first (a zeroing routine). Owner presence is not proof
-  of a correct gradient: a skipped child's ZEROING is skipped too, so two routines over one trunk
-  (or one term) accumulate without a common reset. A test that recompiles one program along a
+  of a correct gradient: a skipped child's ZEROING is skipped too -- next bullet. A test that
+  recompiles one program along a
   lineage to exercise lowering compiles an unowned copy (`Asgns.comp ~embedded asgns`). The
   `Train.*_once` functions mean "compile and run one time"; `forward_once` drops nothing, so a loss
   built after it trains through it (`lineage_fragments.ml`).
+- A shared gradient's life cycle is checked per lineage too (gh-ocannl-1744): `Asgns.comp`
+  carries `zeroes` (tensor-generated zeroing: `Tensor.op`'s `zero_grads`, `force_param_diff`) and
+  `accumulates` (the operands' gradients `own_grad_asn` writes, root or not), and
+  `check_shared_gradient_reset` beside `check_no_duplicate_fragments` refuses a second accumulator
+  of a gradient unless neither zeroes it and every zeroing in the lineage precedes the first
+  accumulation (`Z0; A1; Z1; A2` is refused), and refuses any contribution compiled after the
+  routine owning `(g, Bprop)` (its propagation already ran). So `grad_update l1` and
+  `grad_update l2` over a shared term or trunk cannot share a lineage; the supported spellings are
+  one routine over the sum, or `zero_params_grads ~params` first plus `grad_update ~accum_steps:1`
+  per objective (`filter_out_grad_zeroing` strips only `grads ∩ zeroes`, two-sided against the
+  emitted `Fetch`es). Traps: siblings bind the ancestor's gradient buffer, so a sibling's value
+  claim needs its own reset; a routine reading a term whose init another consumer embeds needs the
+  value uploaded (`Context.set_values`), and a hand-built owner (`l1.grad =: 1; l1.backprop`)
+  needs `l1.forward` for its constants (`shared_grad_refusal.ml`).
 - Within ONE comp, `owned` is a set, so a fragment carried twice merged unseen while `asgns` ran
   it twice: `Asgns.sequence` refuses members sharing a fragment, naming it (gh-ocannl-1746,
   `fragment_sequenced_twice.ml`). A comp built past `sequence` (a hand-made `Seq`) owes the same

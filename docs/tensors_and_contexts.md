@@ -392,6 +392,18 @@ let ctx = Context.run ctx grad_routine in
 let _ctx = Context.run ctx sgd_routine in
 ```
 
+#### Shared Gradients
+
+A tensor shared by two losses -- an optimized `Require_grad` input under a content and a style
+objective, a parameter, a trunk -- receives each loss's contribution to its gradient from that
+loss's backprop, but only its first-constructed consumer carries its gradient zeroing (and, for a
+trunk, the backprop propagating from it). Two `Train.grad_update` routines over it in one lineage
+would compute neither loss's gradient, so `Context.compile` refuses the second, naming the gradient
+and both routines (gh-ocannl-1744). Compute the objectives in one routine, as `Train.grad_update` of
+a loss over their sum; or compile `Train.zero_params_grads ~params` first and then a
+`Train.grad_update ~accum_steps:1` per objective, neither of which zeroes the shared leaf: after the
+reset and both runs, its gradient is the sum's.
+
 ## The Train Module
 
 The `Train` module provides high-level utilities for training workflows.
