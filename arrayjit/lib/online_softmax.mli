@@ -125,7 +125,9 @@ val dprob_local : like:Tnode.t -> Ops.prec -> Tnode.t
 val fold_tile_role : Tnode.t -> [ `Scores | `Numerator ] option
 (** Whether a node is one of the block fold's per-row tiles, and which: the score tile or the output
     numerator. The scheduling side's cooperative rendering of the fold ({!Schedule.optop.Fold_mma})
-    recognizes the fold by them. *)
+    recognizes the fold by them. The test is membership among the tiles the rewrite minted, with the
+    role recorded at the minting (gh-ocannl-1722) -- not the node's namespace or label, which are
+    display names any client could reproduce, like {!reassociable_local}'s. *)
 
 val reset : unit -> unit
 (** Drops the memoized scope-local nodes (the tier's session-reset hook; also run ahead of an

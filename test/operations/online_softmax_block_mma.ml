@@ -271,7 +271,34 @@ let () =
      Fold_mma for the fold"
     (synthetic_emits synthetic);
   p "structural: under the GPU preset a grid cap of 1 keeps the scalar fold: no Fold_mma emitted"
-    (not (synthetic_emits { synthetic with max_grid_yz = Some 1 }))
+    (not (synthetic_emits { synthetic with max_grid_yz = Some 1 }));
+  (* The preset recognizes the fold by its tiles' identity, not their public fields
+     (gh-ocannl-1722): among the nodes the captured lowering writes, exactly the two tiles the
+     rewrite minted carry a role, one each; a look-alike built with a tile's namespace, label,
+     precision and shape -- every field the former namespace-plus-label rule read -- carries
+     none. *)
+  let written = ref [] in
+  Ll_test.walk (Option.value_exn ~here:[%here] !captured).LL.llc ~on_set:(fun tn ->
+      if not (List.mem !written tn ~equal:Ir.Tnode.equal) then written := tn :: !written);
+  let tiles =
+    List.filter_map !written ~f:(fun tn ->
+        Option.map (Online_softmax.fold_tile_role tn) ~f:(fun role -> (role, tn)))
+  in
+  p "structural: exactly two written nodes carry a fold tile role, the scores' and the numerator's"
+    (match List.map tiles ~f:fst with
+    | [ `Scores; `Numerator ] | [ `Numerator; `Scores ] -> true
+    | _ -> false);
+  p_none "structural: a node forged with a tile's namespace, label, precision and shape has no role"
+    tiles ~f:(fun (_, tile) ->
+      let forged =
+        Ir.Tnode.create ~namespace:tile.Ir.Tnode.namespace
+          (Ir.Tnode.Specified (Lazy.force tile.Ir.Tnode.storage_prec))
+          ~id:1722999 ~label:tile.Ir.Tnode.label
+          ~unpadded_dims:(lazy (Lazy.force tile.Ir.Tnode.dims))
+          ~padding:(lazy None)
+          ()
+      in
+      Option.is_some (Online_softmax.fold_tile_role forged))
 
 (* --- Leg 3: the training step (the fold forward under the fused backward, treatment F). --- *)
 
