@@ -58,6 +58,7 @@ type scope =
       (** the cc backend's own tag ([Schedulers.cpu_mma_limits]): not [Schedule.backend_is_gpu] *)
   | Gpu  (** [Schedule.backend_is_gpu], which [Schedule_cache.codegen_tag] gates on *)
   | Cuda_hip  (** the CUDA and HIP backends' own tags *)
+  | Cuda  (** the CUDA backend's own tag *)
 
 let in_scope scope backend =
   match scope with
@@ -65,12 +66,14 @@ let in_scope scope backend =
   | Cpu -> not (Ir.Schedule.backend_is_gpu backend)
   | Gpu -> Ir.Schedule.backend_is_gpu backend
   | Cuda_hip -> List.mem [ "cuda"; "hip" ] (String.lowercase backend) ~equal:String.equal
+  | Cuda -> String.equal (String.lowercase backend) "cuda"
 
 let scope_name = function
   | Every_backend -> "every backend"
   | Cpu -> "CPU backends"
   | Gpu -> "GPU backends"
   | Cuda_hip -> "CUDA and HIP"
+  | Cuda -> "CUDA"
 
 (* How a flip reaches the reader. *)
 type resolver =
@@ -148,6 +151,7 @@ let keyed_flips =
     ("prefer_backend_uniformity", config ~under:logging flag);
     ("buffer_aliasing", config flag);
     ("gpu_graph_capture", config ~scope:Cuda_hip flag);
+    ("cuda_fast_math", config ~scope:Cuda flag);
     ("gpu_elide_covered_zeros", config ~scope:Gpu flag);
     ("gpu_default_seed_narrow_storage", config ~scope:Cuda_hip flag);
     ("autotune_timing", config [ "isolated"; "queued" ]);

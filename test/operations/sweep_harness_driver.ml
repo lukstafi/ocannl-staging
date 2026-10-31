@@ -112,7 +112,7 @@ let () =
   let nvrtc_options =
     Ir.Compiler_options.nvrtc ~cuda_include_options:[ "-I/sentinel/cuda/include" ]
       ~arch_options:[ "--gpu-architecture=compute_999" ]
-      ~with_device_debug:false
+      ~fast_math:true ~with_device_debug:false
     |> Ir.Compiler_options.render
   in
   let argv =

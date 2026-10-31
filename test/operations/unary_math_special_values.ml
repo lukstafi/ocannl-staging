@@ -53,7 +53,13 @@
    2^-10.987 relative approximation; [__expf] is [2 + 1.173 |x|] ulps (exact at the overflow edge
    [0x1.62e42ep+6], measured). - [--use_fast_math] implies [--ftz=true]: f32 subnormal inputs and
    results flush, as on Metal. CUDA's half functions ([hsin], [hexp], ...) meet the stated ulps with
-   subnormals kept.
+   subnormals kept. All of this is CUDA's DEFAULT policy. With [cuda_fast_math] off, as
+   [profile=reproducible] sets it (gh-ocannl-1710), nvrtc compiles without [--use_fast_math] and
+   with [--ftz=false]: the f32 functions are the precise library ones and [Tanh_approx] renders
+   [tanhf], so CUDA's f32 and bfloat16 are held to the stated ulps with subnormals kept, as cc and
+   HIP are -- large-argument [sin]/[cos] included -- and its f32 [pow] to the stated 2 ulps. The
+   [_reproducible] rule runs this executable under that profile; the regime line on stdout records
+   which policy a golden was produced under.
 
    Metal compiles with Safe arithmetic and fast math FUNCTIONS ([Compiler_options.metal]). Measured
    on M4 Max ([benchmarks/runners/ocannl/metal_f32_math_probe.ml]), the fast f32 [sin] and [cos]
@@ -107,6 +113,10 @@ let is_metal = String.equal backend_name "metal"
 let is_cuda = String.equal backend_name "cuda"
 let is_hip = String.equal backend_name "hip"
 let is_cc = List.mem [ "cc"; "multidev_cc" ] backend_name ~equal:String.equal
+
+(* gh-ocannl-1710: CUDA's math policy, through the reader its compile and rendering use. Its fast
+   intrinsics (and their contracts) apply only when it is on. *)
+let cuda_fast_math = Ir.Cuda_like_config.cuda_fast_math ()
 let f32 x = Int32.float_of_bits (Int32.bits_of_float x)
 let f16 x = Ops.half_to_single (Ops.single_to_half (f32 x))
 let bf16 x = Ops.bfloat16_to_single (Ops.single_to_bfloat16 (f32 x))
@@ -585,7 +595,11 @@ let f64_claim ?(when_ = true) label results ~f =
 
 let () =
   Verdict.case "unary math special values" (fun () ->
+      (* Backend-uniform: the policy the run was configured with, on every backend. *)
+      Stdio.printf "CUDA math policy (cuda_fast_math): %s\n"
+        (if cuda_fast_math then "fast" else "precise");
       List.iteri cases ~f:(fun ci c ->
+          let fast_intrinsics = c.cuda_intrinsics && cuda_fast_math in
           let inputs, got = run c ~first_id:(19900 + (100 * ci)) in
           let n = List.length inputs in
           let results =
@@ -604,12 +618,12 @@ let () =
                c.label op_names) (all specials) ~f:(fun ((name, _, x, _) as r) ->
               judge c (stated c name x) r);
           gated_all
-            ~when_:(is_cc || is_hip || (is_cuda && not c.cuda_intrinsics))
+            ~when_:(is_cc || is_hip || (is_cuda && not fast_intrinsics))
             ~on:backend_name
             (Printf.sprintf
                "%s %s of finite nonzero inputs: within the stated ulps of f64 with subnormals kept \
-                (skipped on Metal and on CUDA's f32 intrinsics, accepted vendor behaviour claimed \
-                by their own contracts)"
+                (skipped on Metal and on CUDA's f32 intrinsics under --use_fast_math, accepted \
+                vendor behaviour claimed by their own contracts)"
                c.label op_names)
             (all finite)
             ~f:(fun ((name, _, x, _) as r) -> judge c (stated c name x) r);
@@ -629,13 +643,16 @@ let () =
             (Printf.sprintf
                "%s %s over +-0, +-inf, NaN and dyadic operands: NaN where C gives NaN, otherwise \
                 the signed zero or infinity C gives, or within the stated ulps of it -- CUDA's f32 \
-                pow within __powf's 2 + 2 |y log2 |x|| -- and fmod exactly (every backend)"
+                pow under --use_fast_math within __powf's 2 + 2 |y log2 |x|| -- and fmod exactly \
+                (every backend)"
                c.label binop_names)
             (run_binary c ~first_id:(20500 + (100 * ci)))
             ~f:(fun ((name, _, x, y, _) as r) ->
               judge2 c
-                (if is_cuda && Ops.equal_prec c.prec Ops.single && String.equal name "pow" then
-                   log_scaled_pow x y
+                (if
+                   is_cuda && cuda_fast_math && Ops.equal_prec c.prec Ops.single
+                   && String.equal name "pow"
+                 then log_scaled_pow x y
                  else stated c name x)
                 r);
           p_all
@@ -647,7 +664,7 @@ let () =
             ~f:(fun r -> judge2 c (Ulps 0.) r);
           if c.cuda_intrinsics then (
             let flushed = ref 0 in
-            gated_all ~when_:is_cuda ~on:backend_name
+            gated_all ~when_:(is_cuda && fast_intrinsics) ~on:backend_name
               (Printf.sprintf
                  "CUDA %s %s under --use_fast_math: within the fast intrinsics' contracts -- sin \
                   and cos absolute 2^-21.41 (plus 2^-23 |x| past pi) below 2^22 and any value in \
@@ -656,7 +673,7 @@ let () =
                   subnormals flushed"
                  c.label op_names) (all results) ~f:(fun ((name, _, x, _) as r) ->
                 judge ~ftz:true ~flushed c (cuda_fast c name x) r);
-            if is_cuda then
+            if is_cuda && fast_intrinsics then
               Stdio.eprintf
                 "(not part of the golden) CUDA %s: %d results matched only with a subnormal \
                  flushed, %d inputs from 2^22 held to [-1, 1] only\n"
@@ -685,9 +702,12 @@ let () =
           ok);
       p_all
         "f32 log and log2 on every f32 within 2^-13 of 1: within the backend's contract -- the \
-         stated ulps of f64, CUDA's absolute 2^-21.41 and 2^-22 (every backend)"
+         stated ulps of f64, CUDA's absolute 2^-21.41 and 2^-22 under --use_fast_math (every \
+         backend)"
         band_results ~f:(fun ((name, _, x, _) as r) ->
-          judge f32_case (if is_cuda then cuda_fast f32_case name x else stated f32_case name x) r);
+          judge f32_case
+            (if is_cuda && cuda_fast_math then cuda_fast f32_case name x else stated f32_case name x)
+            r);
       let c = f64_case in
       let f64_unary =
         lazy

@@ -1,6 +1,6 @@
 CUDA bfloat16 addition keeps its intrinsic: true
 HIP bfloat16 addition keeps its native operator: true
-CUDA approximate tanh keeps its intrinsic: true
+CUDA approximate tanh is its intrinsic under fast math, and the library's without it: true
 HIP approximate tanh keeps its library function: true
 HIP f32 and bfloat16 sin and cos render through the NaN-preserving wrappers: true
 HIP's NaN-preserving sin and cos wrappers are defined in its builtins table: true

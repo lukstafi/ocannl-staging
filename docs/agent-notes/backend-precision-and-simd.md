@@ -2052,8 +2052,27 @@ files.
   and Metal did not fold it. A backend-uniform golden whose subject is not the sign prints zeros
   normalized (`half_ops`); enforcing the backends' own licences is a separate question.
 
-- **CUDA and HIP compile with fast-math umbrellas; Metal pins safe arithmetic while retaining fast
-  math functions**: CUDA passes `--use_fast_math`, HIP `-ffast-math`, and Metal selects
+- **CUDA's fast math is a key, off under the `reproducible` profile** (gh-ocannl-1710): `cuda_fast_math`
+  (default `true`) picks `Compiler_options.nvrtc_math_options` -- `--use_fast_math`, or no umbrella
+  and `--ftz=false --prec-div=true --prec-sqrt=true --fmad=false` spelled out -- and, through the
+  Cuda dialect's `tanh_approx ()`, whether f32 `Tanh_approx` is `__tanhf` or `tanhf`. The one reader
+  is `Cuda_like_config.cuda_fast_math`. Dropping the umbrella drops its library-function
+  substitution too (`sinf`→`__sinf`, `expf`→`__expf`, `logf`, `exp2f`, `log2f`, `powf`), which no
+  component switch controls: `--use_fast_math --ftz=false` would keep subnormals but not precise
+  `sin`. `--fmad=false` is the CUDA counterpart of the payload's `cc_backend_fp_contract=off`: under
+  `--fmad=true` nvrtc emits PTX `mul`/`add` with no rounding modifier, which the target's JIT may
+  fuse. The precise regime is the one keyed (`/nvrtc-math:<switches>` in CUDA's `codegen_tag`,
+  derived from the same builder), so every fast-math key stayed valid. The reproducible payload's
+  rationale is its cross-MACHINE principle, not backend agreement (its header scopes that out);
+  it is the profile's one pin that changes a backend's default math. Pinned by
+  `test_cuda_compile_options` (both vectors exactly; the umbrella iff fast), `config_profiles`
+  (only `reproducible` states the key), `cache_key_agreement` (CUDA scope), and on CUDA by
+  `bf16_subnormal_storage` and `unary_math_special_values` with their `-reproducible` rules: the
+  default run must flush f32 arithmetic bitwise, the reproducible one must not, and its f32 and
+  bfloat16 functions meet the stated ulps with subnormals kept.
+- **CUDA and HIP compile with fast-math umbrellas by default; Metal pins safe arithmetic while
+  retaining fast math functions**: CUDA passes `--use_fast_math` (unless `cuda_fast_math` is off,
+  above), HIP `-ffast-math`, and Metal selects
   `MathMode.Safe` plus `MathFloatingPointFunctions.Fast` (measured below). `cc` is the exception
   (opt-in `cc_backend_fast_math`). HIP additionally
   passes `-fno-associative-math` **after** the umbrella flag: fast math had let hiprtc reorder

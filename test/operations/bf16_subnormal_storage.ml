@@ -12,20 +12,26 @@
    bit-level narrowing helper would only rescue an f32 subnormal copied from storage into a bfloat
    tensor: the arithmetic upstream of nearly every store has flushed it already.
 
-   CUDA and HIP compile with fast math, and CUDA's [--use_fast_math] implies [--ftz=true]; measured
-   for gh-ocannl-1680, that flushes less than its name suggests. On CUDA (RTX 5070 Ti, sm_120) only
-   the f32 additions flush: they are [add.ftz.f32]. The widening load is a bit move ([mov.b32
-   {0,h}]), the narrowing store a [cvt.rn.bf16.f32] (emitted without [.ftz]), and bfloat addition
-   the native [fma.rn.bf16], all of which keep subnormals. HIP's [-ffast-math] leaves AMDGPU's f32
-   denormal mode alone (that is [-fgpu-flush-denormals-to-zero], which we do not pass), so every HIP
-   leg is IEEE: measured on gfx1151 (minix, unified memory) and gfx1102 (tuf, discrete).
+   CUDA and HIP compile with fast math by default, and CUDA's [--use_fast_math] implies
+   [--ftz=true]; measured for gh-ocannl-1680, that flushes less than its name suggests. On CUDA (RTX
+   5070 Ti, sm_120) only the f32 additions flush: they are [add.ftz.f32]. The widening load is a bit
+   move ([mov.b32 {0,h}]), the narrowing store a [cvt.rn.bf16.f32] (emitted without [.ftz]), and
+   bfloat addition the native [fma.rn.bf16], all of which keep subnormals. HIP's [-ffast-math]
+   leaves AMDGPU's f32 denormal mode alone (that is [-fgpu-flush-denormals-to-zero], which we do not
+   pass), so every HIP leg is IEEE: measured on gfx1151 (minix, unified memory) and gfx1102 (tuf,
+   discrete). With [cuda_fast_math] off, as [profile=reproducible] sets it (gh-ocannl-1710), CUDA
+   compiles with [--ftz=false] and no leg flushes there either; the [_reproducible] rule runs this
+   executable under that profile, and the regime line on stdout records which policy a golden was
+   produced under.
 
    The claims are per backend, each the IEEE result except where that backend's [flushes] says the
    leg flushes a subnormal input to the zero of its sign. On the C backends (without
    [cc_backend_fast_math]) and HIP no leg flushes; every value is exactly representable in both
    formats, so those legs are bitwise exact. On Metal every leg but the moving ones flushes, on CUDA
-   only the f32 arithmetic. The normal controls (+-2^-126, 1.5) are exact everywhere. Each claim
-   pins its hardware's measured behaviour, so it fails if that backend starts or stops flushing. *)
+   under fast math only the f32 arithmetic. A flushing leg flushes a subnormal input, and also a
+   subnormal RESULT of normal inputs: the f32 halving leg takes the normal 2^-126 to the subnormal
+   2^-127. The other normal controls (-2^-126, 1.5) are exact everywhere. Each claim pins its
+   hardware's measured behaviour, so it fails if that backend starts or stops flushing. *)
 open Base
 open Ocannl.Operation.DSL_modules
 module LL = Ir.Low_level
@@ -37,6 +43,9 @@ let () = Stdio.eprintf "bf16-subnormal-storage backend: %s\n" backend_name
 let is_metal = String.equal backend_name "metal"
 let is_cuda = String.equal backend_name "cuda"
 let is_hip = String.equal backend_name "hip"
+
+(* gh-ocannl-1710: CUDA's math policy, through the reader its compile and rendering use. *)
+let cuda_fast_math = Ir.Cuda_like_config.cuda_fast_math ()
 
 (* [-ffast-math] may link a startup file that sets flush-to-zero (GCC's [crtfastmath.o]), so the C
    claim holds only for the default IEEE compile. *)
@@ -86,6 +95,11 @@ let run () =
       ( { label = "f32 addition of bfloat loads"; kind = `F32_alu; ieee = twice },
         fnode "bsn_add_w",
         double in_bf f32 );
+      (* A subnormal result of a normal input (gh-ocannl-1710): flush-to-zero flushes results
+         too. *)
+      ( { label = "f32 halving"; kind = `F32_alu; ieee = (fun x -> x *. 0.5) },
+        fnode "bsn_half_f",
+        LL.Binop (Ops.Mul, (get in_f, f32), (LL.Constant 0.5, f32)) );
     ]
   in
   let outs = List.map legs ~f:(fun (_, t, _) -> t) in
@@ -120,10 +134,14 @@ let cuda_flushes : kind -> bool = function
   | `Moves | `Narrows | `Bf16_alu -> false
 
 let expected ~flushes leg x =
-  if flushes leg.kind && subnormal x then Float.copysign 0. x else leg.ieee x
+  let r = leg.ieee x in
+  if flushes leg.kind && (subnormal x || subnormal r) then Float.copysign 0. r else r
 
 let () =
   Verdict.case "bfloat16 subnormal storage" (fun () ->
+      (* Backend-uniform: the policy the run was configured with, on every backend. *)
+      Stdio.printf "CUDA math policy (cuda_fast_math): %s\n"
+        (if cuda_fast_math then "fast" else "precise");
       let results = run () in
       List.iter results ~f:(fun (leg, got) ->
           Stdio.eprintf "(not part of the golden) %s %s:" backend_name leg.label;
@@ -147,8 +165,12 @@ let () =
       claim ~when_:is_metal ~flushes:metal_flushes
         "Metal: storage, copies and widening keep bfloat16 subnormals bitwise; narrowing and \
          arithmetic flush them to the signed zero, exact on normals";
-      claim ~when_:is_cuda ~flushes:cuda_flushes
-        "CUDA: storage, copies, widening, narrowing and bfloat arithmetic keep bfloat16 subnormals \
-         bitwise; f32 arithmetic flushes them to the signed zero, exact on normals";
+      claim ~when_:(is_cuda && cuda_fast_math) ~flushes:cuda_flushes
+        "CUDA under --use_fast_math: storage, copies, widening, narrowing and bfloat arithmetic \
+         keep bfloat16 subnormals bitwise; f32 arithmetic flushes subnormal operands and results \
+         to the signed zero, exact on normals";
+      claim ~when_:(is_cuda && not cuda_fast_math) ~flushes:no_leg_flushes
+        "CUDA with cuda_fast_math off (--ftz=false): every leg keeps bfloat16 subnormals, bitwise \
+         IEEE";
       claim ~when_:is_hip ~flushes:no_leg_flushes
         "HIP: every leg keeps bfloat16 subnormals, bitwise IEEE")
