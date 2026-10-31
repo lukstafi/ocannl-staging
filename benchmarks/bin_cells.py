@@ -77,7 +77,9 @@ cell: argv, stated environment, exit, wall time, results, resolved configuration
 printed), and a `cells/<NNN>-<arm>/` directory per cell holding its `stdout`/`stderr` and anything
 it wrote. The exit status is 0 only when every cell exited 0 inside its cap with a clean treatment;
 3 when the only faults are cells that exited 3 themselves (a bench refusing its measurement for host
-contention: the box's verdict, not the treatment's); 1 otherwise.
+contention: the box's verdict, not the treatment's); 125 when a cell's process group was not proven
+gone (the run stops there, and a driver running several should too: a survivor holds the device
+every later cell would be timed against); 1 otherwise.
 
 Boundary: hermeticity here is about CONFIGURATION -- what the library reads. The machine (clock
 behaviour, co-tenants, thermal state, device state) is the operator's to control, through an
@@ -99,6 +101,7 @@ from pathlib import Path
 
 import bench_output
 import box_gate
+import cell_group
 import cells
 import config_records  # noqa: F401  (re-exported: test/operations/bin_cells.py reads it here)
 from cells import (consistency_problems, design_orders, sign_test_p,  # noqa: F401
@@ -521,9 +524,13 @@ def main(argv=None, arm_commits=None):
     }
     (out / "manifest.json").write_text(json.dumps(manifest, indent=1) + "\n")
 
-    records = cells.run_cells(arms=arms, orders=orders, out=out, env=env, backend=args.backend,
-                              common=common, common_env=common_env, timeout=args.cell_timeout,
-                              reader=reader, driver=DRIVER)
+    try:
+        records = cells.run_cells(arms=arms, orders=orders, out=out, env=env,
+                                  backend=args.backend, common=common, common_env=common_env,
+                                  timeout=args.cell_timeout, reader=reader, driver=DRIVER)
+    except cell_group.CleanupFailed as e:
+        print(log_line(display_value(str(e))), file=sys.stderr, flush=True)
+        return cells.SURVIVOR_EXIT
     if args.backend in ("cc", "multidev_cc"):
         manifest["kernel_compilers"] = cells.kernel_compilers(arms, records, env, out)
         (out / "manifest.json").write_text(json.dumps(manifest, indent=1) + "\n")

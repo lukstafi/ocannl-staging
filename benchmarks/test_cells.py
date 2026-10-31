@@ -10,14 +10,19 @@ reported time comes from that revision's own `arrayjit/lib/schedule.ml` -- so a 
 proves which tree it was built from. Run through test_orchestrate.py, which imports these classes.
 """
 
+import contextlib
+import io
 import json
 import os
+import re
+import shutil
 import stat
 import subprocess
 import sys
 import tempfile
 import textwrap
 import unittest
+import unittest.mock
 from pathlib import Path
 
 import box_gate
@@ -299,6 +304,469 @@ class Gh1180DriverTest(StubRunTest):
         summary = (out / "summary.md").read_text()
         self.assertIn("REFUSED CELLS", summary)
         self.assertIn('f16-64-8-16-3-rn4-rn6 cell 0 (rn4): packmma census', summary)
+
+
+
+CELLS = HERE / "cells.py"
+CONFIG_RECORDS = HERE / "config_records.py"
+
+
+def record_line(key, value, source, origin):
+    """One `log_config_json` record, as a stub prints it: `source` and `origin` as the library
+    reports them (a non-default source names its origin)."""
+    return json.dumps({"ocannl_config": 1, "key": key, "value": value, "source": source,
+                       "layer": source, "profile": None, "origin": origin},
+                      separators=(",", ":"))
+
+
+@POSIX_ONLY
+class CellCommandTest(StubRunTest):
+    """`cells.py cell`: one hermetic, supervised, configuration-checked cell, and its exit status."""
+
+    BODY = """
+import os
+print("env BENCH_TUNE=%s seed=%s OMP=%s" % (os.environ.get("BENCH_TUNE"),
+      os.environ.get("OCANNL_FIXED_STATE_FOR_INIT"), os.environ.get("OMP_NUM_THREADS")))
+print("cwd " + os.getcwd())
+if "env-record" in positionals:
+    print(ENV_RECORD, file=sys.stderr)
+if "sleep" in positionals:
+    import time; time.sleep(0.9)
+if "kill" in positionals:
+    import signal; os.kill(os.getpid(), signal.SIGKILL)
+for p in positionals:
+    if p.startswith("exit"):
+        sys.exit(int(p[4:]))
+"""
+
+    def setUp(self):
+        super().setUp()
+        self.exe = self.dir / "bench"
+        write_stub(self.exe, self.BODY.replace("ENV_RECORD", repr(record_line(
+            "log_level", "1", "environment", "OCANNL_LOG_LEVEL=1"))))
+
+    def cell(self, *positionals, options=(), assignments=(), name="cell", env=None):
+        d = self.dir / name
+        proc = self.run_tool([sys.executable, str(CELLS), "cell", "--backend", "cc", "--dir",
+                              str(d), *options, "--", *assignments, str(self.exe),
+                              "--ocannl_fixed_state_for_init=1", *positionals], env)
+        rec = json.loads((d / "cell.json").read_text()) if (d / "cell.json").exists() else None
+        return proc, d, rec
+
+    def test_a_clean_cell_runs_hermetic_from_its_own_directory(self):
+        proc, d, rec = self.cell(assignments=["BENCH_TUNE=1"], env={
+            "OCANNL_FIXED_STATE_FOR_INIT": "9", "OMP_NUM_THREADS": "3",
+            "CUDA_VISIBLE_DEVICES": "0"})
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        out = (d / "stdout").read_text()
+        # The stated runner mode reached the cell, the ambient setting and OpenMP control did not.
+        self.assertIn("env BENCH_TUNE=1 seed=None OMP=None", out)
+        self.assertIn(f"cwd {d}", out)
+        self.assertTrue(rec["ok"], rec["problems"])
+        self.assertEqual(rec["argv"][:4], [str(self.exe), "--ocannl_backend=cc",
+                                           "--ocannl_no_config_file=true",
+                                           "--ocannl_log_config_json=true"])
+        self.assertEqual(rec["env"], {"BENCH_TUNE": "1"})
+        self.assertEqual(rec["config"]["fixed_state_for_init"]["origin"],
+                         "--ocannl_fixed_state_for_init=1")
+        self.assertIn("OCANNL_FIXED_STATE_FOR_INIT", rec["cleared"])
+        self.assertIn("OMP_NUM_THREADS", rec["cleared"])
+        self.assertEqual(rec["runtime_controls"].get("CUDA_VISIBLE_DEVICES"), "0")
+
+    def test_the_streams_go_where_the_driver_names(self):
+        proc, d, rec = self.cell(options=["--stdout", str(self.dir / "c.out"), "--stderr",
+                                          str(self.dir / "c.err")])
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("cwd ", (self.dir / "c.out").read_text())
+        self.assertIn('"key":"fixed_state_for_init"', (self.dir / "c.err").read_text())
+        self.assertFalse((d / "stdout").exists())
+        self.assertEqual(rec["stdout"], str(self.dir / "c.out"))
+
+    def test_an_expectation_the_records_do_not_state_fails_the_cell(self):
+        for expect, why in (("fixed_state_for_init=2", "ocannl_fixed_state_for_init resolved to '1'"),
+                            ("debug_log_from_routines=true",
+                             "ocannl_debug_log_from_routines was never resolved")):
+            with self.subTest(expect=expect):
+                proc, _, rec = self.cell(options=["--expect", expect], name=expect)
+                self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+                self.assertFalse(rec["ok"])
+                self.assertTrue(any(why in p for p in rec["problems"]), rec["problems"])
+
+    def test_a_setting_from_the_environment_fails_a_cell_that_exited_0(self):
+        proc, _, rec = self.cell("env-record")
+        self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+        self.assertIn("ocannl_log_level came from the environment", rec["problems"])
+
+    def test_the_exit_status_says_what_happened(self):
+        for args, options, want in ((["exit7"], [], 7), (["exit3"], [], 3),
+                                    (["exit3", "env-record"], [], 1),
+                                    (["kill"], [], 137),
+                                    (["sleep"], ["--timeout", "0.2"], 124),
+                                    (["sleep"], ["--timeout", "0.2", "--expect",
+                                                 "debug_log_from_routines=true"], 1)):
+            with self.subTest(args=args, options=options):
+                proc, _, rec = self.cell(*args, options=options, name="-".join(args + options))
+                self.assertEqual(proc.returncode, want, proc.stdout + proc.stderr)
+                self.assertFalse(rec["ok"])
+        _, _, rec = self.cell("exit3", name="refused")
+        self.assertTrue(rec["refused"])
+
+    def test_a_survivor_stops_with_125(self):
+        # A group not proven gone is the one fault a driver must stop on, so both front ends that
+        # a shell driver calls name it apart (a real survivor is test_cell_group's to stage).
+        import bin_cells
+        import cell_group
+        import cells
+
+        def survive(**_):
+            raise cell_group.CleanupFailed("cells: child group 1 cleanup alive")
+
+        with unittest.mock.patch.object(cells, "run_one", survive), \
+                unittest.mock.patch.object(cells, "install_cancellation"), \
+                contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(cells.cell_main(["--backend", "cc", "--dir", str(self.dir / "s1"),
+                                              "--", str(self.exe)]), 125)
+        with unittest.mock.patch.object(cells, "run_cells", survive), \
+                unittest.mock.patch.object(cells, "install_cancellation"), \
+                contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(bin_cells.main(["--exe", str(self.exe), "--backend", "cc", "--out",
+                                             str(self.dir / "s2"), "--rounds", "2"]), 125)
+
+    def test_usage_errors_run_nothing(self):
+        proc, d, _ = self.cell(assignments=["OCANNL_LOG_LEVEL=1"], name="stated")
+        self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
+        self.assertIn("a library setting is stated on the command line", proc.stderr)
+        self.assertFalse(d.exists())
+        (self.dir / "busy").mkdir()
+        (self.dir / "busy" / "left").write_text("x")
+        proc, _, _ = self.cell(name="busy")
+        self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
+        self.assertIn("is not an empty directory", proc.stderr)
+
+
+@POSIX_ONLY
+class ConfigRecordsExpectTest(StubRunTest):
+    """`config_records.py expect`: the records check over a stderr a driver kept itself."""
+
+    def expect(self, lines, *words):
+        err = self.dir / "err"
+        err.write_text("".join(line + "\n" for line in lines))
+        return self.run_tool([sys.executable, "-I", str(CONFIG_RECORDS), "expect", str(err),
+                              *words])
+
+    def test_it_holds_only_for_command_line_values(self):
+        base = ["chatter",
+                record_line("backend", "hip", "commandline", "--ocannl_backend=hip"),
+                record_line("autotune_timing", "queued", "commandline",
+                            "--ocannl_autotune_timing=queued"),
+                record_line("log_level", "0", "config_file", "/x/ocannl_config")]
+        proc = self.expect(base, "backend=hip", "autotune_timing=queued")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        for words, why in ((["backend=cuda"], "ocannl_backend resolved to 'hip'"),
+                           (["autotune_timing=isolated"], "not to 'isolated'"),
+                           (["log_level=0"], "from config_file"),
+                           (["profile=x"], "ocannl_profile was never resolved")):
+            with self.subTest(words=words):
+                proc = self.expect(base, *words)
+                self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+                self.assertIn(why, proc.stdout)
+        proc = self.expect(base + [record_line("debug_log_from_routines", "true", "environment",
+                                               "OCANNL_DEBUG_LOG_FROM_ROUTINES=true")],
+                           "backend=hip")
+        self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+        self.assertIn("ocannl_debug_log_from_routines came from the environment", proc.stdout)
+        proc = self.expect(base + ['{"ocannl_config":1,"key":'], "backend=hip")
+        self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+        self.assertIn("unreadable configuration records", proc.stdout)
+        proc = self.expect(base, "backend")
+        self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
+
+    def test_show_prints_each_keys_provenance(self):
+        err = self.dir / "err"
+        err.write_text(record_line("backend", "hip", "commandline", "--ocannl_backend=hip") + "\n")
+        proc = self.run_tool([sys.executable, "-I", str(CONFIG_RECORDS), "show", str(err),
+                              "backend", "autotune_timing"])
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertEqual(proc.stdout.splitlines(), [
+            "ocannl_backend: 'hip' (commandline --ocannl_backend=hip)",
+            "ocannl_autotune_timing: (not resolved)"])
+
+
+# The prose configuration trace (`Found <value>, <source> <origin>` lines) and the flag that turns it
+# on. A driver reads the `log_config_json` records instead (gh-ocannl-1607).
+PROSE_TRACE = re.compile(r"log_config_sourcing|Found\b[^\n]*\bcommandline")
+
+
+def prose_trace_readers(root):
+    """`file:line` of every driver source under `root` (its scripts and runners/, tests aside) that
+    names the prose configuration trace."""
+    paths = sorted({*root.glob("*.py"), *root.glob("*.sh"), *root.glob("runners/**/*.py"),
+                    *root.glob("runners/**/*.sh")})
+    found = []
+    for path in paths:
+        if path.name.startswith(("test_", "test-")):
+            continue
+        for i, line in enumerate(path.read_text(errors="replace").splitlines(), 1):
+            if PROSE_TRACE.search(line):
+                found.append(f"{path.relative_to(root)}:{i}")
+    return found
+
+
+class ProseTraceScanTest(unittest.TestCase):
+    def test_no_driver_reads_the_prose_configuration_trace(self):
+        self.assertEqual(prose_trace_readers(HERE), [],
+                         "read the log_config_json records (config_records.py) instead")
+        # The two drivers that read the trace before gh-ocannl-1607 are in the population.
+        for name in ("gh834_cells.sh", "gh1002_cells.py"):
+            self.assertTrue((HERE / name).is_file(), name)
+
+    def test_the_scan_finds_a_planted_reader(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "runners" / "x").mkdir(parents=True)
+            (root / "a.sh").write_text('run --ocannl_log_config_sourcing=true\n')
+            (root / "b.py").write_text('ok = "Found %s, commandline --ocannl_backend" % b\n')
+            (root / "runners" / "x" / "c.sh").write_text('grep "^Found $b, commandline"\n')
+            (root / "clean.sh").write_text('run --ocannl_log_config_json=true\n')
+            (root / "test_d.py").write_text('"log_config_sourcing"\n')
+            self.assertEqual(prose_trace_readers(root), ["a.sh:1", "b.py:1", "runners/x/c.sh:1"])
+
+
+@POSIX_ONLY
+class DriverTreeTest(StubRunTest):
+    """A driver that finds its checkout from its own location, run from a scratch copy of benchmarks/
+    (a git repository of its own) whose `_build` holds stub benches and whose `dune` builds nothing."""
+
+    def setUp(self):
+        super().setUp()
+        dune = self.fakebin / "dune"
+        dune.write_text("#!/bin/sh\nexit 0\n")
+        dune.chmod(0o755)
+        self.root = self.dir / "root"
+        bench = self.root / "benchmarks"
+        bench.mkdir(parents=True)
+        for f in [*HERE.glob("*.py"), *HERE.glob("*.sh")]:
+            shutil.copy2(f, bench / f.name)
+        env = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t", GIT_COMMITTER_NAME="t",
+                   GIT_COMMITTER_EMAIL="t@t")
+        for argv in (["init", "-q"], ["add", "-A"], ["commit", "-q", "-m", "tree"]):
+            subprocess.run(["git", "-c", "core.hooksPath=/dev/null", *argv], cwd=self.root,
+                           env=env, check=True, capture_output=True, timeout=60)
+        self.out = self.dir / "out"
+
+    def stub(self, target, body):
+        write_stub(self.root / "_build" / "default" / target, body)
+
+    def driver(self, name, *args, env=None):
+        return self.run_tool([box_gate.BASH, str(self.root / "benchmarks" / name), *args], env)
+
+
+class Gh740DriverTest(DriverTreeTest):
+    def test_each_leg_is_a_checked_cell(self):
+        self.stub("benchmarks/runners/ocannl/bench_pad_waste.exe", """
+import os
+thr = next((a.split("=", 1)[1] for a in argv if "pad_waste_max" in a), "default")
+print("padwaste: site=" + positionals[0] + " threshold=" + thr
+      + " ambient=" + str(os.environ.get("OCANNL_AUTOTUNE_PAD_WASTE_MAX")))
+""")
+        proc = self.driver("gh740_cells.sh", str(self.out), "cc", "AB", "t=1,8,8,8",
+                           env={"OCANNL_AUTOTUNE_PAD_WASTE_MAX": "3"})
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("padwaste: site=t=1,8,8,8 threshold=inf ambient=None", proc.stdout)
+        self.assertIn("padwaste: site=t=1,8,8,8 threshold=default ambient=None", proc.stdout)
+        a = json.loads((self.out / "cc-1-A" / "cell.json").read_text())
+        b = json.loads((self.out / "cc-2-B" / "cell.json").read_text())
+        self.assertTrue(a["ok"] and b["ok"], (a["problems"], b["problems"]))
+        self.assertEqual(a["config"]["autotune_pad_waste_max"]["value"], "inf")
+        self.assertNotIn("autotune_pad_waste_max", b["config"])
+
+
+class Gh1279DriverTest(DriverTreeTest):
+    def measure(self, rev_exit):
+        self.stub("bin/projection_shape_bench.exe", f"""
+print("gh1279: " + " ".join(positionals))
+print("crowned: x" if positionals[3] == "fwd" else "seeds only")
+sys.exit(0 if positionals[3] == "fwd" else {rev_exit})
+""")
+        return self.driver("gh1279_cells.sh", str(self.out), "metal", "2", "2")
+
+    def test_two_legs_and_their_verdict(self):
+        proc = self.measure(0)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("gh1279: 2 2 outproj fwd both", proc.stdout)
+        self.assertIn("crowned: x", proc.stdout)
+        self.assertIn("gh1279: 2 2 outproj rev seeds", proc.stdout)
+        for leg in ("psb_fwd", "psb_rev"):
+            rec = json.loads((self.out / leg / "cell.json").read_text())
+            self.assertTrue(rec["ok"], rec["problems"])
+            self.assertEqual(rec["config"]["backend"]["value"], "metal")
+            self.assertTrue((self.out / leg / "stdout").read_text().endswith("exit: 0\n"))
+
+    def test_a_refused_leg_exits_3(self):
+        proc = self.measure(3)
+        self.assertEqual(proc.returncode, 3, proc.stdout + proc.stderr)
+        self.assertIn("leg psb_rev (rev seeds): exit: 3", proc.stdout)
+
+
+# bench_conv as gh1557_cells.sh reads it: a process whose cache directory holds no crown searches
+# and stores one; one whose cache holds it replays the forced arm.
+CONV_BODY = """
+import json, os
+cache = next(a.split("=", 1)[1] for a in argv if a.startswith("--ocannl_autotune_cache_dir="))
+arm = next(a.split("=", 1)[1] for a in argv if a.startswith("--ocannl_tune_ship_arm=")).upper()
+replay = os.path.exists(os.path.join(cache, "crown"))
+os.makedirs(cache, exist_ok=True)
+open(os.path.join(cache, "crown"), "w").close()
+arms = [{"arm": a, "state": "cache-replay" if replay else "searched", "best_ms": 2.0,
+         "timings_contended": 0, "best_label": "grid"} for a in "AB"]
+print(json.dumps({"framework": "ocannl", "searched": not replay,
+                  "tune": {"shipped": arm, "arms": arms, "ship_substituted": False},
+                  "step_ms": {"p10": 2.2, "p50": 2.4, "p90": 2.6},
+                  "weights": os.environ.get("BENCH_TUNE_SCRATCH_WEIGHTS")}))
+"""
+
+
+class Gh1557DriverTest(DriverTreeTest):
+    def test_a_search_then_two_replays_per_weight_set(self):
+        self.stub("benchmarks/runners/ocannl/bench_conv.exe", CONV_BODY)
+        fixture = self.dir / "cifar_resnet.safetensors"
+        fixture.write_text("weights")
+        proc = self.driver("gh1557_cells.sh", "--skip-box-check", str(fixture), str(self.out), "5",
+                           "init")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        summary = (self.out / "summary.txt").read_text()
+        self.assertIn("weights=init shipped=A state=cache-replay crown=2.00 p10=2.20", summary)
+        self.assertIn("weights=init shipped=B state=cache-replay", summary)
+        for p in ("search", "a", "b"):
+            rec = json.loads((self.out / f"init-{p}" / "cell.json").read_text())
+            self.assertTrue(rec["ok"], rec["problems"])
+            self.assertEqual(rec["env"]["BENCH_TUNE_SCRATCH_WEIGHTS"], "init")
+            self.assertEqual(rec["config"]["autotune_cache_dir"]["value"],
+                             str(self.out / "cache-init"))
+
+    def test_a_replay_that_searched_fails_the_run(self):
+        # Every process searches: a cache that never holds the crown leaves no replay to pair.
+        self.stub("benchmarks/runners/ocannl/bench_conv.exe",
+                  CONV_BODY.replace('open(os.path.join(cache, "crown"), "w").close()', ""))
+        fixture = self.dir / "cifar_resnet.safetensors"
+        fixture.write_text("weights")
+        proc = self.driver("gh1557_cells.sh", "--skip-box-check", str(fixture), str(self.out), "5",
+                           "init")
+        self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+        self.assertIn("no crown/step pair", (self.out / "summary.txt").read_text())
+
+
+# bench_gpt's untuned step as gh1253_flip_cells.sh reads it: the result line on stdout, the seeding
+# census and plan derivation on stderr, both keyed on the gate.
+FLIP_BODY = """
+import json
+gate = next(a.split("=", 1)[1] for a in argv if "sketch_min_reduction" in a)
+print("seeded_default: plan derived in 0.25 s", file=sys.stderr)
+print(f"seeded_default: {3 if gate == 'auto' else 2} of 9 segments seeded [gate {gate}]",
+      file=sys.stderr)
+print(json.dumps({"framework": "ocannl", "step_ms": {"p10": 4, "p50": 5 if gate == "auto" else 6,
+                  "p90": 7}, "losses": [1.0, 0.5]}))
+"""
+
+
+class Gh1253FlipDriverTest(DriverTreeTest):
+    def test_the_two_gates_in_abba_order_with_their_census(self):
+        self.stub("benchmarks/runners/ocannl/bench_gpt.exe", FLIP_BODY)
+        fixtures = self.dir / "fixtures"
+        fixtures.mkdir()
+        (fixtures / "fx.safetensors").write_text("weights")
+        proc = self.driver("gh1253_flip_cells.sh", "--skip-box-check", "hip", str(self.out),
+                           env={"FIXTURE_DIR": str(fixtures), "FIXTURES": "fx",
+                                "OCANNL_GPU_DEFAULT_SKETCH_MIN_REDUCTION": "0"})
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        lines = (self.out / "summary.txt").read_text().splitlines()
+        self.assertEqual(lines, [
+            "fx gate=32 pass=1 step_p50_ms=6 plan_derivation=[0.25 s] "
+            "census=[seeded_default: 2 of 9 segments seeded [gate 32]]",
+            "fx gate=auto pass=1 step_p50_ms=5 plan_derivation=[0.25 s] "
+            "census=[seeded_default: 3 of 9 segments seeded [gate auto]]",
+            "fx gate=auto pass=2 step_p50_ms=5 plan_derivation=[0.25 s] "
+            "census=[seeded_default: 3 of 9 segments seeded [gate auto]]",
+            "fx gate=32 pass=2 step_p50_ms=6 plan_derivation=[0.25 s] "
+            "census=[seeded_default: 2 of 9 segments seeded [gate 32]]"])
+        records = self.records(self.out / "fx")
+        self.assertTrue(all(r["config"]["backend"]["value"] == "hip" for r in records))
+        self.assertEqual({r["env"]["BENCH_TUNE"] for r in records}, {"0"})
+
+    def test_a_failed_cell_fails_the_driver(self):
+        self.stub("benchmarks/runners/ocannl/bench_gpt.exe",
+                  FLIP_BODY + "sys.exit(1 if gate == 'auto' else 0)\n")
+        fixtures = self.dir / "fixtures"
+        fixtures.mkdir()
+        (fixtures / "fx.safetensors").write_text("weights")
+        proc = self.driver("gh1253_flip_cells.sh", "--skip-box-check", "hip", str(self.out),
+                           env={"FIXTURE_DIR": str(fixtures), "FIXTURES": "fx"})
+        self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+        self.assertIn('fx gate=auto pass=1 FAILED: "exited 1"', (self.out / "summary.txt").read_text())
+
+
+# bin/schedule_bench as gh1051_bf16_ab.sh reads it: five timing lines whose checksums are the f32
+# control's exact answer, near it for the wide and the narrow serial legs, and a gross but shared
+# value for the narrow tensorized pair; with debug files on, one generated .hip under the cell's
+# build_files/<prefix>/ that the bf16 policy does not reach at f32.
+SCHEDULE_BODY = """
+import json, os
+opt = {a.split("=", 1)[0][len("--ocannl_"):]: a.split("=", 1)[1] for a in argv if "=" in a}
+narrow, prec = opt["bf16_arithmetic"] == "true", opt["default_prec"]
+if opt.get("output_debug_files_in_build_directory") == "true":
+    d = os.path.join("build_files", opt["build_files_prefix"])
+    os.makedirs(d)
+    open(os.path.join(d, "mm.hip"), "w").write("kernel " + prec + "\\n")
+for v in ("parallel", "smem", "regtile", "mma_pd1", "mma_pd2"):
+    mma = v.startswith("mma")
+    if prec == "single":
+        chk = "100/200"
+    elif narrow and mma:
+        chk = "60/120"
+    else:
+        chk = "102/204" if narrow else "101/202"
+    census = "MMA_CENSUS" if mma and prec == "bfloat16" else "no tile MMA"
+    print(f"{v:<10} 1.000 ms  2.00 GFLOP/s  (spot [65] 1.0, chk {chk}, agrees (0 of 4))  [{census}] [grid: no Grid loop]")
+    print("bench-result: " + json.dumps({"variant": v, "seconds": 0.001, "check": "unchecked",
+                                          "check_note": "rounding expected"}))
+"""
+
+
+@POSIX_ONLY
+class Gh1051AbDriverTest(StubRunTest):
+    def measure(self, census="Mma_intrinsics 2"):
+        root = self.dir / "root"
+        write_stub(root / "_build/default/bin/schedule_bench.exe",
+                   SCHEDULE_BODY.replace("MMA_CENSUS", census))
+        dune = self.fakebin / "dune"
+        dune.write_text("#!/bin/sh\nexit 0\n")
+        dune.chmod(0o755)
+        (self.dir / "tmp").mkdir()
+        proc = self.run_tool([box_gate.BASH, str(HERE / "gh1051_bf16_ab.sh"), str(root), "stub",
+                              "4", "64"], {"TMPDIR": str(self.dir / "tmp"),
+                                           "OCANNL_BF16_ARITHMETIC": "auto"})
+        raw = Path(re.search(r"raw=(\S+)", proc.stdout).group(1))
+        return proc, raw
+
+    def test_four_interleaved_arms_validated_and_tabled(self):
+        proc, raw = self.measure()
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        # (wc -l pads its count on macOS.)
+        self.assertRegex(proc.stdout,
+                         r"drift control: +1 generated f32 kernels byte-identical across arms")
+        self.assertIn("| stub | 64 | mma_pd1 |", proc.stdout)
+        records = self.records(raw / "n64")
+        self.assertEqual(len(records), 16)
+        self.assertEqual({r["arm"] for r in records},
+                         {"false-bfloat16", "true-bfloat16", "false-single", "true-single"})
+        # The ambient `auto` reached no cell: each ran the arm its label names.
+        self.assertTrue(all(r["config"]["bf16_arithmetic"]["value"] == r["arm"].split("-")[0]
+                            for r in records))
+
+    def test_a_tensorized_cell_that_fell_back_invalidates_the_run(self):
+        proc, _ = self.measure(census="scalar fallback")
+        self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+        self.assertIn("mma_pd1 did not tensorize [scalar fallback]", proc.stdout)
 
 
 if __name__ == "__main__":

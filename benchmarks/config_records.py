@@ -13,9 +13,25 @@ another writer tore, an emitter that regressed -- is refused with `ConfigRecordE
 skipped, as is a schema version this reader does not know, and one key resolved two different
 ways (the process's sources changed under it: whatever it measured ran under both). The stream
 is point-in-time: a process killed early leaves a truthful but incomplete one.
+
+`expect_problems(config, expects)` is the check a driver states a treatment with: each named key
+resolved to its value from the command line. Run as a script, `config_records.py expect FILE
+KEY=VALUE...` applies it to a stderr file a shell driver kept, and refuses as well any setting that
+entered through the environment: exit 0 when the treatment holds, 1 naming each problem, 2 for a
+usage error. `config_records.py show FILE KEY...` prints each key's value and provenance for the
+driver's log (`(not resolved)` for one the process never read). They are how a driver that keeps
+its own cells confirms and records what they ran under, in place of reading the prose
+configuration trace (gh-ocannl-1607).
 """
 
-import strict_json
+import sys
+from pathlib import Path
+
+if __name__ == "__main__":
+    # A shell driver runs this under `python3 -I`, which leaves the script's own directory off
+    # sys.path.
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+import strict_json  # noqa: E402
 
 TAG = '{"ocannl_config":'
 VERSION = 1
@@ -88,3 +104,67 @@ def provenance(entry):
     if entry["source"] == "profile":
         return f"profile {entry['profile']} via {entry['layer']} {entry['origin']}"
     return f"{entry['source']} {entry['origin']}"
+
+
+def expect_problems(config, expects):
+    """Why `config` (`parse_config_records`) does not state each of `expects` ({key: value}): the key
+    was not read, resolved to another value, or came from somewhere other than the command line."""
+    problems = []
+    for key, value in expects.items():
+        entry = config.get(key)
+        if entry is None:
+            problems.append(f"ocannl_{key} was never resolved: the treatment {value!r} did not take")
+        elif entry["value"] != value or entry["source"] != "commandline":
+            problems.append(f"ocannl_{key} resolved to {entry['value']!r} from {provenance(entry)}, "
+                            f"not to {value!r} from the command line")
+    return problems
+
+
+def parse_expects(words):
+    """KEY=VALUE words as {key: value}; ValueError for a word that is not one, or a key twice."""
+    expects = {}
+    for word in words:
+        key, sep, value = word.partition("=")
+        if not sep or not key or key.startswith("-"):
+            raise ValueError(f"{word!r}: expected KEY=VALUE, KEY a setting without its ocannl_ prefix")
+        if key in expects:
+            raise ValueError(f"{key} is expected twice")
+        expects[key] = value
+    return expects
+
+
+def main(argv):
+    if len(argv) < 3 or argv[0] not in ("expect", "show"):
+        print("usage: config_records.py expect FILE KEY=VALUE... | show FILE KEY...",
+              file=sys.stderr)
+        return 2
+    try:
+        expects = parse_expects(argv[2:]) if argv[0] == "expect" else dict.fromkeys(argv[2:])
+    except ValueError as e:
+        print(f"config_records: {e}", file=sys.stderr)
+        return 2
+    try:
+        with open(argv[1], encoding="utf-8", errors="replace") as f:
+            config = parse_config_records(f.read())
+    except OSError as e:
+        print(f"config_records: {argv[1]}: {e}")
+        return 1
+    except ConfigRecordError as e:
+        print(f"config_records: {argv[1]}: unreadable configuration records: {e}")
+        return 1
+    if argv[0] == "show":
+        for key in expects:
+            entry = config.get(key)
+            print(f"ocannl_{key}: " + ("(not resolved)" if entry is None else
+                                        f"{entry['value']!r} ({provenance(entry)})"))
+        return 0
+    problems = expect_problems(config, expects)
+    problems += [f"ocannl_{key} came from the environment" for key, entry in sorted(config.items())
+                 if entry["layer"] == "environment"]
+    for p in problems:
+        print(f"config_records: {argv[1]}: {p}")
+    return 1 if problems else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

@@ -869,6 +869,16 @@ files.
   private result-line readers had drifted apart (first vs last `{` line, a substring filter, a
   lenient fallback) before they were folded. A bench that refuses its measurement for host
   contention exits 3, and the drivers keep that apart from a failure (a 1 outranks a 3).
+  A driver whose cells are a SEQUENCE rather than a design of arms (fits feeding later cells, a
+  search then replays of its cache) runs each through `cells.py cell` (gh-ocannl-1607): the same
+  pins, hermetic environment, supervision and records check, one process per call, exit 125 when a
+  group survives its cleanup. No driver reads the prose `log_config_sourcing` trace any more --
+  `config_records.py expect FILE KEY=VALUE...` is the check over a stderr a driver kept itself, and
+  `test_cells.py` refuses a driver that names the prose trace. Two traps the conversion met: a tuned
+  cell must pin `autotune_cache_dir` (`Autotune.resolve_cache_dir` reads it under two defaults, so a
+  defaulted key resolves two ways and the reader refuses the cell, gh-ocannl-1697), and a driver
+  that measures revisions older than the stream (gh-ocannl-1566) cannot use it at all
+  (`gh1051_boundary_split.sh`, README).
 - **Interleaved timing visits arms in `Bench_design`'s spread mirrored rotation** (`bin/bench_design.ml`,
   gh-ocannl-743). Mirroring each batch cancels LINEAR drift (every pair exchanged, equal mean
   positions); it does not equalize each arm's position histogram, which is what a nonlinear effect

@@ -24,16 +24,36 @@ interleaved) are its two front ends:
 - The cell loop (`run_cells`), which takes the driver's READER of a cell's output -- what turns its
   streams into timed results (`bench_output.py` holds every format an OCANNL bench prints).
 - The paired statistics (`paired_row`, `sign_test_p`).
+- One cell from a shell driver (`run_one`, the `cell` command below): the same environment, pins,
+  supervision and configuration check for a driver whose cells are not a design of arms -- a
+  calibration pipeline whose fits feed later cells, a search followed by replays of its cache, a
+  bench that interleaves its own variants (gh-ocannl-1607):
+
+      python3 benchmarks/cells.py cell --backend B --dir DIR [--stdout F] [--stderr F] \
+          [--timeout S] [--expect KEY=VALUE]... -- [NAME=VALUE]... EXE [ARGS...]
+
+  runs EXE with `pins(B)` ahead of ARGS, from DIR (created; refused unless absent or empty), its
+  environment `hermetic_env`'s plus the leading NAME=VALUE words (`split_assignments`: a runner mode
+  or an OpenMP control, never an OCANNL_* setting). Its streams go to F (default DIR/stdout and
+  DIR/stderr) and its record -- argv, stated environment, exit, wall, resolved configuration,
+  problems -- to DIR/cell.json. Each `--expect` is a setting the cell must have resolved to that
+  value from the command line (`config_records.expect_problems`). Exit: 0 clean; the cell's own
+  status when it failed (128+N for signal N); 3 when it refused its measurement; 124 when it
+  outlived its cap; 1 when its configuration is not its command line's, whatever else held
+  (a refusal or a cap included: a capped cell is a lower bound only under its treatment); 125 when
+  its group was not proven gone (stop: the box is not clean); 2 for a usage error.
 
 Exit statuses a front end shares: 0 when every cell is clean; `REFUSED_EXIT` (3) when the only
 faults are cells that themselves exited `REFUSED_EXIT` -- a bench saying the machine refused its
-measurement (host contention, gh-ocannl-855), a fact about the box rather than a failed run; 1 for
-any other fault; 2 for a usage error.
+measurement (host contention, gh-ocannl-855), a fact about the box rather than a failed run;
+`SURVIVOR_EXIT` (125) when a cell's group was not proven gone, which stops the run and should stop
+a driver running several; 1 for any other fault; 2 for a usage error.
 
 Boundary: hermeticity here is about CONFIGURATION -- what the library reads. The machine (clocks,
 co-tenants, thermal and device state) is the operator's, through an exclusive measurement window.
 """
 
+import argparse
 import hashlib
 import json
 import math
@@ -560,3 +580,126 @@ def exit_status(records, problems):
     only_refusals = (unclean and len(problems) == len(unclean)
                      and all(r["refused"] and len(r["problems"]) == 1 for r in unclean))
     return REFUSED_EXIT if only_refusals else 1
+
+
+# ---------------------------------------------------------------------------------------------
+# One cell, for a shell driver.
+
+CAPPED_EXIT = 124
+SURVIVOR_EXIT = 125
+
+
+def resolve_executable(word):
+    """The absolute path a cell's EXE names (a cell runs in a directory of its own, where a relative
+    path names nothing), or None."""
+    if os.sep in word:
+        path = Path(word).expanduser().resolve()
+        return path if path.is_file() else None
+    found = shutil.which(word)
+    return None if found is None else Path(found).resolve()
+
+
+def one_cell_exit(status, config_problems):
+    """`run_one`'s exit status (see the module doc)."""
+    if config_problems and status in (0, REFUSED_EXIT, "timeout"):
+        return 1
+    if status == "timeout":
+        return CAPPED_EXIT
+    if isinstance(status, int) and status < 0:
+        return 128 - status
+    return status
+
+
+def run_one(*, backend, cell_dir, exe, args, stated_env, expects, timeout, stdout, stderr):
+    """Run one cell (the `cell` command) and return (record, exit status)."""
+    env, cleared = hermetic_env(os.environ)
+    cmd = [str(exe), *pins(backend), *args]
+    started = time.monotonic()
+    with open(stdout, "wb") as so, open(stderr, "wb") as se:
+        status = run_in_group(cmd, cell_dir, {**env, **stated_env}, timeout, so, se)
+    wall = time.monotonic() - started
+    problems, config_problems, config = [], [], None
+    refused = status == REFUSED_EXIT
+    if refused:
+        problems.append(f"refused its measurement (exit {REFUSED_EXIT})")
+    elif status == "timeout":
+        problems.append(f"outlived its {timeout:g} s cap; its group was killed")
+    elif status != 0:
+        problems.append(f"exited {status}")
+    try:
+        config = config_records.parse_config_records(
+            Path(stderr).read_text(encoding="utf-8", errors="replace"))
+        config_problems = treatment_problems(config, backend, cmd)
+        config_problems += config_records.expect_problems(config, expects)
+    except config_records.ConfigRecordError as e:
+        config_problems = [f"unreadable configuration records: {e}"]
+    problems += config_problems
+    record = {"argv": cmd, "env": stated_env, "cwd": str(cell_dir), "stdout": str(stdout),
+              "stderr": str(stderr), "status": status, "wall_s": round(wall, 3),
+              "config": config, "problems": problems, "refused": refused, "ok": not problems,
+              "cleared": cleared, "runtime_controls": runtime_controls(env),
+              "environment_values": recorded_values(env)}
+    return record, one_cell_exit(status, config_problems)
+
+
+def cell_main(argv):
+    split = argv.index("--") if "--" in argv else len(argv)
+    parser = argparse.ArgumentParser(
+        prog="cells.py cell", description="Run one hermetic, supervised, configuration-checked cell.",
+        usage="%(prog)s --backend B --dir DIR [--stdout F] [--stderr F] [--timeout S] "
+              "[--expect KEY=VALUE]... -- [NAME=VALUE]... EXE [ARGS...]")
+    parser.add_argument("--backend", required=True, choices=BACKENDS)
+    parser.add_argument("--dir", required=True, type=Path,
+                        help="the cell's working directory, created; refused unless absent or empty")
+    parser.add_argument("--stdout", type=Path, help="default DIR/stdout")
+    parser.add_argument("--stderr", type=Path, help="default DIR/stderr")
+    parser.add_argument("--timeout", type=float, default=CELL_TIMEOUT_S,
+                        help=f"seconds before the cell's group is killed (default {CELL_TIMEOUT_S})")
+    parser.add_argument("--expect", action="append", default=[],
+                        help="KEY=VALUE: a setting the cell must resolve to VALUE from its command "
+                             "line (repeatable)")
+    args = parser.parse_args(argv[:split])
+    try:
+        stated_env, rest = split_assignments(argv[split + 1:])
+        expects = config_records.parse_expects(args.expect)
+    except ValueError as e:
+        parser.exit(2, f"cells: {e}\n")
+    if not rest:
+        parser.exit(2, "cells: no executable after --\n")
+    if not args.timeout > 0:
+        parser.exit(2, "cells: --timeout must be positive\n")
+    exe = resolve_executable(rest[0])
+    if exe is None:
+        parser.exit(2, f"cells: no executable at {rest[0]}\n")
+    cell_dir = args.dir.expanduser().resolve()
+    if cell_dir.exists() and (not cell_dir.is_dir() or any(cell_dir.iterdir())):
+        parser.exit(2, f"cells: {cell_dir} is not an empty directory; a leftover file would be read "
+                       "as this cell's\n")
+    cell_dir.mkdir(parents=True, exist_ok=True)
+    stdout = (args.stdout or cell_dir / "stdout").expanduser().resolve()
+    stderr = (args.stderr or cell_dir / "stderr").expanduser().resolve()
+    install_cancellation("cells")
+    try:
+        record, status = run_one(backend=args.backend, cell_dir=cell_dir, exe=exe, args=rest[1:],
+                                 stated_env=stated_env, expects=expects, timeout=args.timeout,
+                                 stdout=stdout, stderr=stderr)
+    except cell_group.CleanupFailed as e:
+        print(log_line(display_value(str(e))), file=sys.stderr, flush=True)
+        return SURVIVOR_EXIT
+    except KeyboardInterrupt:
+        print(f"cells: {display_value(str(cell_dir))}: interrupted; its group was collected",
+              file=sys.stderr, flush=True)
+        return 130
+    (cell_dir / "cell.json").write_text(json.dumps(record, indent=1) + "\n")
+    print(log_line(f"cells: {display_value(str(cell_dir))}: exit {record['status']}, "
+                   f"{record['wall_s']:.1f} s" + ("" if record["ok"] else " -- " + display_value(
+                       "; ".join(record["problems"])))), file=sys.stderr, flush=True)
+    return status
+
+
+if __name__ == "__main__":
+    if sys.argv[1:2] != ["cell"]:
+        print("usage: cells.py cell --backend B --dir DIR ... -- [NAME=VALUE]... EXE [ARGS...]",
+              file=sys.stderr)
+        sys.exit(2)
+    sys.exit(cell_main(sys.argv[2:]))

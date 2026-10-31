@@ -11037,6 +11037,8 @@
   ../../benchmarks/bench_output.py
   ../../benchmarks/box_gate.py
   ../../benchmarks/cell_group.py
+  ../../benchmarks/cells.py
+  ../../benchmarks/config_records.py
   ../../benchmarks/strict_json.py
   ../../benchmarks/display_safe.py
   (sandbox always preserve_file_kind))
@@ -11093,6 +11095,8 @@
   ../../benchmarks/bench_output.py
   ../../benchmarks/box_gate.py
   ../../benchmarks/cell_group.py
+  ../../benchmarks/cells.py
+  ../../benchmarks/config_records.py
   ../../benchmarks/strict_json.py
   ../../benchmarks/display_safe.py
   (sandbox always preserve_file_kind))

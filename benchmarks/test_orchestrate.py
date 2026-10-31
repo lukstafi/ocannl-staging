@@ -28,7 +28,9 @@ import orchestrate
 import strict_json
 from runners import bench_common
 from test.test_cell_group import CellGroupTest  # imported so unittest.main includes shared tests
-from test_cells import AbDriverTest, Gh1180DriverTest  # noqa: F401  (likewise)
+from test_cells import (  # noqa: F401  (likewise)
+    AbDriverTest, CellCommandTest, ConfigRecordsExpectTest, Gh1051AbDriverTest, Gh1180DriverTest,
+    Gh1253FlipDriverTest, Gh1279DriverTest, Gh1557DriverTest, Gh740DriverTest, ProseTraceScanTest)
 from test.test_cell_group import kill_the_group_on_cleanup, publish_pid
 
 HERE = Path(__file__).resolve().parent
@@ -8397,14 +8399,22 @@ class ReportScriptsDisplayTest(unittest.TestCase):
         self.assertIn(display_safe.display_value(self.HOSTILE), text)
 
     def test_gh1051_tables_show_the_memory_label(self):
-        # The driver's `memory` label is its operator's third argument.
-        for arm in ("true", "false"):
-            for prec in ("bfloat16", "single"):
-                log = self.dir / f"n64_r1_{arm}_{prec}.log"
-                log.write_text("".join(
-                    f"{v}   1.5 ms   10.0 GFLOP/s   (x chk 1.0/2.0, y) [Mma_intrinsics 2]\n"
-                    for v in ("parallel", "smem", "regtile", "mma_pd1", "mma_pd2")))
-                Path(str(log) + ".status").write_text("0\n")
+        # The driver's `memory` label is its operator's third argument. Its cells are one
+        # bin_cells run per size (gh-ocannl-1607): four arms, one round, all clean.
+        run = self.dir / "n64"
+        arms = [f"{arm}-{prec}" for arm in ("true", "false") for prec in ("bfloat16", "single")]
+        (run / "cells").mkdir(parents=True)
+        (run / "manifest.json").write_text(json.dumps(
+            {"orders": [[0, 1, 2, 3]], "common_args": ["64", "10", "64", "64", "0"]}))
+        records = []
+        for i, arm in enumerate(arms):
+            records.append({"cell": i, "round": 0, "arm": arm, "ok": True, "problems": [],
+                            "config": None})
+            (run / "cells" / f"{i:03d}-{arm}").mkdir()
+            (run / "cells" / f"{i:03d}-{arm}" / "stdout").write_text("".join(
+                f"{v}   1.5 ms   10.0 GFLOP/s   (x chk 1.0/2.0, y) [Mma_intrinsics 2] [grid: x]\n"
+                for v in ("parallel", "smem", "regtile", "mma_pd1", "mma_pd2")))
+        (run / "cells.jsonl").write_text("".join(json.dumps(r) + "\n" for r in records))
         proc = subprocess.run(
             [sys.executable, str(HERE / "gh1051_cells.py"), "ab", str(self.dir), self.HOSTILE],
             text=True, capture_output=True, timeout=60)
