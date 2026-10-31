@@ -385,6 +385,8 @@ the retained procedural analyses alongside the affine engine and raises on diver
   `autotune_log_seeding` prints the seeding census — per lowering the tuner seeds, the family
   that claimed it and every gate that refused its seeds, which no decline report can hold
   because a refused seed never becomes a candidate.
+  `autotune_log=crown` prints one line per `Autotune.tune` call — what it crowned and how the
+  beam finals decided it — without the rest of the `autotune_log` stream or the work it adds.
 
 ## Design position
 

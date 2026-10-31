@@ -202,4 +202,4 @@ let () =
     | Some r ->
         Stdio.printf "rank-site: tune site=%s crowned=%S best_ms=%.6f timed=%d %s\n%!" site
           r.Autotune.best_label r.Autotune.best_ms r.Autotune.candidates_timed
-          (Tune_crown.finals_fields r)
+          (Autotune.finals_fields r)

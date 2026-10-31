@@ -2053,7 +2053,9 @@ val progress_enabled : unit -> bool
 val log_enabled : unit -> bool
 (** Whether the [autotune:] diagnostics (and the untuned-default control they gate) are on in this
     domain: the [?log] of the innermost enclosing {!tune} or {!Train.tune_placements} call that
-    passed one, else config [autotune_log]. *)
+    passed one, else config [autotune_log] at [true]. Its [crown] level leaves this off: that level
+    prints only each call's [autotune-crown:] line ({!crown_fields}), which a [?log] override turns
+    on ([true]) or off ([false]) together with the rest. *)
 
 val with_streams : ?log:bool -> ?progress:bool -> (unit -> 'a) -> 'a
 (** [with_streams ?log ?progress f] runs [f] with {!log_enabled} and {!progress_enabled} overridden
@@ -2088,6 +2090,20 @@ val terminal_failure : report -> terminal_failure option
     the exception, and deliberately so: an incompatible [timing_ctx] is a precondition violation
     detected before anything happens, not an outcome of a search, and reporting it would attribute a
     phase to a call that never reached one. *)
+
+val crown_fields : report -> string
+(** What the call crowned and how the beam finals decided it, as one line of fields
+    (gh-ocannl-1718):
+    [outcome=<{!outcome_name}> crowned=<{!report.best_label}, quoted> best_ms=<%.4f>] then
+    {!finals_fields}. The label is [""] exactly when nothing was timed, which [outcome] then
+    explains. The line config [autotune_log=crown] prints once per {!tune} call,
+    [autotune-crown: routine=<name, quoted> <fields>] on stderr, carries exactly these fields, so a
+    caller rendering a {!report} itself (a test's stderr, a bench's trace) spells it the same way.
+*)
+
+val finals_fields : report -> string
+(** The finals' {!finals_outcome_name}, its spaces as underscores ([finals=not_run]), and how many
+    contenders they re-timed ([finals_contenders=<n>], zero when they did not run). *)
 
 val model_score :
   static_indices:Ir.Indexing.static_symbol list ->
@@ -3878,7 +3894,9 @@ val tune :
      an enclosing [tune] or [Train.tune_placements] call in the same domain, and only without one
      falls back to config [autotune_log] (false), which is read once per process. Scoped to this
      call and to the calling domain, and restored on return or exception, so a test can turn the
-     diagnostics on for one search. *)
+     diagnostics on for one search. It decides the call's [autotune-crown:] line too (see
+     {!crown_fields}): [true] prints it with the rest, [false] silences it even under
+     [autotune_log=crown]. *)
   ?progress:bool ->
   (* Whether this call writes the [autotune-progress:] lines (see {!progressf}); inherited and
      scoped exactly as [?log] is, falling back to config [autotune_progress] (false). *)
