@@ -11,19 +11,30 @@ files.
   params use `TDSL.reshape_param ~l ~i ~o ndarray ()` / `TDSL.param ~values l ()`. `params` is the
   *state* set (what `init_params` initializes and `Persistence` saves — a frozen backbone behind
   `stop_gradient` included), NOT the trained set: the optimizer-side helpers (`Train.sgd_update`,
-  `grad_l2_norm`/`clip_by_global_norm`, `grad_checksum`, `zero_params_grads`) operate on
+  `grad_l2_norm`/`clip_by_global_norm`, `grad_checksum`) operate on
   `Train.trainable_params` — the params whose gradient the backprop writes
   (gh-ocannl-673: a frozen parameter takes no step, in particular no weight decay) — and raise
   `Session_error` when that set is empty rather than silently compiling empty routines
   (gh-ocannl-670: the gh-465 test initially "passed" parameter parity because no optimizer step
   ran on either side). `?params` on each helper overrides the derivation.
+- Being a parameter is a property of INITIALIZATION, not of trainability (gh-ocannl-1743): what keys
+  on `params` is who sets the value (`init_params`, the forward-consumption refusal, the shape
+  solver's `is_param` terminal rows, `Precision_policy`'s `param_prec`, `Parallel`'s replication,
+  the checkpoint's base state set) and the optimizer's default stepped set. A gradient's life cycle
+  keys on the leaf instead: `grad_update ~accum_steps` keeps, and the default `zero_params_grads`
+  resets, every terminal gradient the backprop writes (`trained_leaves` in `lib/train.ml`, terminals
+  recognized by owning no `(grad, Bprop)` fragment), and a differentiable term's value and gradient
+  carry observation intent like a parameter's. Optimizing an input therefore takes `?params` on the
+  step and needs a DATA-BACKED leaf (`Operation.init`): a `term_init` below
+  `limit_constant_fill_size` is a fetch op its forward code re-establishes every run, undoing the
+  step. Executed: `require_grad_leaves.ml`; the saliency host read, `observable_grads.ml` leg 4.
 - Training-loop utilities (gh-465, `lib/train.ml`): `Lr_schedule` (host floats; feed via
   `scheduled_learning_rate`'s data-backed `host_scalar` — a fetch-defined constant would be
   re-fetched each step, undoing `set_values`), `grad_l2_norm`/`clip_by_global_norm` +
   `sgd_update ~grad_scale` (scale folded into the gradient read; buffers untouched — the norm
   can be recomputed on the host from the buffers to cross-check), `grad_update ~accum_steps` +
-  `zero_params_grads` (param zeroing is filtered OUT of the micro-step's `zero_grads` tree by
-  matching the params' grad `Fetch`es; intermediate grads must keep their per-micro-step zeroing
+  `zero_params_grads` (leaf-gradient zeroing is filtered OUT of the micro-step's `zero_grads` tree
+  by matching the leaves' grad `Fetch`es; intermediate grads must keep their per-micro-step zeroing
   since backprop `=+` relies on it), `Outlier_detector` (z-score vs sliding window; nan during
   warmup, and a constant window gives std 0 → infinite z). Executed parity: `loop_utils.ml`.
 - Plots (`PrintBox_utils.plot`, gh-ocannl-103) draw their tick labels and legend AROUND the upstream

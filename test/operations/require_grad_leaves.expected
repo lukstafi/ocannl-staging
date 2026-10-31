@@ -1,0 +1,19 @@
+=== 1. Input optimization ===
+x is not a parameter: true
+the default stepped set is the weight alone: true
+step 1: checksum over x's gradient = 4 + 12: true
+step 1: global norm over x's gradient = sqrt 160: true
+step 1: x moved by lr * 2 w x: true
+x after step 1: 0.5000 0.5000
+step 2: x moved by the gradient taken at the updated x: true
+x after step 2: 0.2500 0.1250
+the weight was not stepped: true
+the checkpoint state set holds x, carried by the routine that steps it: true
+=== 2. Accumulation ===
+cycle 1 x gradient: 10.0000 7.5000
+cycle 1: x's gradient is the mean of its micro-step gradients: true
+cycle 1: w's gradient is the mean of its micro-step gradients: true
+the default reset zeroes x's gradient: true
+the default reset zeroes w's gradient: true
+cycle 2: x's gradient starts clean: true
+cycle 2: w's gradient starts clean: true

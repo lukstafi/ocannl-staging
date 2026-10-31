@@ -66,43 +66,78 @@ let trainable_params loss =
       Set.filter loss.Tensor.params ~f:(fun p ->
           match p.Tensor.diff with None -> false | Some d -> Set.mem written d.Tensor.grad)
 
-(* The parameter set an optimizer-side helper operates on: [?params] when given (the escape hatch
-   for exotic flows, e.g. a gradient written outside this loss's backprop), the derived
-   {!trainable_params} otherwise. An empty derived set fails loudly: a differentiable loss that
-   trains no registered parameters has no legitimate use for these helpers, and the failure is
-   otherwise silent at every stage — the helpers compile empty or vacuous routines that run as
-   no-ops (gh-ocannl-670). *)
-let params_for ~fn_name ?params loss =
+(* The differentiable terminals whose gradient [loss]'s backprop writes: parameters and
+   [~grad_spec:Require_grad] leaves alike (gh-ocannl-1743). A terminal is recognized by the
+   gh-ocannl-1724 contract -- its backprop owns no [(grad, Bprop)] fragment -- rather than by an
+   empty [children] list, which a parameter with a computed initializer does not have. The walk
+   stops at terminals (a parameter's children are its initialization, which no gradient flows
+   through) and at non-differentiable tensors; the [written] filter drops a leaf detached behind
+   {!Operation.stop_gradient}. These are the gradients nothing inside the backprop reads, so they
+   are what gradient accumulation keeps and what its per-cycle reset zeroes -- whether a leaf is a
+   registered parameter decides its initialization, not its gradient's life cycle. *)
+let trained_leaves loss =
+  match loss.Tensor.diff with
+  | None -> Set.empty (module Tensor)
+  | Some diff ->
+      let written = Asgns.collect_written diff.Tensor.backprop.Asgns.asgns in
+      let visited = ref (Set.empty (module Tensor)) in
+      let rec walk acc (t : Tensor.t) =
+        if Set.mem !visited t then acc
+        else (
+          visited := Set.add !visited t;
+          match t.Tensor.diff with
+          | None -> acc
+          | Some d when not (Set.mem d.Tensor.backprop.Asgns.owned (d.Tensor.grad, Asgns.Bprop)) ->
+              if Set.mem written d.Tensor.grad then Set.add acc t else acc
+          | Some _ ->
+              List.fold t.Tensor.children ~init:acc ~f:(fun acc c -> walk acc c.Tensor.subtensor))
+      in
+      List.fold loss.Tensor.children
+        ~init:(Set.empty (module Tensor))
+        ~f:(fun acc c -> walk acc c.Tensor.subtensor)
+
+(* The set an optimizer-side helper operates on: [?params] when given -- the way to select a
+   [Require_grad] leaf (input optimization, an adversarial perturbation) or a gradient written
+   outside this loss's backprop -- and the helper's [derived] default otherwise. An empty derived
+   set fails loudly: the helpers would otherwise compile empty or vacuous routines that run as
+   no-ops, silently at every stage (gh-ocannl-670). *)
+let params_for ~fn_name ?params ~derived ~what loss =
   match params with
   | Some ps -> ps
   | None ->
       if Option.is_none loss.Tensor.diff then
         raise @@ Tensor.Session_error (fn_name ^ ": loss is not differentiable", Some loss);
-      let ps = trainable_params loss in
-      if Set.is_empty ps then
-        raise
-        @@ Tensor.Session_error
-             ( fn_name
-               ^ ": the loss trains no parameters -- no [loss.params] member's gradient is written \
-                  by the backprop code. Note that only [Tensor.param]-registered tensors join \
-                  [params] ([Operation.init ~grad_spec:Require_grad] leaves do not), and a \
-                  parameter behind [stop_gradient] is not trained",
-               Some loss );
+      let ps = derived loss in
+      if Set.is_empty ps then raise @@ Tensor.Session_error (fn_name ^ ": " ^ what, Some loss);
       ps
+
+(* The optimizer's default: the weights it steps. [Require_grad] leaves are left out by design -- an
+   adversarial perturbation is stepped apart from the weights, and an input gradient must not
+   rescale ({!clip_by_global_norm}) or gate ({!grad_checksum}) the weight step -- and are selected
+   through [?params]. *)
+let stepped_params_for ~fn_name ?params loss =
+  params_for ~fn_name ?params ~derived:trainable_params
+    ~what:
+      "the loss trains no parameters -- no [loss.params] member's gradient is written by the \
+       backprop code (a parameter behind [stop_gradient] is not trained). A non-parameter \
+       differentiable leaf ([Operation.init ~grad_spec:Require_grad], an optimized input) is not \
+       selected by default: pass it in [?params]"
+    loss
 
 (** Replaces the zeroing of the given gradient nodes with [Noop] inside a [zero_grads] computation
     (each per-tensor zeroing is a [Fetch] of zeros — see [Tensor.fetch_zeros]). Used by the
     gradient-accumulation variant of {!grad_update}, which must keep zeroing the {e intermediate}
     gradients every micro-step (their backprop contributions are plain [=+] accumulations relying on
-    a same-routine reset) while the {e parameter} gradients accumulate across micro-steps.
+    a same-routine reset) while the {e leaf} gradients (parameters' and [Require_grad] leaves', see
+    [trained_leaves]) accumulate across micro-steps.
 
     The match is by [Fetch] constructor and tnode identity, so a change to how zeroing is emitted (a
-    different constructor, or a parameter gradient dropping out of the tree) would silently keep
-    zeroing parameter gradients — corrupting the accumulation. A gradient that the backprop writes
-    is accumulated into, so it is zeroed in the tree: we raise when such a [grads] member had
-    nothing removed rather than let the drift through. Pass only the gradients backprop reaches — a
-    parameter detached from the loss (behind {!Operation.stop_gradient}, say) stays in [loss.params]
-    while its gradient is neither zeroed nor accumulated. *)
+    different constructor, or a leaf gradient dropping out of the tree) would silently keep zeroing
+    leaf gradients — corrupting the accumulation. A gradient that the backprop writes is accumulated
+    into, so it is zeroed in the tree: we raise when such a [grads] member had nothing removed
+    rather than let the drift through. Pass only the gradients backprop reaches — a parameter
+    detached from the loss (behind {!Operation.stop_gradient}, say) stays in [loss.params] while its
+    gradient is neither zeroed nor accumulated. *)
 let filter_out_grad_zeroing ~grads (comp : Asgns.comp) =
   let removed = Hash_set.create (module Tn) in
   let rec loop = function
@@ -120,8 +155,8 @@ let filter_out_grad_zeroing ~grads (comp : Asgns.comp) =
     invalid_arg @@ "Train.filter_out_grad_zeroing: no zeroing found for accumulated gradient(s): "
     ^ String.concat ~sep:", " (List.map (Set.to_list missing) ~f:Tn.debug_name)
     ^ " -- the shape of the zero_grads code changed, gradient accumulation would be corrupted";
-  (* The parameter gradients stay embedded: the surrounding {!grad_update} backprop accumulates into
-     them regardless, and they are materialized so they persist across micro-steps. *)
+  (* The leaf gradients stay embedded: the surrounding {!grad_update} backprop accumulates into them
+     regardless, and they are materialized so they persist across micro-steps. *)
   { comp with Asgns.asgns = result }
 
 let grad_update ?(setup_for_parallel = false) ?accum_steps ?accum_loss ?loss_scale loss =
@@ -133,9 +168,11 @@ let grad_update ?(setup_for_parallel = false) ?accum_steps ?accum_loss ?loss_sca
      gradients' observation intent declared in [Tensor.param]. *)
   Tn.set_observable loss.Tensor.value;
   if setup_for_parallel || Option.is_some accum_steps then
-    (* Only the trained parameters' gradients: a frozen parameter's gradient is never written, so
-       declaring it materialized would demand a buffer nothing computes (gh-ocannl-673). *)
-    Set.iter (trainable_params loss) ~f:(fun p ->
+    (* Only the leaf gradients the backprop writes ([trained_leaves]): a frozen parameter's gradient
+       is never written, so declaring it materialized would demand a buffer nothing computes
+       (gh-ocannl-673). Accumulated gradients must persist across runs, which observation intent
+       alone does not promise (it leaves [Virtual] open). *)
+    Set.iter (trained_leaves loss) ~f:(fun p ->
         set_materialized (Option.value_exn ~here:[%here] p.diff).grad);
   let zero_grads =
     match loss.Tensor.diff with
@@ -145,14 +182,16 @@ let grad_update ?(setup_for_parallel = false) ?accum_steps ?accum_loss ?loss_sca
         match accum_steps with
         | None -> diff.zero_grads
         | Some _ ->
-            (* Only the parameters the backprop reaches ({!trainable_params}): one detached behind
-               {!Operation.stop_gradient} (a frozen backbone) is still in [loss.params], but its
-               gradient is neither zeroed here nor accumulated into, so it is not ours to strip --
-               and demanding a zeroing for it would reject the freezing flow outright. *)
+            (* Every leaf gradient the backprop writes ([trained_leaves]), parameter or
+               [Require_grad] leaf (gh-ocannl-1743): an input's gradient accumulates like a
+               weight's. One detached behind {!Operation.stop_gradient} (a frozen backbone) is still
+               in [loss.params], but its gradient is neither zeroed here nor accumulated into, so it
+               is not ours to strip -- and demanding a zeroing for it would reject the freezing flow
+               outright. *)
             let grads =
               Set.filter_map
                 (module Tn)
-                (trainable_params loss)
+                (trained_leaves loss)
                 ~f:(fun p -> Option.map p.Tensor.diff ~f:(fun d -> d.Tensor.grad))
             in
             filter_out_grad_zeroing ~grads diff.zero_grads)
@@ -182,13 +221,16 @@ let zero_params_grads ?params loss =
     | Some diff -> diff.zero_grads
   in
   let comp =
-    Set.to_list (params_for ~fn_name:"Train.zero_params_grads" ?params loss)
+    Set.to_list
+      (params_for ~fn_name:"Train.zero_params_grads" ?params ~derived:trained_leaves
+         ~what:"the loss's backprop writes no leaf gradient (no parameter or Require_grad leaf)"
+         loss)
     |> List.map ~f:one_param |> Asgns.sequence
   in
   { comp with asgns = Asgns.Block_comment ("zero_params_grads", comp.asgns) }
 
 let grad_checksum ?params loss =
-  let params = params_for ~fn_name:"Train.grad_checksum" ?params loss in
+  let params = stepped_params_for ~fn_name:"Train.grad_checksum" ?params loss in
   let flag = NTDSL.init ~l:"grad_checksum" ~prec:Ir.Ops.single ~o:[ 1 ] ~f:(fun _ -> 0.) () in
   set_materialized flag.Tensor.value;
   Tn.set_observable flag.Tensor.value;
@@ -254,7 +296,7 @@ let sgd_update ~learning_rate ?momentum ?weight_decay ?nesterov ?grad_unscale ?g
     sgd_one ~learning_rate ?momentum ?weight_decay ?nesterov ?grad_unscale ?grad_scale ?update_gate
   in
   let comp =
-    Set.to_list (params_for ~fn_name:"Train.sgd_update" ?params loss)
+    Set.to_list (stepped_params_for ~fn_name:"Train.sgd_update" ?params loss)
     |> List.map ~f |> Asgns.sequence
   in
   { comp with asgns = Asgns.Block_comment ("sgd_update", comp.asgns) }
@@ -344,7 +386,7 @@ let scheduled_learning_rate ?(label = "learning_rate") schedule =
   (lr, set_step)
 
 let grad_l2_norm ?grad_unscale ?(label = "grad_norm") ?params loss =
-  let params = params_for ~fn_name:"Train.grad_l2_norm" ?params loss in
+  let params = stepped_params_for ~fn_name:"Train.grad_l2_norm" ?params loss in
   let norm = NTDSL.init ~l:label ~prec:Ir.Ops.single ~o:[ 1 ] ~f:(fun _ -> 0.) () in
   set_materialized norm.Tensor.value;
   Tn.set_observable norm.Tensor.value;

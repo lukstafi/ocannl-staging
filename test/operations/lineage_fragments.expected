@@ -1,5 +1,6 @@
 A: w.grad = 6 w: true
-B: the backprop's read of the once-run's scratch leaf is refused, naming it and the fix: true
+B: the loss compiles and runs in the once-run's lineage, w not materialized: true
+B: w.grad equals the fresh graph's, w not materialized: true
 B: the loss compiles and runs in the once-run's lineage: true
 B: w.grad equals the fresh graph's: true
 B': the loss compiles and runs: true

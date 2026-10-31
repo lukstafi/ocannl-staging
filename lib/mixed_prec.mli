@@ -112,7 +112,13 @@ val scaled_grad_update :
     followed by the {!Train.grad_checksum} reduction, as one computation; returns the checksum flag
     tensor alongside. Parameter gradients are materialized here because the optimizer half
     ({!scaled_sgd_update}) is compiled as a separate routine — the host must read the checksum in
-    between — and reads them across the routine boundary. *)
+    between — and reads them across the routine boundary.
+
+    This module's update wrappers are a weight-training recipe: the checksum, the materialization
+    and the step all cover {!Train.trainable_params}, and must agree. To include a
+    [~grad_spec:Require_grad] leaf (input optimization), compose the {!Train} primitives directly:
+    {!Train.grad_update}[ ~loss_scale], then {!Train.grad_checksum} and {!Train.sgd_update}
+    [~grad_unscale] with the same [?params] (gh-ocannl-1743). *)
 
 val scaled_sgd_update :
   Loss_scaler.t ->

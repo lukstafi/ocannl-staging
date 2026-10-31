@@ -13,7 +13,12 @@
 
    3. Split flow via [Train.to_routine]: written-not-read nodes are guessed as outputs and get
    [set_materialized], so the gradient is [On_device] by declared intent and readable across
-   routines and from the host. *)
+   routines and from the host.
+
+   4. Saliency (gh-ocannl-1743): a differentiable input that is NOT a parameter ([Require_grad]
+   leaf) gets the same observation intent, so its gradient -- which no backprop code reads -- is
+   read from the host after a raw [Context.compile] of [grad_update] alone, with no materialization
+   hint. *)
 
 open Base
 open Stdio
@@ -101,7 +106,27 @@ let split_to_routine () =
   show_values "grad values (= zin)" ctx (grad_of r);
   show_values "param after one split step (expect r - 0.1*zin = 1.6 2.5)" ctx r.Tensor.value
 
+let saliency () =
+  printf "=== 4. Saliency: a Require_grad input's gradient, host-read (raw Context.compile) ===\n";
+  Tensor.unsafe_reinitialize ();
+  let ctx = Context.auto () in
+  let sal = Tensor.term_init [| 4.; 5. |] ~label:[ "sal" ] ~grad_spec:Require_grad () in
+  (* Per-cell distinct and nonlinear in [sal]: d/dsal (3 sal^2) = 6 sal. *)
+  let%op l = !.3. *. sal *. sal in
+  let update = Train.grad_update l in
+  Verdict.p "sal is not a parameter" (not (Set.mem l.Tensor.params sal));
+  (* No [try]: on a refusal the run fails, rather than a printed exception being promotable. *)
+  let ctx, gu_routine = Context.compile ctx update IDX.empty in
+  let ctx = Context.run ctx gu_routine in
+  show_placement "saliency grad" ctx (grad_of sal);
+  show_values "saliency grad (expect 6*sal = 24 30)" ctx (grad_of sal);
+  Verdict.p_close "saliency grad equals 6*sal"
+    (Context.get_values ctx (grad_of sal))
+    [| 24.; 30. |]
+    ~tol:(fun _ -> 1e-6)
+
 let () =
   fused ();
   split_raw ();
-  split_to_routine ()
+  split_to_routine ();
+  saliency ()

@@ -789,6 +789,18 @@ let%track7_sexp op ~(label : string list) ?(ternary_op = Shape.Pointwise_tern)
     (* A gradient is an accumulator: zero is its correct entry value, so a separately compiled
        routine may read it before any backprop wrote it (gh-ocannl-1462). *)
     Tn.mark_zero_valid g;
+    (* A differentiable term's gradient (a [Require_grad] leaf: an optimized input, a saliency
+       target) has no reader inside its routine -- no backprop code reads a terminal gradient -- so
+       its only readers are the host and later routines (an optimizer step). Declare the observation
+       intent [param] declares for parameter gradients, which keeps it out of the unobservable
+       [Local] class and the liveness planner's aliasing while leaving [Virtual] recomputation
+       available (gh-ocannl-1743). The leaf's value carries the intent too: a parameter's value is
+       [On_device] by its initialization, while a term's value is placed like any forward result and
+       could settle [Local] -- and a [Virtual] gradient recomputes from it, so a [Local] value would
+       leave the gradient unobservable after all. *)
+    if terminal_backprop then (
+      Tn.set_observable g;
+      Tn.set_observable t.value);
     note_open_node g;
     (* Apply delayed top-down precision updates to parameter gradient subtensors *)
     List.iter top_down_ts ~f:(fun ti ->
@@ -1183,7 +1195,9 @@ let%debug7_sexp param ?(require_grad = true) ~t (name : string) ?(more_label = [
      optimizer step's read is an ordinary cross-routine use the lineage can serve (a fused
      forward+backprop+update block may still inline them entirely). [set_observable] only forbids
      resolving them into the [Local] unobservable class; [Virtual] stays available via
-     recomputation. *)
+     recomputation. A differentiable non-parameter term gets the same intent in [op]
+     (gh-ocannl-1743); this one is still needed because [force_param_diff] mints a fresh
+     gradient. *)
   (match t.diff with
   | Some diff -> Tn.set_observable diff.grad
   | None -> ());
