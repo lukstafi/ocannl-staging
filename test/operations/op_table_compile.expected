@@ -1,0 +1,9 @@
+no in-domain arm renders and then fails the backend's compiler: true
+every failing routine's failure is pinned to one arm: true
+every refused arm is one the C reference refuses too: true
+every storage precision the backend holds compiled at least one arm: true
+byte Min over an integer-promoted sum compares before narrowing: true
+byte math over an integer operand keeps its float result until the store: true
+byte Min compares float-valued operands as floats: true
+byte Min of a float and a NaN intermediate is the float, as fmin's is: true
+byte Trunc truncates a float-valued operand: true
