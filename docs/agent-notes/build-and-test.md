@@ -1522,9 +1522,18 @@ in the `tools/*.sh` scripts (gh-ocannl-1111) and in the string literals of the O
   and dune has no boundary-preserving expansion, where argv preserved boundaries. It is given up
   loudly — every word of a response file is a dependency dune materialized, so `Scan_argv.expand`
   refuses a word that names nothing on disk rather than scanning two phantoms in place of one file.
-  The repository has no such path today. The scans still expanding `%{deps}` into argv keep
-  growing toward the cap: `verdict_ratchet` crossed it in 2026-10, a day after measuring 32.5K
-  characters (gh-ocannl-1720).
+  The repository has no such path today. `command_line_length_scan` (a `scans` member,
+  gh-ocannl-1748) holds the rule on Linux, where no cap exists to fail: a dependency SET (a glob,
+  `source_tree` or `package` reached through `%{deps}` or a named dependency) on a spawned command
+  line is refused whatever its size today, because dune's globs also match generated files (about
+  half of a `.filelist` is `.pp.ml` renderings) and no reading of the source tree bounds them —
+  `verdict_ratchet` crossed the cap a day after measuring 32.5K characters (gh-ocannl-1720). Every
+  other spawned line is bounded from its pforms and fails at 28,000 characters (7,000 for a
+  `(system ...)` line, which dune hands to `cmd.exe`, capped at 8,191); a pform with no
+  bound, an unjudged `%{read:...}` and an action head the scan does not place are refused too. A
+  `(test)` stanza may declare no targets, so it writes its response file under `(no-infer ...)` and
+  lists its own `<name>.exe` in `deps`, which `no-infer` stops `%{test}` declaring
+  (`slot_kind_live` is the pattern).
 - A Windows checkout with `core.symlinks=false` (git's default there without Developer Mode) writes
   every git symlink as a small TEXT FILE holding the link target. The repository has around twenty —
   `docs/in-progress/` and `docs/research/` are views onto `docs/proposals/` — so any scan that reads

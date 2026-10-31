@@ -540,6 +540,25 @@ let raw_entries =
         "[scanner-refusal:d3e7969b1266fa6b311234da304986db] line containing no";
         "[scanner-refusal:4186a2cb3aaa270f0e693d87e91d2e2d] undeclared file present";
       ] );
+    ( "command_line_length_scan.ml",
+      [
+        "[scanner-refusal:7b1d721a6b358055eeef13e57e5ba202] source tree reads";
+        "[scanner-refusal:69918b599474e445c1e2dce74dc3e841] every spawned command";
+        "[scanner-refusal:6eba8bdcf1112c04fdf6c29d4770c94a] bounded spawned command";
+        "[scanner-refusal:15437884bd1d780ac790343204eab7e4] every judged";
+        "[scanner-refusal:e22a999e7b876b3b14333e3000c76c04] response file default";
+        "[scanner-refusal:407d4f902a30caffd73b344ba63b6731] gh-ocannl-1720's shape a";
+        "[scanner-refusal:23074ca9ed294d7115c4a6c3d3c6e5eb] named dependency bound";
+        "[scanner-refusal:fee1a23a89df95042e6931bab5c95fa5] whose expansion reaches";
+        "[scanner-refusal:51a97beb27d22afda197ecf8855fa059] line that reaches";
+        "[scanner-refusal:b605b3e6ab959664f78a63dbbbe15d16] cmd.exe's";
+        "[scanner-refusal:6438c6083e355a1d9525b4508fc34320] bound is refused";
+        "[scanner-refusal:8abbbf622b67401b3c6ed085c0e56eef] no judgment bounds";
+        "[scanner-refusal:1156b111ec97fe778b6dbcba4ce8e21c] head on neither";
+        "[scanner-refusal:c89bc9f1b5b4e0adddd25e00a9c88da7] scan cannot resolve";
+        "[scanner-refusal:d71d7140161f2e19abd0f58123eaea02] an include stanza";
+        "[scanner-refusal:f2f50b0ccfbbada97516cea48cbc3f16] file sexplib would";
+      ] );
     ( "optional_arg_inventory.ml",
       [
         "[scanner-refusal:924efa1e307f7c5a40712dd66311abe1] the inventory nothing";
