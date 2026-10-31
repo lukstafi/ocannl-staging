@@ -224,7 +224,7 @@ let raw_entries =
       [
         "[scanner-refusal:83dfdd0395c402128515f27b2f3b1b1c] the exclusion for";
         "[scanner-refusal:3f0b314f29005911be716581fa1a4f10] the scan raised";
-        "[scanner-refusal:838522f87adecd27fba1a3d8c73457fb] per-test alias gh-ocannl-1533";
+        "[scanner-refusal:cf8b947a00d5153ebc294985137e0a8a] per-test alias gh-ocannl-1533";
         "[scanner-refusal:564de56163a842792f2175c0c12d75d5] Utils.build_files_dir";
         "[scanner-refusal:b1a8055bff15f499f2f143975afca3d7] reaches the stale-exclusion";
         "[scanner-refusal:2c67621c20b4be85e0176da0370f83cb] reaches the scanner-defect";
@@ -236,6 +236,7 @@ let raw_entries =
         "[scanner-refusal:532d3ed986dd6559fec87d780769ee1f] declares module";
         "[scanner-refusal:a59159ac0fd0f431da9519f8016e6762] every scanned root";
         "[scanner-refusal:c995ea0a058a228bf654449befcccb4b] meets its source-site";
+        "[scanner-refusal:1b40c8a4f6d202c5b6563c1565f86060] tests building their";
         "[scanner-refusal:d246f03ca5c483db40b94796658cf426] every source handed";
         "[scanner-refusal:73a439e337c34309cf51b52176da80ad] alias that re-runs";
         "[scanner-refusal:8879574435d6aa60f13f262f594c3d45] source handed over";

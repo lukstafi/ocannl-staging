@@ -54,7 +54,17 @@
     aliases that re-run it -- read from the dune files of the same roots by
     {!Test_utils.Rerun_aliases}, with the pform substitution a golden's rule makes -- and the golden
     closes on their union, ready to hand to [tools/test-run.sh run build]. A member no alias can be
-    found for fails the run: the list is only worth reading if it is the whole of what to run. *)
+    found for fails the run: the list is only worth reading if it is the whole of what to run.
+
+    {1 The tests that build their own kernel text}
+
+    A second population breaks on a codegen change without pinning anything: tests compiling or
+    executing kernel text that did not come out of the [Assignments] pipeline -- a staged callback's
+    verbatim text, a hand-built lowering through the [?prelowered] seam, a shipped kernel compiled
+    alone. gh-ocannl-1338 ran every text pin on CUDA and HIP and master still went red on one of
+    these (gh-ocannl-1685). They are listed in a section of their own, with the support values that
+    reach such text DERIVED from the sources ({!Test_utils.Kernel_exec_scan}) and their own closing
+    list of aliases, which a codegen change runs on every GPU backend. *)
 
 open Base
 open Stdio
@@ -67,6 +77,7 @@ module Scan = Test_utils.Codegen_text_scan
 module Floors = Test_utils.Scan_floors
 module Attempt = Test_utils.Scan_attempt
 module Rerun = Test_utils.Rerun_aliases
+module Exec = Test_utils.Kernel_exec_scan
 
 (** Lower bounds per scanned root, well below the census of the day they were written. See
     {!Test_utils.Scan_floors}: a glob that breaks goes to zero, a member added moves nothing. *)
@@ -79,6 +90,16 @@ let golden_floors = [ ("test", 12); ("arrayjit/test", 2) ]
     first version of this scan did not model, and which made a whole root look empty (Codex P2,
     round 2). *)
 let source_floors = [ ("test", 20); ("arrayjit/test", 2) ]
+
+(** The tests building their own kernel text, likewise floored: [test/operations] alone held 47 on
+    the day gh-ocannl-1685 derived them. *)
+let exec_floors = [ ("test", 20) ]
+
+(** The sources handed over only so that the harness frontier can be derived from them: the runners'
+    support libraries, which tests link ([Bench_harness]) but which are no test themselves, so no
+    census of members reads them. Their [dune] file comes too, since what makes a module a harness
+    is the [(library)] stanza owning it. *)
+let harness_only_root = "benchmarks/"
 
 (** Files the globs hand over that are not members of either population, each for a reason that is
     about this scan rather than about them.
@@ -128,9 +149,10 @@ let refuse_unplaced ~fail unplaced =
   List.iter unplaced ~f:(fun path ->
       fail
         (Printf.sprintf
-           "%s pins generated text, and no stanza of the dune files handed over re-runs it by an \
-            alias -- no rule diffs it and no rule or test runs its module -- so a codegen change \
-            cannot name what to run for it; give it a per-test alias (gh-ocannl-1533)"
+           "%s pins generated text or builds kernel text of its own, and no stanza of the dune \
+            files handed over re-runs it by an alias -- no rule diffs it and no rule or test runs \
+            its module -- so a codegen change cannot name what to run for it; give it a per-test \
+            alias (gh-ocannl-1533)"
            path))
 
 (* gh-ocannl-1294: a test that opens build_files/ itself reads whatever is there -- a previous run's
@@ -244,9 +266,10 @@ let refusal_control ~wrapper =
     unplaced_refused := true;
     Test_utils.Refusal_control_manifest.observe_failure ~source
       ~format:
-        "%s pins generated text, and no stanza of the dune files handed over re-runs it by an \
-         alias -- no rule diffs it and no rule or test runs its module -- so a codegen change \
-         cannot name what to run for it; give it a per-test alias (gh-ocannl-1533)"
+        "%s pins generated text or builds kernel text of its own, and no stanza of the dune files \
+         handed over re-runs it by an alias -- no rule diffs it and no rule or test runs its \
+         module -- so a codegen change cannot name what to run for it; give it a per-test alias \
+         (gh-ocannl-1533)"
   in
   let stanzas =
     Rerun.stanzas_of
@@ -283,7 +306,8 @@ let () =
     List.filter arguments ~f:(fun (name, _) -> String.is_suffix name ~suffix)
   in
   let golden_files = of_suffix ".expected" in
-  let all_ml = of_suffix ".ml" in
+  let in_harness_only_root (name, _) = String.is_prefix name ~prefix:harness_only_root in
+  let harness_only_ml, all_ml = List.partition_tf (of_suffix ".ml") ~f:in_harness_only_root in
   (* The dune files of the scanned roots, whose rules say which alias re-runs each member. *)
   let stanzas =
     List.filter arguments ~f:(fun (name, _) ->
@@ -377,6 +401,50 @@ let () =
                   Scan.classify_associated ~path:name ~contents:(read on_disk) ~source))
   in
   let goldens = by_itself @ associated in
+  (* gh-ocannl-1685: the tests building their own kernel text. The harness is every support module
+     -- a module some [(library)] stanza owns, or a runner library's -- read for the values reaching
+     such text; the members are the test sources reaching them, or reaching such text directly. *)
+  let parses (name, on_disk) =
+    let contents = read on_disk in
+    match Attempt.run (fun () -> ignore (Scan.structure_of contents)) with
+    | Attempt.Scanned () -> Some (Exec.module_name_of_path name, contents)
+    | Attempt.Unparsed _ | Attempt.Raised _ ->
+        (* A test-root source that fails here failed the census above already. *)
+        if in_harness_only_root (name, on_disk) then unparsed := name :: !unparsed;
+        None
+  in
+  let unparsed_by_census = !unparsed in
+  let harness =
+    Exec.harness
+      (List.filter_map
+         (List.filter (harness_only_ml @ source_files) ~f:(fun (name, _) ->
+              Rerun.owned_by_library stanzas ~path:name))
+         ~f:parses)
+  in
+  let executing =
+    List.filter_map source_files ~f:(fun (name, on_disk) ->
+        if List.mem unparsed_by_census name ~equal:String.equal then None
+        else
+          match Attempt.run (fun () -> Exec.classify harness ~contents:(read on_disk)) with
+          | Attempt.Scanned [] -> None
+          | Attempt.Scanned routes -> Some (name, routes)
+          | Attempt.Unparsed _ ->
+              unparsed := name :: !unparsed;
+              None
+          | Attempt.Raised exn ->
+              raised := (name, exn) :: !raised;
+              None)
+    (* A support module reaching such text is the harness its callers are found through, not a test
+       a codegen change runs by name -- unless something does run it, as an inline-test module. *)
+    |> List.filter_map ~f:(fun (name, routes) ->
+        match Rerun.for_source stanzas ~path:name with
+        | [] when Rerun.owned_by_library stanzas ~path:name -> None
+        | runs -> Some (name, routes, runs))
+  in
+  let exec_unplaced =
+    List.filter_map executing ~f:(fun (name, _, runs) ->
+        if List.is_empty runs then Some name else None)
+  in
   List.iter !unparsed ~f:(fun path ->
       Verdict.fail
         (Printf.sprintf
@@ -402,11 +470,14 @@ let () =
       (Map.to_alist golden_routes @ Map.to_alist site_routes)
       ~f:(fun (path, routes) -> if List.is_empty routes then Some path else None)
   in
-  refuse_unplaced ~fail:Verdict.fail unplaced;
+  refuse_unplaced ~fail:Verdict.fail (unplaced @ exec_unplaced);
   let site_paths = List.map sites ~f:(fun s -> s.Scan.site_path) in
+  let exec_paths = List.map executing ~f:(fun (name, _, _) -> name) in
   Floors.report ~floors:golden_floors ~noun:"golden" ~what:"Goldens holding emitted text"
     golden_paths;
   Floors.report ~floors:source_floors ~noun:"site" ~what:"Sources pinning emitted text" site_paths;
+  Floors.report ~floors:exec_floors ~noun:"test" ~what:"Tests building their own kernel text"
+    exec_paths;
   eprintf "Files handed over: %d goldens, %d sources.\n" (List.length golden_files)
     (List.length source_files);
   print_endline
@@ -488,7 +559,32 @@ let () =
   |> List.concat_map ~f:(List.map ~f:(fun (r : Rerun.route) -> r.Rerun.alias))
   |> List.dedup_and_sort ~compare:String.compare
   |> List.iter ~f:print_endline;
+  printf
+    "\n\
+     == tests compiling or executing kernel text they built themselves ==\n\
+     They pin nothing, and a codegen change breaks them all the same (gh-ocannl-1685): a staged\n\
+     callback's text is emitted verbatim and renamed by nothing, a [?prelowered] lowering is an IR\n\
+     shape the pipeline never emits, a shipped kernel compiled alone loses the batch around it. Run\n\
+     them on every GPU backend. The rules are stated in test/support/kernel_exec_scan.ml.\n";
+  printf "support values reaching such text, derived from the sources:\n";
+  Map.iteri harness.Exec.values ~f:(fun ~key ~data ->
+      printf "%s [%s]\n" key (String.concat ~sep:"; " (List.map data ~f:Exec.route_name)));
+  printf "\nroots scanned: %s\n"
+    (String.concat ~sep:", " (Floors.roots ~floors:exec_floors exec_paths));
+  List.iter executing ~f:(fun (name, routes, runs) ->
+      printf "%s [%s]\n" name
+        (String.concat ~sep:"; "
+           (List.map routes ~f:Exec.route_name
+           @ [ "run by " ^ String.concat ~sep:", " (List.map runs ~f:Rerun.render) ])));
+  printf "\n== the aliases a codegen change runs on every GPU backend ==\n";
+  List.concat_map executing ~f:(fun (_, _, runs) -> List.map runs ~f:(fun r -> r.Rerun.alias))
+  |> List.dedup_and_sort ~compare:String.compare
+  |> List.iter ~f:print_endline;
   printf "\n";
+  let exec_violations =
+    Floors.violations ~floors:exec_floors ~noun:"test"
+      ~floors_name:"codegen_text_inventory.exec_floors" exec_paths
+  in
   let golden_violations =
     Floors.violations ~floors:golden_floors ~noun:"golden"
       ~floors_name:"codegen_text_inventory.golden_floors" golden_paths
@@ -523,14 +619,16 @@ let () =
                 wrapper -- the emitter frontier is derived from these, so a census taken without \
                 it is short by however many renderers it exports"
                i.Emitter_frontier.library m)));
-  List.iter (golden_violations @ source_violations) ~f:Verdict.fail;
+  List.iter (golden_violations @ source_violations @ exec_violations) ~f:Verdict.fail;
   Verdict.p_empty "every scanned root meets its golden floor" ~over:golden_paths golden_violations;
   Verdict.p_empty "every scanned root meets its source-site floor" ~over:site_paths
     source_violations;
+  Verdict.p_empty "every scanned root meets its floor of tests building their own kernel text"
+    ~over:exec_paths exec_violations;
   Verdict.p_empty "every source handed over parsed as OCaml" ~over:source_files !unparsed;
   Verdict.p_empty "every member has an alias that re-runs it"
-    ~over:(golden_paths @ List.map sites ~f:(fun s -> s.Scan.site_path))
-    unplaced;
+    ~over:(golden_paths @ List.map sites ~f:(fun s -> s.Scan.site_path) @ exec_paths)
+    (unplaced @ exec_unplaced);
   Verdict.p_empty "the scan raised on no source handed over" ~over:source_files !raised;
   Verdict.p_empty "every exclusion still names a file the globs hand over" ~over:handed_over stale;
   Verdict.p "every module the scanned library interfaces declare was read"

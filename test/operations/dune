@@ -4843,7 +4843,10 @@
 ; and `%{deps}` hands the whole dependency set to the exe, which keeps the goldens and the sources
 ; among them. The same roots' `dune` files come too: each member is printed with the aliases that
 ; re-run it, read from the rule that diffs a golden or the stanza that runs a source, because a
-; snapshot's alias is not its test's (`runtest-top_down_prec-extension`, gh-ocannl-1533).
+; snapshot's alias is not its test's (`runtest-top_down_prec-extension`, gh-ocannl-1533). The
+; runners' support libraries come as well, sources and dune file: tests link `Bench_harness`, and the
+; tests compiling or executing kernel text they built themselves are found through the support values
+; reaching it (gh-ocannl-1685).
 
 (executable
  (name codegen_text_inventory)
@@ -4902,7 +4905,9 @@
   (glob_files_rec ../../arrayjit/test/*.expected)
   (glob_files_rec ../../arrayjit/test/*.ml)
   (glob_files_rec ../../test/dune)
-  (glob_files_rec ../../arrayjit/test/dune))
+  (glob_files_rec ../../arrayjit/test/dune)
+  (glob_files ../../benchmarks/runners/ocannl/*.ml)
+  (glob_files ../../benchmarks/runners/ocannl/dune))
  (action
   (progn
    (with-stdout-to

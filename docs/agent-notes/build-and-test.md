@@ -2446,6 +2446,26 @@ in the `tools/*.sh` scripts (gh-ocannl-1111) and in the string literals of the O
   give it a per-test alias. The derivation reads the rule shapes this repository spells; it is a
   point-in-time reading of the dune files, not of `dune rules`, and `tools/test-run.sh affected`
   stays the reach-by-linking answer.
+- **The same golden then lists the tests that build their own kernel text** (gh-ocannl-1685): they
+  pin nothing, so the text census cannot see them, yet a codegen change breaks them first. When
+  gh-ocannl-1338 renamed every GPU node identifier to `t_<name>`, all 103 text pins passed on CUDA
+  and HIP and master still went red: `shipped_kernels_alone`'s staged callback writes
+  `sk_staged[0] = 2.0f;` verbatim, and nothing renames inside a `Staged_compilation`.
+  `Test_utils.Kernel_exec_scan` names three routes: CONSTRUCTING a `Staged_compilation` (a pattern
+  matching it builds nothing); passing `?prelowered` to `Context.compile`/`compile_outcome`, which
+  compiles a hand-held lowering as written (`link_delta`'s `~prelowered:true` links nothing and is
+  not the seam); and calling a support value that reaches either, directly or through other values.
+  That third route is how `Ll_test.execute` and `Bench_harness.time_shipped_kernels` (each shipped
+  kernel compiled alone) are found. The support values are derived, not listed: every module some
+  `(library)` stanza owns, in the test roots and in `benchmarks/runners/ocannl` (whose sources and
+  `dune` the rule also hands over), closed under reference and `include`. The golden prints that
+  frontier. A test reaches it by a qualifier, an alias of one, or an `open`. The reading errs toward
+  listing: a staged callback counts even in a test that only renders it, since its text is opaque by
+  design and the scan does not guess whether a compiler sees it. The section closes on its own alias
+  list, the one to hand to `tools/test-run.sh run build` on each GPU backend. A member with no alias
+  fails the run, as a text member does. `codegen_text_scan_cases` pins each route beside its near
+  miss, including the negative control: a fixture whose staged callback writes a node by its bare
+  label.
 - **A test reaches generated text three ways, and the inventory tags which.** Through
   `Test_utils.Generated` (the freshness-checked artifact reader); by opening `build_files/` itself,
   which two tests predating that module still do; or **in memory**, calling an emitter and

@@ -23,6 +23,7 @@ open Base
 module Scan = Test_utils.Codegen_text_scan
 module Attempt = Test_utils.Scan_attempt
 module Rerun = Test_utils.Rerun_aliases
+module Exec = Test_utils.Kernel_exec_scan
 
 let printf = Stdio.printf
 let fail fmt = Printf.ksprintf Verdict.fail fmt
@@ -1463,6 +1464,7 @@ let rerun_tree =
   (run %{dep:.lessons.inline-tests/inline-test-runner.exe} inline-test-runner lessons
    -only-test lesson_a.ml)))
 (subdir nested (rule (alias runtest-deep) (action (diff deep.expected deep.actual))))
+(library (name support) (modules helper))
 |}
       );
       ("u", {|(rule (alias runtest-remote) (action (run %{dep:../t/tool.exe})))|});
@@ -1505,6 +1507,98 @@ let rerun_cases =
     ("a module an exclusion names is not :standard's", source "t/excluded.ml", "none");
     ("a module in a directory of rules alone is run by nothing", source "u/stray.ml", "none");
   ]
+
+(** Which sources are support modules -- run only inside the tests linking them, so a harness the
+    gh-ocannl-1685 census reads and never a member it must re-run by name. *)
+let library_cases =
+  [
+    ("a plain library's module is a support module", "t/helper.ml", true);
+    ("an inline-test library's module is one too", "t/lesson_a.ml", true);
+    ("a test's module is not", "t/plain.ml", false);
+    ("a module no stanza owns is not", "u/stray.ml", false);
+  ]
+
+(** The tests compiling or executing kernel text they built themselves (gh-ocannl-1685), on a
+    harness built to hold each route {!Exec.harness} follows -- a seam call, a value reaching one,
+    an [include] passing values on -- beside the values that reach nothing. *)
+let exec_harness =
+  Exec.harness
+    [
+      ( "Ll_test",
+        {|let link ~name o = Context.compile ~name ~prelowered:o ctx comp bindings
+let run ~name o = Context.run (link ~name o)
+let execute ~name o ~seed ~read = ignore (seed, read); run ~name o
+let cycle x = x + 1|}
+      );
+      ("Ll_wrap", {|include Ll_test|});
+      ( "Bench_harness",
+        {|let compile_shipped_kernel ~ctx seg =
+  let compile () = Context.compile_outcome ~prelowered:seg ctx in
+  compile
+let time_shipped_kernels routines = List.map routines ~f:(fun r -> compile_shipped_kernel ~ctx r)
+let writes_of llc = llc|}
+      );
+      ("Pure", {|let delta ctx o = Context.link_delta ~prelowered:true ctx o [ o ]|});
+    ]
+
+let exec_frontier_expected =
+  "Bench_harness.compile_shipped_kernel [prelowered compile]; Bench_harness.time_shipped_kernels \
+   [through Bench_harness.compile_shipped_kernel]; Ll_test.execute [through Ll_test.run]; \
+   Ll_test.link [prelowered compile]; Ll_test.run [through Ll_test.link]; Ll_wrap.execute [through \
+   Ll_test.execute]; Ll_wrap.link [through Ll_test.link]; Ll_wrap.run [through Ll_test.run]"
+
+let exec_cases =
+  [
+    (* The negative control of the whole census: gh-ocannl-1338's red, a staged callback writing a
+       node by its bare label where the GPU dialects declare [t_<label>]. *)
+    ( "a staged callback naming a node is a member",
+      {|let llc = LL.Staged_compilation (fun () -> PPrint.string "sk_staged[0] = 2.0f;")
+let () = H.run_train_step routines ctx_ref ~step:0|},
+      "staged callback" );
+    ( "matching on the constructor builds nothing",
+      {|let opaque = function LL.Staged_compilation _ -> true | _ -> false|},
+      "none" );
+    ( "a hand-held lowering through the seam is a member",
+      {|let _ = Context.compile ~name ~prelowered:o ctx Ir.Assignments.empty_comp bindings|},
+      "prelowered compile" );
+    ( "the seam forwarded as an optional argument is one too",
+      {|let compile ?prelowered ctx = Context.compile_outcome ?prelowered ctx comp bindings|},
+      "prelowered compile" );
+    ( "link_delta's ~prelowered:true links nothing",
+      {|let _ = Context.link_delta ~prelowered:true ctx o [ o ]|},
+      "none" );
+    ( "a harness value reaching the seam, by its qualifier",
+      {|let got = Ll_test.execute ~name o ~seed ~read|},
+      "through Ll_test.execute" );
+    ("a harness value reaching nothing is not", {|let v = Ll_test.cycle 3|}, "none");
+    ( "a harness value reached through an alias of its module",
+      {|module H = Bench_harness
+let kernels = H.time_shipped_kernels routines|},
+      "through Bench_harness.time_shipped_kernels" );
+    ( "a harness value reached through a library's qualifier",
+      {|let got = Test_support.Ll_test.run ~name o|},
+      "through Ll_test.run" );
+    ( "a harness value reached by its bare name under an open",
+      {|open Ll_test
+let got = execute ~name o ~seed ~read|},
+      "through Ll_test.execute" );
+    ( "a test's own value of a harness value's name, nothing opened, is not",
+      {|let execute x = x
+let got = execute 1|},
+      "none" );
+    ( "a support module including the harness passes its values on",
+      {|let got = Ll_wrap.run ~name o|},
+      "through Ll_wrap.run" );
+    ("a link-free harness value is not", {|let d = Pure.delta ctx o|}, "none");
+    ( "a comment or a string naming the routes is not",
+      {|(* Context.compile ~prelowered:o *)
+let note = "LL.Staged_compilation"|},
+      "none" );
+  ]
+
+let render_exec = function
+  | [] -> "none"
+  | routes -> String.concat ~sep:"; " (List.map routes ~f:Exec.route_name)
 
 let render_routes = function
   | [] -> "none"
@@ -1562,6 +1656,25 @@ let () =
   Verdict.p_all "every partial-itemisation boundary has a case meeting it alone"
     Scan.all_of_boundary ~f:(fun boundary ->
       List.exists boundary_cases ~f:(fun (b, _, _, _) -> Poly.equal b boundary));
+  List.iter library_cases ~f:(fun (name, path, expected) ->
+      let found = Rerun.owned_by_library rerun_tree ~path in
+      if Bool.equal found expected then printf "ok: support module -- %s\n" name
+      else fail "support module -- %s: expected %b, found %b" name expected found);
+  let frontier =
+    String.concat ~sep:"; "
+      (List.map (Map.to_alist exec_harness.Exec.values) ~f:(fun (value, routes) ->
+           value ^ " [" ^ String.concat ~sep:"; " (List.map routes ~f:Exec.route_name) ^ "]"))
+  in
+  if String.equal frontier exec_frontier_expected then
+    printf "ok: harness -- the frontier closes under reference and include, and nothing else\n"
+  else fail "harness: expected [%s], found [%s]" exec_frontier_expected frontier;
+  List.iter exec_cases ~f:(fun (name, source, expected) ->
+      let found =
+        Attempt.attempted ~what:"executing" ~name ~default:"<unscanned>" (fun () ->
+            render_exec (Exec.classify exec_harness ~contents:source))
+      in
+      if String.equal found expected then printf "ok: executing -- %s\n" name
+      else fail "executing -- %s: expected [%s], found [%s]" name expected found);
   List.iter rerun_cases ~f:(fun (name, f, expected) ->
       let found = render_routes (f ()) in
       if String.equal found expected then printf "ok: rerun -- %s\n" name
