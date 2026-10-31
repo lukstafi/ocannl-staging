@@ -1487,25 +1487,27 @@ let block ?(auto_block = 0) () =
    refused ([Non_virtual 148]), and so is the whole-tile init ahead of the scan, a write the
    enclosing row loops repeat ([147]) -- which is the soundness argument for carrying it through
    memory, so the test pins that decision, not a request of ours. Memoized like the scope-local
-   nodes, per shape: a session sweeping the block size mints one tile per size. *)
-let scores_label = "block_scores"
-let numerator_label = "block_numerator"
+   nodes, per shape: a session sweeping the block size mints one tile per size.
 
-let fold_tile_role (tn : Tn.t) =
-  if not (String.equal tn.Tn.namespace namespace) then None
-  else
-    match tn.Tn.label with
-    | l :: _ when String.equal l scores_label -> Some `Scores
-    | l :: _ when String.equal l numerator_label -> Some `Numerator
-    | _ -> None
+   A tile's role is what the minting recorded for its uid, which no public field of a node can forge
+   -- the [reassociable] argument (gh-ocannl-1722); the labels are display names only. Never
+   cleared, for the same reason: a [reset] of the memo table must not strip the role from a tile
+   already in some lowered code. *)
+let tile_roles : (int, [ `Scores | `Numerator ]) Hashtbl.t = Hashtbl.create (module Int)
+let fold_tile_role (tn : Tn.t) = Hashtbl.find tile_roles tn.Tn.uid
 
-let tile_node ~label ~(like : Tn.t) ~dims prec =
+let tile_node ~role ~(like : Tn.t) ~dims prec =
+  let label = match role with `Scores -> "block_scores" | `Numerator -> "block_numerator" in
   let key = label ^ ":" ^ String.concat_array ~sep:"x" (Array.map dims ~f:Int.to_string) in
   Hashtbl.find_or_add minted (like.Tn.uid, key) ~default:(fun () ->
-      Tn.create ~namespace (Tn.Specified prec) ~id:(fresh_id ()) ~label:(label :: like.Tn.label)
-        ~unpadded_dims:(lazy dims)
-        ~padding:(lazy None)
-        ())
+      let tn =
+        Tn.create ~namespace (Tn.Specified prec) ~id:(fresh_id ()) ~label:(label :: like.Tn.label)
+          ~unpadded_dims:(lazy dims)
+          ~padding:(lazy None)
+          ()
+      in
+      Hashtbl.set tile_roles ~key:tn.Tn.uid ~data:role;
+      tn)
 
 (* {2 Index arithmetic} *)
 
@@ -1744,8 +1746,8 @@ let find_fold r (nz : normalizer) ~block : fold option =
     | (Ops.Double_prec _ as p), _ | _, (Ops.Double_prec _ as p) -> p
     | p, _ -> p
   in
-  let s_tile = tile_node ~label:scores_label ~like:nz.x ~dims:[| bk |] mp in
-  let u_tile = tile_node ~label:numerator_label ~like:vp.o_tn ~dims:[| dv |] prec in
+  let s_tile = tile_node ~role:`Scores ~like:nz.x ~dims:[| bk |] mp in
+  let u_tile = tile_node ~role:`Numerator ~like:vp.o_tn ~dims:[| dv |] prec in
   (* A tile past the stack threshold would resolve to an [On_device] buffer, one for every row the
      schedule runs in parallel: the rows would race on it. The fold needs thread-private tiles. *)
   let* () =
