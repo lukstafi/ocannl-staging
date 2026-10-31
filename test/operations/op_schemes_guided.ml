@@ -1,10 +1,10 @@
-(* gh-ocannl-1761: guided registration, the default [op_shape_schemes] mode. A schemed [%op]
-   application instantiates its scheme once against the arguments, then runs its body; every update
-   step the body builds that matches the next step of the trace registers without deriving or
-   solving its own inequalities, its new shapes unified with the scheme's renamed rows. The oracle
-   is the same construction with the schemes off: closed shapes, ids, random draws, values and
-   gradients must be identical. Each claim about the mechanism comes with a control that comes out
-   the other way: schemes off, checking mode, or a sabotaged guide. *)
+(* gh-ocannl-1761: guided registration, the opt-in [op_shape_schemes=guided] mode, pinned below. A
+   schemed [%op] application instantiates its scheme once against the arguments, then runs its body;
+   every update step the body builds that matches the next step of the trace registers without
+   deriving or solving its own inequalities, its new shapes unified with the scheme's renamed rows.
+   The oracle is the same construction with the schemes off: closed shapes, ids, random draws,
+   values and gradients must be identical. Each claim about the mechanism comes with a control that
+   comes out the other way: schemes off, checking mode, or a sabotaged guide. *)
 
 open Base
 open Ocannl.Nn_blocks.DSL_modules

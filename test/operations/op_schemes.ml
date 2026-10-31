@@ -1,5 +1,5 @@
 (* gh-ocannl-1751: [%op] functions get their shape scheme automatically -- here in checking mode,
-   pinned below (the default is guided registration, gh-ocannl-1761: [op_schemes_guided]). The
+   the default, pinned below (guided registration, gh-ocannl-1761, is [op_schemes_guided]). The
    closure built at a function's [()] application traces the scheme of the function it returns (a
    function without a [()] stage: its first application); every application checks the scheme
    against its arguments' shapes, in a rewound window, before the body runs and registers as it

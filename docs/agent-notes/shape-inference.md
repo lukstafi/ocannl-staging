@@ -285,7 +285,7 @@ files.
   in reading order, never by id: a trace's ids come from the reserved range, and so do the ids in
   its errors' constraint sexps, which a golden must not pin (the tutorial prints only the message
   and the `Dim_mismatch` sizes).
-- Guided registration (gh-ocannl-1761, `Shape.Scheme.guided`, the default `op_shape_schemes`):
+- Guided registration (gh-ocannl-1761, `Shape.Scheme.guided`, opt-in `op_shape_schemes=guided`):
   `get_inequalities` is not only constraints. It unmarks `unused_shapes` (filtering the closure's
   Terminal/Shape rows), so a recording trace logs the unmarks it ATTEMPTS per step, not the set
   difference (an operand already used at the trace can be unused at an application). A match
@@ -302,3 +302,11 @@ files.
   guided body therefore stays pending. Shape-variable ids are not neutral under guided (inline
   registration mints variables guided skips): goldens printing open shapes after a schemed
   application (`test_extend_dsls`) move; tensor ids and node uids are neutral.
+- Scheme cost (gh-ocannl-1752, `test/operations/scheme_payoff.ml`, `Shape.registration_times`):
+  guided registration is SLOWER than inline (2.5x off at depth 1, 26-31x at depth 16), which is
+  why `check` is the default. Skipping `get_inequalities` saves little: the instantiated C' stays
+  pending beside the ties, each tie solve re-solves it, and every re-solve runs
+  `Row.closes_positive_rank_cycle`'s DFS over the persistent rank graph -- quadratic in depth
+  inside guided steps, a superlinear term even for `off`. Count before claiming a solver win:
+  `registration_counts` splits the store by source, and `closure_constraints` is the store at
+  closure. Error locality is the payoff that holds (`scheme_error_locality` is the catalogue).

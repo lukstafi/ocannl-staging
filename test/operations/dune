@@ -12229,7 +12229,7 @@
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
-;; gh-ocannl-1761: guided registration (the default op_shape_schemes mode) against schemes off:
+;; gh-ocannl-1761: guided registration (op_shape_schemes=guided, opt-in) against schemes off:
 ;; counts, fallbacks, divergence, refusals inside a body, nesting, and nn_blocks parity of dims,
 ;; ids, random initialization, values and gradients; each claim paired with a control.
 

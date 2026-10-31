@@ -1790,7 +1790,7 @@ module Scheme = struct
   let mode : mode Lazy.t =
     lazy
       (match
-         String.lowercase (Utils.get_global_arg ~default:"guided" ~arg_name:"op_shape_schemes")
+         String.lowercase (Utils.get_global_arg ~default:"check" ~arg_name:"op_shape_schemes")
        with
       | "guided" -> `Guided
       | "check" -> `Check

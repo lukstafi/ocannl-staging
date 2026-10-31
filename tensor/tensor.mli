@@ -465,15 +465,16 @@ module Scheme : sig
       parameter ([docs/syntax_extensions.md] says which qualify). The closure built at the [()]
       application -- or, for a function without a [()] stage, its first application -- traces the
       scheme. How each application uses it is the [op_shape_schemes] setting:
-      - [guided] (the default, gh-ocannl-1761): the scheme is instantiated against the arguments'
-        shapes once, persistently, and the body runs with its shape registration guided by the trace
-        -- each update step that matches the trace's next step registers without deriving or solving
+      - [check] (the default): each application checks the scheme against its arguments' shapes, in
+        a window that is always rewound, before the body runs and registers as it always does;
+      - [guided] (opt-in, gh-ocannl-1761; gh-ocannl-1752 measured it slower than [check] on every
+        stack, superlinearly in depth): the scheme is instantiated against the arguments' shapes
+        once, persistently, and the body runs with its shape registration guided by the trace --
+        each update step that matches the trace's next step registers without deriving or solving
         its own inequalities (see {!Shape.Scheme.guided}). Closed shapes, projections, generated
         code, ids and values are those of inline construction; the function's graph must not depend
         on state outside its closure and its arguments' shapes: a trace step the body does not build
         raises ["... the function built a different graph than at its trace"];
-      - [check]: each application checks the scheme against its arguments' shapes, in a window that
-        is always rewound, before the body runs and registers as it always does;
       - [off]: no schemes.
 
       A shape error that does not depend on the arguments raises at the trace, prefixed
