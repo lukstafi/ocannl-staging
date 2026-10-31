@@ -176,6 +176,21 @@ files.
   the gh-ocannl-476 sweep; `Relu` at `Bfloat16_prec` had fallen through to a catch-all commented
   `Byte_prec, Void_prec`. When adding a precision, audit every `unop_syntax`/`binop_syntax`
   catch-all arm.
+- That audit is mechanized: `test/operations/op_table_compile` compiles every in-domain
+  (operator, compute precision) arm of the selected backend through the `?prelowered` seam, under
+  every numerics policy's compute precision, and holds refusals to the C reference's (gh-ocannl-1731).
+  Run it on each backend's box after touching a table. Its first sweep found arms no value test
+  reached: MSL integer math (`exp(int)`, `fmax(int, int)`, `clamp(int, 0.0, 1.0)` are ambiguous,
+  and `1.0l` is a `long double` literal that crashed the Metal compiler service), nvrtc's
+  `fmax(0, uchar)`/`tanh(int)` ambiguity, `__half == 0.0` on CUDA and HIP, and cc's
+  `uint4x32_to_<prec>` conversion, which names no builtin. A plain conversion OUT of `uint4x32`
+  still means three things: cc refuses it, Metal reads the uniform conversion, CUDA and HIP lane 0.
+- The sweep's inlined operand is integer-valued (`a + b`); a FLOAT-valued subexpression at an
+  integer compute precision (an inlined `Sin`, `Sqrt`, or Metal's float-dividing `Recip`) is a class
+  it leaves out, and no backend handles it coherently: every table keeps the math result a float as
+  C does, so cc's integer `Mod` renders `%` over a double, and CUDA's integer `min(uchar, float)` is
+  ambiguous. Metal's integer `Max`/`Min`/`Relu` go through `Builtins_metal`'s `ocannl_max` /
+  `ocannl_min`, which compare in the operands' common type (`fmax`/`fmin` for a float one).
 - Tensor-node debug names become identifiers verbatim in the emitted kernel, so anything the
   backend also emits as a *name* must be reserved (`ident_blacklist`). Reserve it from the
   backend's own syntax functions, never from the C spellings: `C_syntax.op_syntax_idents` renders

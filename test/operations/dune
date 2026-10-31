@@ -11930,3 +11930,15 @@
   printbox-md
   printbox-ext-plot
   arrayjit.verdict))
+
+; op_table_compile (gh-ocannl-1731): every in-domain (operator, precision) arm of the selected
+; backend's operator tables renders and compiles, under every numerics policy's compute precision.
+
+(test
+ (name op_table_compile)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules op_table_compile)
+ (libraries base ocannl stdio arrayjit.verdict test_utils ll_test))
