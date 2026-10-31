@@ -837,12 +837,17 @@ files.
   different trajectory and never stops this search early. Deriving it costs one detection pass over
   the pristine program, forced lazily (the search, or a trajectory-matched warm hit, forces it; the
   `seeded untuned plan derived in` log line times it). `limits_field_classes` sanctions two paths
-  to `Untimed` fields from `tune`: `seeded_plan`, pinning that a definition `tune` reaches through
-  it records the digest, and `seeded_transform`, but only where the search-less fallback spells it
-  (gh-ocannl-1491): the local binding every `not search` branch of `tune` calls, found by the scan
-  rather than named, so a search path calling `seeded_transform` or a wrapper of it (`seeded_default`)
-  fails the scan. A new search-less branch must call that same fallback, or the sanction empties
-  and the scan refuses; one that legitimately ships something else extends the scan's forms.
+  to `Untimed` fields from `tune`: `seeded_plan`, pinning that EVERY definition `tune` reaches
+  through it names the digest, and `seeded_transform`, but only where the search-less fallback
+  spells it (gh-ocannl-1491): the local binding every `not search` branch of `tune` calls, found by
+  the scan rather than named, so a search path calling `seeded_transform` or a wrapper of it
+  (`seeded_default`) fails the scan. The `not search` flag counts only where `tune` forwards its own
+  `?search` (`helper ?search`, through any chain of helpers), and the fallback's own callers are
+  pinned (gh-ocannl-1570): each lies in such a branch or, on a path that tests no flag but does not
+  search either (a refused lineage, a failed deferred relink), carries `[@searchless "<why>"]` on
+  the call itself; any other caller, or a stray marker, fails the scan. A new search-less branch
+  must call that same fallback, or the sanction empties and the scan refuses; one that legitimately
+  ships something else extends the scan's forms.
 - **Every untuned fallback in `tune` ships the seeded plan, not the plain default** (gh-ocannl-1441).
   The post-search fallbacks (nothing timed, a budget cut that left the floor unmeasured, a failed
   winner replay) replay the plan the search seeded; the paths that never search (search off, a

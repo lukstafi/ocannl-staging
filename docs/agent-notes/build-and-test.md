@@ -148,7 +148,11 @@ in the `tools/*.sh` scripts (gh-ocannl-1111) and in the string literals of the O
   (staging#1362: a wrapper, a bare reference read as a call, a decoy flag, a buried call, a
   shadowed `not`, a rebinding alias). Prefer pins that only add edges or refusals; where a cut is
   unavoidable, state in the first push the one direction it pins and keep its recognizer a closed
-  list (Parsing sources in a scan).
+  list (Parsing sources in a scan). Pin what the cut trusts the same way: gh-ocannl-1570 bounded
+  that fallback's callers by adding an edge back to the route from every caller the closed forms
+  do not cover. What syntax cannot decide (a path that tests no flag yet does not search) becomes
+  an in-place marker with a reason on the call, and a marker that sanctions nothing adds the edge
+  too.
 - **For a D1 issue, document the list; add a scan only if it reuses an existing model UNCHANGED**
   (gh-ocannl-1535). A new reader of OCaml name resolution is open-ended, and each review round
   finds a form it misses: staging#1366's process-lifetime census widened `top_level_key_reach`

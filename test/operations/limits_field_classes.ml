@@ -23,12 +23,13 @@
    a binding record pattern READS), the accessor [Backend_intf.untimed_limits] is referenced only
    from [autotune.ml], and inside [autotune.ml] no top-level definition [Autotune.tune] reaches
    references one that (transitively) reaches the accessor -- past two sanctions: the seeded plan,
-   wherever [tune] calls it, and the seeded transform only where the search-less fallback spells it
-   (gh-ocannl-1491; its section below states the forms it reads). The codegen-stage modules are
-   thereby covered by the first rule. The reach is a call graph over [autotune.ml]'s top-level
-   bindings and modules by name, which over-approximates (a local shadowing a top-level name adds an
-   edge), so it can refuse wrongly but not pass wrongly within the file; other modules cannot reach
-   the fields at all.
+   wherever a definition [tune] reaches that names the plan's digest calls it, and the seeded
+   transform only where the search-less fallback spells it, the fallback called only from
+   search-less branches or a path marked as not searching (gh-ocannl-1491, gh-ocannl-1570; its
+   section below states the forms it reads). The codegen-stage modules are thereby covered by the
+   first rule. The reach is a call graph over [autotune.ml]'s top-level bindings and modules by
+   name, which over-approximates (a local shadowing a top-level name adds an edge), so it can refuse
+   wrongly but not pass wrongly within the file; other modules cannot reach the fields at all.
 
    The scan rules are pure functions over source text, run on synthetic violations and their nearest
    honest neighbours before the repository. *)
@@ -329,8 +330,12 @@ let top_level_graph ?(drop = []) (source : string) : (string * string list) list
 
 (* The top-level definitions of [source] that [root] reaches (itself included), and those of them
    that (transitively) reach a definition referencing [reader]. *)
-let reach ?(through = []) ?drop ~root ~reader (source : string) : string list * string list =
-  let graph = top_level_graph ?drop source in
+let reach ?(through = []) ?drop ?(add = []) ~root ~reader (source : string) :
+    string list * string list =
+  (* [add]: edges the source does not spell, each from a definition to another (gh-ocannl-1570). *)
+  let graph =
+    top_level_graph ?drop source @ List.map add ~f:(fun (from, into) -> (from, [ into ]))
+  in
   let edges name =
     List.concat_map graph ~f:(fun (n, refs) -> if String.equal n name then refs else [])
     |> List.filter ~f:(fun r -> List.Assoc.mem graph r ~equal:String.equal)
@@ -360,11 +365,23 @@ let reach ?(through = []) ?drop ~root ~reader (source : string) : string list * 
 
 let reached_readers ?through ~root ~reader source = snd (reach ?through ~root ~reader source)
 
-(* The route by which an [Untimed] reading may reach [Autotune.tune] wherever [tune] calls it: the
-   seeded untuned plan (gh-ocannl-1253), whose [auto] gate reads the capacity, and whose resolved
-   content digest joins the search trajectory's identity -- held below by requiring [tune] to name
-   the digest. *)
+(* The route by which an [Untimed] reading may reach [Autotune.tune]: the seeded untuned plan
+   (gh-ocannl-1253), whose [auto] gate reads the capacity, and whose resolved content digest joins
+   the search trajectory's identity. The cut is pinned in one direction (gh-ocannl-1570): EVERY
+   definition [tune] reaches that names the plan -- each edge the cut removes, read off the same
+   graph -- also names [seeded_plan_digest] ({!plan_without_digest}). Naming the digest is read as
+   recording it; where its value flows is not modelled. *)
 let sanctioned = [ "seeded_plan" ]
+let plan_digest = "seeded_plan_digest"
+
+(* The definitions [root] reaches (the cut applied) that name the seeded plan but not its digest. *)
+let plan_without_digest ~root source =
+  let graph = top_level_graph source in
+  let names n r =
+    List.exists graph ~f:(fun (m, refs) -> String.equal m n && List.mem refs r ~equal:String.equal)
+  in
+  let reached, _ = reach ~through:sanctioned ~root ~reader:accessor source in
+  List.filter reached ~f:(fun n -> names n "seeded_plan" && not (names n plan_digest))
 
 (* {2 The search-less fallback}
 
@@ -382,11 +399,22 @@ let sanctioned = [ "seeded_plan" ]
    satisfies no form (review round 4). The file's top-level opens are libraries, taken to bind
    nothing the forms read.
 
-   THE FLAG is a parameter labelled [~search] or [?search] of a top-level function -- not of a
-   nested helper, whose flag is whatever its caller passes (review round 4) -- or a [let] binding
-   the name [search] whose right-hand side names the flag ([let search = Option.value_or_thunk
-   search ~default:...]). Any other binding named [search] is not the flag (review round 3). A claim
-   below holds that [tune] takes [?search].
+   THE FLAG is a parameter labelled [~search] or [?search] of [tune] itself, or of a TIED top-level
+   function -- not of a nested helper, whose flag is whatever its caller passes (review round 4) --
+   or a [let] binding the name [search] whose right-hand side names the flag ([let search =
+   Option.value_or_thunk search ~default:...]). Any other binding named [search] is not the flag
+   (review round 3). A claim below holds that [tune] takes [?search].
+
+   A top-level function is TIED (gh-ocannl-1570) when [tune] reaches it and every spelling of its
+   name in the definitions [tune] reaches is the head of an application passing, as its one argument
+   labelled [search], the bare name [search] resolving to the flag: [helper ?search], [helper
+   ~search]. A constant, an expression, a missing argument, a reference that is not a call, a
+   qualified spelling or one under a local [open] leaves it untied, and its branches ordinary. Tying
+   is a least fixpoint from [tune], so a helper's flag is the one [tune] forwards, through any chain
+   of tied helpers; a recursive helper never ties. Spellings outside [tune]'s reach
+   ([tune_deferred]'s call) run under another entry point and are not read. The DEFAULT each tied
+   function or flag alias applies to an option [tune]'s caller left unset is not compared: two that
+   default differently would disagree on such a call.
 
    A SEARCH-LESS BRANCH, in the top-level definitions [tune] reaches (the seeded plan's cut
    applied), is the [then] branch of an [if] whose [&&] chain has [not <the flag>] as a conjunct, or
@@ -409,20 +437,29 @@ let sanctioned = [ "seeded_plan" ]
    graph. Every other spelling of the route counts, a non-call inside the fallback included (review
    round 3).
 
+   THE CALLERS of a fallback holding such a call are pinned by ADDING edges, never by dropping more
+   (gh-ocannl-1570). Every spelling of its name in [tune]'s reach must be a call that a search-less
+   branch counts (as above), or a call marked [(fallback ... [@searchless "<why this path does not
+   search>"])]: the attribute on the application itself, its payload one non-empty string. Any other
+   spelling -- a call on a search path, a reference passed on or stored, a call inside a function a
+   branch let-binds, a call under a local [open] whose name the fallback's -- adds an edge from the
+   definition holding it to the route, so the route's reading reaches [tune] again. So does a STRAY
+   marker: one on anything but a call of such a fallback, or with no reason. The marker is the one
+   trusted form: it says a path that tests no flag does not search either (a refused lineage, a
+   failed deferred replay), which syntax cannot tell, and review reads the reason beside the call.
+
    WHAT THIS PINS, and the boundary. The rule is a safety pin with one direction: no call of the
-   route in [tune]'s reach lies outside the fallback the search-less branches call. The other
-   direction -- whether the fallback really runs the route, on every subpath of every search-less
-   branch, rather than an uninvoked local or a conditional around it -- is not pinned (review round
-   5): a dropped site that never runs reads nothing, and a search-less call that ships the plain
-   default instead reads nothing either. The claim below that the fallback calls the route is a
-   staleness check, so a sanction with no site to cover fails, not an execution claim. The scan
-   reads syntax and models no evaluation: it does not ask where the fallback is called from or where
-   its result flows -- the fallback may also be called from paths that test no flag (a refused
-   lineage, a failed deferred replay: they do not search either), and a search path that called the
-   fallback and timed what it returns would pass (review round 2, deferred) -- nor whether a callee
-   runs the thunk a branch hands it, nor whether a branch is reachable at all. Outside the forms
-   above it refuses rather than passes: a search-less branch that does not call the fallback empties
-   it, and then every call of the route counts. *)
+   route in [tune]'s reach lies outside the fallback, and no call of the fallback lies outside the
+   search-less branches and the marked paths. The other direction -- whether the fallback really
+   runs the route, on every subpath of every search-less branch, rather than an uninvoked local or a
+   conditional around it -- is not pinned (review round 5): a dropped site that never runs reads
+   nothing, and a search-less call that ships the plain default instead reads nothing either. The
+   claim below that the fallback calls the route is a staleness check, so a sanction with no site to
+   cover fails, not an execution claim. The scan reads syntax and models no evaluation: it does not
+   ask where a sanctioned call's result flows, whether a marked path really does not search (the
+   marker's reason is the claim), whether a callee runs the thunk a branch hands it, nor whether a
+   branch is reachable at all. Outside the forms above it refuses rather than passes: a search-less
+   branch that does not call the fallback empties it, and then every call of the route counts. *)
 
 let search_flag = "search"
 let seeded_route = "seeded_transform"
@@ -467,6 +504,22 @@ let resolve (env : (binding, unit) Test_utils.Lexical_scope.env) name =
       else Option.map (Map.find frame name) ~f:(fun b -> Resolved b))
   |> Option.value ~default:Free
 
+(* One spelling of a bare name: where it is, and what it resolves to. *)
+type reference = {
+  site : int;  (** The identifier's start offset. *)
+  name : string;
+  target : int option;
+      (** The value binding it resolves to; [None] when a local [open] or [include] hides it. *)
+  call : bool;  (** The head of an application. *)
+  in_branch : bool;
+      (** A call some search-less branch counts: outside the functions that branch let-binds. *)
+  passes_flag : bool;
+      (** A call whose one argument labelled [search] is the bare name [search] resolving to the
+          flag. *)
+}
+
+let marker = "searchless"
+
 type fallback_walk = {
   branches : (int * Set.M(Int).t) list;
       (** Each search-less branch's start offset, with the bindings it calls: a bare name applied to
@@ -481,6 +534,15 @@ type fallback_walk = {
   locals : Set.M(Int).t;
       (** The function bindings nested in another value binding: a [fun] or [function] right-hand
           side, under any type constraint. *)
+  local_names : string list Map.M(Int).t;  (** The names each of [locals] binds. *)
+  references : reference list;
+      (** Every bare identifier resolving to a binding of the source, or hidden by a local [open] or
+          [include]. *)
+  qualified : (int * string) list;  (** Every qualified identifier, by its last component. *)
+  markers : (int * int option) list;
+      (** Every expression carrying [[@searchless]], with the start of the bare name its application
+          calls -- [None] unless it is an application of a bare name and its payload is one
+          non-empty string. *)
 }
 
 let rec is_function (e : expression) =
@@ -493,9 +555,41 @@ let names_flag_label : Ppxlib.arg_label -> bool = function
   | Labelled label | Optional label -> String.equal label search_flag
   | Nolabel -> false
 
-let walk_fallback (source : string) : fallback_walk =
+(* The marked call's head: an application of a bare name whose one [[@searchless]] payload is a
+   non-empty string. *)
+let marked_head (e : expression) =
+  match
+    List.filter e.pexp_attributes ~f:(fun (a : attribute) -> String.equal a.attr_name.txt marker)
+  with
+  | [
+   {
+     attr_payload =
+       PStr
+         [
+           {
+             pstr_desc = Pstr_eval ({ pexp_desc = Pexp_constant (Pconst_string (why, _, _)); _ }, []);
+             _;
+           };
+         ];
+     _;
+   };
+  ]
+    when not (String.is_empty (String.strip why)) -> (
+      match e.pexp_desc with
+      | Pexp_apply ({ pexp_desc = Pexp_ident { txt = Lident _; loc }; _ }, _) -> Some (offset loc)
+      | _ -> None)
+  | _ -> None
+
+(* [flag_holders]: the start offsets of the top-level bindings whose search parameter is the flag --
+   [tune]'s and the tied ones'. *)
+let walk_fallback ~flag_holders (source : string) : fallback_walk =
   let structure = Ppxlib.Parse.implementation (Lexing.from_string source) in
   let branches = ref [] and sites = ref [] and locals = ref (Set.empty (module Int)) in
+  let local_names = ref (Map.empty (module Int)) in
+  let references = ref [] and qualified = ref [] and markers = ref [] in
+  (* The heads of applications, by start offset: whether a search-less branch counts the call, and
+     whether it passes the flag. *)
+  let heads = Hashtbl.create (module Int) in
   (* Each open branch's calls, and how many function bindings of its own body enclose the walk. *)
   let enclosing = ref [] and open_branches = ref [] and fun_depth = ref 0 in
   let is_flag env name =
@@ -524,9 +618,13 @@ let walk_fallback (source : string) : fallback_walk =
             (Map.singleton (module String) opaque_frame self#local)
 
       (* Only a top-level function's own parameter is the flag: a nested helper's [~search] is
-         whatever its caller passes (review round 4). *)
+         whatever its caller passes (review round 4), and a top-level one's only when [tune] or a
+         tied function forwards its own (gh-ocannl-1570). *)
       method! bind_parameter env label pattern =
-        if names_flag_label label && !fun_depth = 1 && List.length !enclosing = 1 then
+        if
+          names_flag_label label && !fun_depth = 1
+          && match !enclosing with [ at ] -> Set.mem flag_holders at | _ -> false
+        then
           Test_utils.Lexical_scope.bind_values env
             (Test_utils.Lexical_scope.pattern_vars [ pattern ])
             { at = None; flag = true }
@@ -577,7 +675,11 @@ let walk_fallback (source : string) : fallback_walk =
       method! value_binding env vb =
         let at = offset vb.pvb_loc in
         let deferred = is_function vb.pvb_expr in
-        if (not (List.is_empty !enclosing)) && deferred then locals := Set.add !locals at;
+        if (not (List.is_empty !enclosing)) && deferred then (
+          locals := Set.add !locals at;
+          local_names :=
+            Map.set !local_names ~key:at
+              ~data:(Test_utils.Lexical_scope.pattern_vars [ vb.pvb_pat ]));
         enclosing := at :: !enclosing;
         if deferred then List.iter !open_branches ~f:(fun (_, muted) -> Int.incr muted);
         let vb = super#value_binding env vb in
@@ -592,7 +694,29 @@ let walk_fallback (source : string) : fallback_walk =
         open_branches := List.tl_exn !open_branches;
         branches := (offset body.pexp_loc, !calls) :: !branches
 
+      method! ident env { txt; loc } =
+        match txt with
+        | Lident name ->
+            let target =
+              match resolve env name with
+              | Resolved { at = Some at; _ } -> Some (Some at)
+              | Opaque -> Some None
+              | Resolved { at = None; _ } | Free -> None
+            in
+            Option.iter target ~f:(fun target ->
+                let site = offset loc in
+                let call, in_branch, passes_flag =
+                  match Hashtbl.find heads site with
+                  | Some (in_branch, passes_flag) -> (true, in_branch, passes_flag)
+                  | None -> (false, false, false)
+                in
+                references := { site; name; target; call; in_branch; passes_flag } :: !references)
+        | Ldot (_, name) -> qualified := (offset loc, name) :: !qualified
+        | Lapply _ -> ()
+
       method! expression env e =
+        if List.exists e.pexp_attributes ~f:(fun a -> String.equal a.attr_name.txt marker) then
+          markers := (offset e.pexp_loc, marked_head e) :: !markers;
         match e.pexp_desc with
         | Pexp_function _ ->
             Int.incr fun_depth;
@@ -605,7 +729,7 @@ let walk_fallback (source : string) : fallback_walk =
             self#branch then_ (self#expression env);
             Option.iter else_ ~f:(fun e -> ignore (self#expression env e : expression));
             e
-        | Pexp_apply ({ pexp_desc = Pexp_ident { txt = Lident name; loc }; _ }, _) ->
+        | Pexp_apply ({ pexp_desc = Pexp_ident { txt = Lident name; loc }; _ }, args) ->
             let resolved =
               match resolve env name with Resolved { at; _ } -> at | Opaque | Free -> None
             in
@@ -614,6 +738,14 @@ let walk_fallback (source : string) : fallback_walk =
             Option.iter resolved ~f:(fun at ->
                 List.iter !open_branches ~f:(fun (calls, muted) ->
                     if !muted = 0 then calls := Set.add !calls at));
+            let in_branch = List.exists !open_branches ~f:(fun (_, muted) -> !muted = 0) in
+            let passes_flag =
+              match List.filter args ~f:(fun (label, _) -> names_flag_label label) with
+              | [ (_, { pexp_desc = Pexp_ident { txt = Lident flag; _ }; _ }) ] ->
+                  String.equal flag search_flag && is_flag env flag
+              | _ -> false
+            in
+            Hashtbl.set heads ~key:(offset loc) ~data:(in_branch, passes_flag);
             super#expression env e
         | _ -> super#expression env e
 
@@ -634,7 +766,15 @@ let walk_fallback (source : string) : fallback_walk =
        { Test_utils.Lexical_scope.frames = []; modules = Map.empty (module String) }
        structure
       : structure);
-  { branches = !branches; sites = !sites; locals = !locals }
+  {
+    branches = !branches;
+    sites = !sites;
+    locals = !locals;
+    local_names = !local_names;
+    references = !references;
+    qualified = !qualified;
+    markers = !markers;
+  }
 
 (* The top-level definitions of a source with their source spans, as {!top_level_graph} names
    them. *)
@@ -654,18 +794,77 @@ let top_level_spans (source : string) : (string * int * int) list =
       | _ -> [])
 
 type fallback = {
+  tied : string list;  (** The top-level functions whose search parameter is the flag. *)
   searchless_branches : int;  (** In the definitions [root] reaches. *)
   fallbacks : int list;  (** The local bindings every one of them references. *)
   sanctioned_sites : int list;  (** The route's spellings inside a fallback. *)
+  added_edges : (string * string) list;
+      (** From each definition holding a spelling of a fallback that no sanctioned form covers, or a
+          stray marker, to the route. *)
 }
 
+(* The top-level functions with a parameter labelled [search]. *)
+let flag_candidates (source : string) : (string * int) list =
+  List.concat_map
+    (Ppxlib.Parse.implementation (Lexing.from_string source))
+    ~f:(fun item ->
+      match item.pstr_desc with
+      | Pstr_value (_, bindings) ->
+          List.filter_map bindings ~f:(fun vb ->
+              match (vb.pvb_pat.ppat_desc, vb.pvb_expr.pexp_desc) with
+              | Ppat_var { txt = name; _ }, Pexp_function (params, _, _) ->
+                  Option.some_if
+                    (List.exists params ~f:(fun param ->
+                         match param.pparam_desc with
+                         | Pparam_val (label, _, _) -> names_flag_label label
+                         | Pparam_newtype _ -> false))
+                    (name, offset vb.pvb_loc)
+              | _ -> None)
+      | _ -> [])
+
 let searchless_fallback ~root (source : string) : fallback =
-  let walk = walk_fallback source in
   let reached, _ = reach ~through:sanctioned ~root ~reader:accessor source in
   let spans = top_level_spans source in
-  let in_reach at =
-    List.exists spans ~f:(fun (name, start, stop) ->
-        start <= at && at < stop && List.mem reached name ~equal:String.equal)
+  let holder at =
+    List.find_map spans ~f:(fun (name, start, stop) ->
+        Option.some_if (start <= at && at < stop && List.mem reached name ~equal:String.equal) name)
+  in
+  let in_reach at = Option.is_some (holder at) in
+  (* Tying, a least fixpoint from [root]: each round walks with the flags tied so far, and ties a
+     candidate whose every spelling in the reach passes one of them. *)
+  let candidates = flag_candidates source in
+  let rec tie tied =
+    let flag_holders =
+      Set.of_list
+        (module Int)
+        (List.filter_map candidates ~f:(fun (name, at) ->
+             Option.some_if (List.mem tied name ~equal:String.equal) at))
+    in
+    let walk = walk_fallback ~flag_holders source in
+    let tied' =
+      List.filter_map candidates ~f:(fun (name, at) ->
+          let spellings =
+            List.filter walk.references ~f:(fun r ->
+                in_reach r.site
+                && (Option.equal Int.equal r.target (Some at)
+                   || (Option.is_none r.target && String.equal r.name name)))
+          in
+          Option.some_if
+            (String.equal name root
+            || List.mem reached name ~equal:String.equal
+               && (not (List.is_empty spellings))
+               && List.for_all spellings ~f:(fun r ->
+                   Option.is_some r.target && r.call && r.passes_flag)
+               && not
+                    (List.exists walk.qualified ~f:(fun (site, s) ->
+                         String.equal s name && in_reach site)))
+            name)
+    in
+    if List.equal String.equal tied tied' then (tied, walk) else tie tied'
+  in
+  let tied, walk =
+    tie
+      (List.filter_map candidates ~f:(fun (name, _) -> Option.some_if (String.equal name root) name))
   in
   let branches = List.filter walk.branches ~f:(fun (at, _) -> in_reach at) in
   let fallbacks =
@@ -675,27 +874,70 @@ let searchless_fallback ~root (source : string) : fallback =
         Set.inter walk.locals
           (List.fold rest ~init:first ~f:(fun acc (_, refs) -> Set.inter acc refs))
   in
+  (* A call resolving to the top-level route, not to a local of that name (review round 4), with the
+     fallbacks enclosing it. *)
+  let sanctioned =
+    let route =
+      List.find_map spans ~f:(fun (name, start, _) ->
+          Option.some_if (String.equal name seeded_route) start)
+    in
+    List.filter_map walk.sites ~f:(fun (at, enclosing, resolved) ->
+        let holding = List.filter enclosing ~f:(Set.mem fallbacks) in
+        Option.some_if
+          (Option.is_some route
+          && Option.equal Int.equal resolved route
+          && not (List.is_empty holding))
+          (at, holding))
+  in
+  (* The fallbacks a dropped site lies in: their callers are pinned. *)
+  let pinned = Set.of_list (module Int) (List.concat_map sanctioned ~f:snd) in
+  let pinned_names =
+    List.concat_map (Set.to_list pinned) ~f:(fun at ->
+        Option.value (Map.find walk.local_names at) ~default:[])
+  in
+  let pins r =
+    match r.target with
+    | Some at -> Set.mem pinned at
+    | None -> List.mem pinned_names r.name ~equal:String.equal
+  in
+  let marked =
+    List.filter_map walk.markers ~f:(fun (_, head) ->
+        Option.bind head ~f:(fun head ->
+            List.find walk.references ~f:(fun r ->
+                r.site = head && Option.is_some r.target && pins r)))
+  in
+  let is_marked r = List.exists marked ~f:(fun m -> m.site = r.site) in
+  let uncovered =
+    List.filter_map walk.references ~f:(fun r ->
+        Option.some_if
+          (in_reach r.site && pins r
+          && not (Option.is_some r.target && r.call && (r.in_branch || is_marked r)))
+          r.site)
+  in
+  let stray =
+    List.filter_map walk.markers ~f:(fun (at, head) ->
+        Option.some_if
+          (in_reach at
+          && not
+               (Option.value_map head ~default:false ~f:(fun head ->
+                    List.exists marked ~f:(fun m -> m.site = head))))
+          at)
+  in
   {
+    tied;
     searchless_branches = List.length branches;
     fallbacks = Set.to_list fallbacks;
-    sanctioned_sites =
-      (* A call resolving to the top-level route, not to a local of that name (review round 4). *)
-      (let route =
-         List.find_map spans ~f:(fun (name, start, _) ->
-             Option.some_if (String.equal name seeded_route) start)
-       in
-       List.filter_map walk.sites ~f:(fun (at, enclosing, resolved) ->
-           Option.some_if
-             (Option.is_some route
-             && Option.equal Int.equal resolved route
-             && List.exists enclosing ~f:(Set.mem fallbacks))
-             at));
+    sanctioned_sites = List.map sanctioned ~f:fst;
+    added_edges =
+      List.filter_map (uncovered @ stray) ~f:(fun at ->
+          Option.map (holder at) ~f:(fun name -> (name, seeded_route)));
   }
 
-(* The reach of [root] past the seeded plan and its search-less fallback's spellings of the
-   route. *)
+(* The reach of [root] past the seeded plan and its search-less fallback's spellings of the route,
+   with an edge to the route from every spelling of the fallback no sanctioned form covers. *)
 let reach_past_fallback ~root source =
-  reach ~through:sanctioned ~drop:(searchless_fallback ~root source).sanctioned_sites ~root
+  let fallback = searchless_fallback ~root source in
+  reach ~through:sanctioned ~drop:fallback.sanctioned_sites ~add:fallback.added_edges ~root
     ~reader:accessor source
 
 let () =
@@ -734,9 +976,32 @@ let () =
     && List.equal String.equal
          (reached_readers ~through:[ "helper" ] ~root:"via_module" ~reader:accessor synthetic)
          [ "M"; "via_module" ]);
+  (* The seeded plan's cut, pinned in one direction (gh-ocannl-1570): of two definitions reaching
+     the plan, the rule finds the one not naming its digest, and the cut leaves the root reading
+     nothing. *)
+  let plan =
+    "let ranking () = Backend_intf.untimed_limits ()\n\
+     let seeded_plan () = ranking ()\n\
+     let seeded_plan_digest p = p\n\
+     let recorded () = seeded_plan_digest (seeded_plan ())\n\
+     let unrecorded () = seeded_plan ()\n\
+     let tune () = recorded () + unrecorded ()"
+  in
+  p
+    "the plan rule finds the definition reaching the seeded plan without naming its digest, not \
+     the one naming it"
+    (List.equal String.equal (plan_without_digest ~root:"tune" plan) [ "unrecorded" ]
+    && List.equal String.equal (plan_without_digest ~root:"recorded" plan) []
+    && List.equal String.equal
+         (reached_readers ~root:"tune" ~reader:accessor plan)
+         [ "ranking"; "recorded"; "seeded_plan"; "tune"; "unrecorded" ]
+    && List.equal String.equal
+         (reached_readers ~through:sanctioned ~root:"tune" ~reader:accessor plan)
+         []);
   (* The search-less fallback: each source is the route and a wrapper of it, then one [tune]. The
-     honest one calls the fallback from both recognised forms and from a path that tests no flag,
-     beside a search-less branch [tune] does not reach; each other one is its nearest violation. *)
+     honest one calls the fallback from both recognised forms and from a marked path that tests no
+     flag, beside a search-less branch [tune] does not reach; each other one is its nearest
+     violation. *)
   let route =
     "let ranking () = Backend_intf.untimed_limits ()\n\
      let seeded_transform () = ranking ()\n\
@@ -753,9 +1018,69 @@ let () =
         \  let finish ship = ship () in\n\
         \  let candidate () = x in\n\
         \  if (not search) && String.equal cache_dir \"\" then finish (fun () -> fallback ())\n\
-        \  else if x = 0 then fallback ()\n\
+        \  else if x = 0 then (fallback () [@searchless \"a refused lineage\"])\n\
         \  else match x with 1 when x > 0 && not search -> fallback () | _ -> candidate ()",
         [] );
+      ( "a search path calling the fallback",
+        "let tune ?(search = true) x =\n\
+        \  let fallback () = seeded_transform () in\n\
+        \  if not search then fallback () else fallback () + x",
+        flagged );
+      ( "a search path passing the fallback on",
+        "let tune ?(search = true) ~finish x =\n\
+        \  let fallback () = seeded_transform () in\n\
+        \  if not search then fallback () else finish fallback x",
+        flagged );
+      ( "an unmarked path testing no flag",
+        "let tune ?(search = true) x =\n\
+        \  let fallback () = seeded_transform () in\n\
+        \  if not search then fallback () else if x = 0 then fallback () else x",
+        flagged );
+      ( "a marker with no reason",
+        "let tune ?(search = true) x =\n\
+        \  let fallback () = seeded_transform () in\n\
+        \  if not search then fallback () else if x = 0 then (fallback () [@searchless \" \"]) \
+         else x",
+        flagged );
+      ( "a marker on another call",
+        "let tune ?(search = true) ~candidate x =\n\
+        \  let fallback () = seeded_transform () in\n\
+        \  if not search then fallback () else (candidate x [@searchless \"not the fallback\"])",
+        flagged );
+      ( "a search path calling the fallback under a local open",
+        "module M = struct let other () = 0 end\n\
+         let tune ?(search = true) x =\n\
+        \  let fallback () = seeded_transform () in\n\
+        \  if not search then fallback () else M.(fallback ())",
+        flagged );
+      ( "a chain of helpers tune forwards its flag through",
+        "let run ~search x =\n\
+        \  let fallback () = seeded_transform () in\n\
+        \  if not search then fallback () else x\n\
+         let outer ?search x = let search = Option.value search ~default:true in run ~search x\n\
+         let tune ?search x = outer ?search x",
+        [] );
+      ( "a helper given a constant flag",
+        "let run ?search x =\n\
+        \  let search = Option.value search ~default:true in\n\
+        \  let fallback () = seeded_transform () in\n\
+        \  if not search then fallback () else x\n\
+         let tune ?search x = run ~search:false x",
+        "run" :: flagged );
+      ( "a helper also called without the flag",
+        "let run ?search x =\n\
+        \  let search = Option.value search ~default:true in\n\
+        \  let fallback () = seeded_transform () in\n\
+        \  if not search then fallback () else x\n\
+         let tune ?search x = run ?search x + run x",
+        "run" :: flagged );
+      ( "a helper passed on",
+        "let run ?search x =\n\
+        \  let search = Option.value search ~default:true in\n\
+        \  let fallback () = seeded_transform () in\n\
+        \  if not search then fallback () else x\n\
+         let tune ?search x = ignore run; run ?search x",
+        "run" :: flagged );
       ( "a second site on the search path",
         "let tune ?(search = true) ~cache_dir x =\n\
         \  let fallback () = seeded_transform () in\n\
@@ -863,7 +1188,7 @@ let () =
   in
   p_all ~min:(List.length cases)
     "the seeded transform is sanctioned only inside the local fallback every search-less branch \
-     calls"
+     calls, called from nowhere else but a marked path, under the flag tune forwards"
     cases ~f:(fun (label, tune, expected) ->
       let readers = snd (reach_past_fallback ~root:"tune" (route ^ tune)) in
       let ok = List.equal String.equal readers (List.sort expected ~compare:String.compare) in
@@ -933,21 +1258,32 @@ let () =
         && not (List.is_empty fallback.sanctioned_sites)
       in
       if not found then
-        eprintf "tune: %d search-less branches, %d fallback bindings, %d sanctioned sites\n"
+        eprintf
+          "tune: %d search-less branches, %d fallback bindings, %d sanctioned sites (flag tied in \
+           %s)\n"
           fallback.searchless_branches (List.length fallback.fallbacks)
-          (List.length fallback.sanctioned_sites);
+          (List.length fallback.sanctioned_sites)
+          (String.concat ~sep:", " fallback.tied);
       p "the local fallback every search-less branch tune reaches calls calls the seeded transform"
         found;
+      List.iter fallback.added_edges ~f:(fun (from, _) ->
+          eprintf "%s spells the search-less fallback outside a search-less branch or a marker\n"
+            from);
       let reached, readers = reach_past_fallback ~root:"tune" source in
       let refs_of n =
         List.concat_map (top_level_graph source) ~f:(fun (m, refs) ->
             if String.equal m n then refs else [])
       in
-      let names r n = List.mem (refs_of n) r ~equal:String.equal in
-      p_exists
-        "the definition tune reaches the seeded plan through records the plan's digest in its \
-         trajectory identity"
-        reached ~f:(fun n -> names "seeded_plan" n && names "seeded_plan_digest" n);
+      p_exists "a definition tune reaches names the seeded plan (its cut is not stale)" reached
+        ~f:(fun n -> List.mem (refs_of n) "seeded_plan" ~equal:String.equal);
+      let unrecorded = plan_without_digest ~root:"tune" source in
+      if not (List.is_empty unrecorded) then
+        eprintf "reach the seeded plan without naming its digest: %s\n"
+          (String.concat ~sep:", " unrecorded);
+      p_empty ~min:1
+        "every definition tune reaches the seeded plan through names the plan's digest, which \
+         joins its trajectory identity"
+        ~over:reached unrecorded;
       if not (List.is_empty readers) then
         eprintf "tune reaches: %s\n" (String.concat ~sep:", " readers);
       p_empty ~min:10
