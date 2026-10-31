@@ -4477,11 +4477,120 @@ module Scheme = struct
     closure_bound : string option;
         (** Fixed variables no anchor covers: the scheme cannot be instantiated after a closure. *)
     closure_at_trace : int;
+    env : Row.environment;  (** The trace's final environment: for printing the scheme. *)
   }
 
   let label s = s.label
   let arity s = List.length s.arg_rows
   let num_results s = List.length s.result_rows
+
+  (* Variables are named by first appearance, so the text does not depend on the session's id
+     counters: generalized ones ['a], ['b], ...; fixed ones -- shared with what the function closes
+     over, e.g. a lifted parameter -- ['_a], ['_b], ..., as OCaml prints weak type variables.
+     Dimension and row variables share the alphabet. The indented lines are the broadcasting
+     inequalities among the boundary's variables and the fixed ones under the trace's final
+     environment, with the function's intermediate variables eliminated along monotone chains. *)
+  let to_string s =
+    let names = Hashtbl.create (module String) in
+    let counts = [| 0; 0 |] in
+    let name ~fixed key =
+      Hashtbl.find_or_add names key ~default:(fun () ->
+          let k = if fixed then 1 else 0 in
+          let n = counts.(k) in
+          counts.(k) <- n + 1;
+          let letter = String.make 1 (Char.of_int_exn (Char.to_int 'a' + (n % 26))) in
+          let letter = if n < 26 then letter else letter ^ Int.to_string (n / 26) in
+          (if fixed then "'_" else "'") ^ letter)
+    in
+    let dim_key v = "d" ^ Int.to_string (Row.dim_var_id v) in
+    let row_key v = "r" ^ Int.to_string (Row.row_var_id v) in
+    let dim_fixed v = Row.dim_var_id v <= s.mark in
+    let row_fixed v = Row.row_var_id v <= s.mark in
+    let dim_name v = name ~fixed:(dim_fixed v) (dim_key v) in
+    let row_name v = ".." ^ name ~fixed:(row_fixed v) (row_key v) ^ ".." in
+    let dim_str = Row.dim_to_string ~var_to_string:dim_name Row.Axis_size in
+    (* Sequenced: names are given in reading order. *)
+    let row_str (r : Row.t) =
+      let beg = List.map r.beg_dims ~f:dim_str in
+      let middle = match r.bcast with Row.Row_var v -> [ row_name v ] | Broadcastable -> [] in
+      let ends = List.map r.dims ~f:dim_str in
+      match beg @ middle @ ends with [] -> "()" | items -> String.concat ~sep:"," items
+    in
+    let shape_str { r_batch; r_input; r_output } =
+      let b = row_str r_batch in
+      let i = row_str r_input in
+      let o = row_str r_output in
+      [%string "%{b}|%{i}->%{o}"]
+    in
+    let side rows = String.concat ~sep:", " (List.map rows ~f:shape_str) in
+    let args = side s.arg_rows in
+    let results = side s.result_rows in
+    let boundary = s.arg_rows @ s.result_rows in
+    let b_dims, b_rows =
+      List.concat_map boundary ~f:(fun { r_batch; r_input; r_output } ->
+          List.map [ r_batch; r_input; r_output ] ~f:Row.row_vars)
+      |> List.unzip
+      |> fun (ds, rs) -> (List.concat ds, List.concat rs)
+    in
+    (* Monotone chains from each boundary variable, through generalized non-boundary (intermediate)
+       variables: upward to every variable it refines, downward to the fixed ones refining it (a
+       boundary one is found by its own upward search). *)
+    let relations (type v) ~(vars : v list) ~(key : v -> string) ~(fixed : v -> bool)
+        ~(bounds : v -> v list * v list) ~(pr : v -> string) =
+      let is_boundary =
+        let keys = Set.of_list (module String) (List.map vars ~f:key) in
+        fun v -> Set.mem keys (key v)
+      in
+      let found = ref [] in
+      let add rel = if not (List.mem !found rel ~equal:String.equal) then found := rel :: !found in
+      let search ~up start =
+        let visited = Hash_set.create (module String) in
+        let rec go v =
+          if not (Hash_set.mem visited (key v)) then (
+            Hash_set.add visited (key v);
+            let res, opnd = bounds v in
+            List.iter
+              (if up then opnd else res)
+              ~f:(fun w ->
+                if String.equal (key w) (key start) then ()
+                else if is_boundary w || fixed w then (
+                  if up then add [%string "%{pr start} ⊑ %{pr w}"]
+                  else if not (is_boundary w) then add [%string "%{pr w} ⊑ %{pr start}"])
+                else go w))
+        in
+        go start
+      in
+      List.iter vars ~f:(fun v ->
+          search ~up:true v;
+          search ~up:false v);
+      List.rev !found
+    in
+    let dim_rels =
+      relations ~vars:b_dims ~key:dim_key ~fixed:dim_fixed ~pr:dim_name ~bounds:(fun v ->
+          match Row.find_dim_entry s.env v with
+          | Some (Row.Bounds_dim { res; opnd; _ }) -> (res, opnd)
+          | _ -> ([], []))
+    in
+    let row_rels =
+      relations ~vars:b_rows ~key:row_key ~fixed:row_fixed ~pr:row_name ~bounds:(fun v ->
+          match Row.find_row_entry s.env v with
+          | Some (Row.Bounds_row { res; opnd; _ }) -> (res, opnd)
+          | _ -> ([], []))
+    in
+    let glbs =
+      List.filter_map b_dims ~f:(fun v ->
+          match Row.find_dim_entry s.env v with
+          | Some (Row.Bounds_dim { glb = Some d; _ }) ->
+              Some [%string "%{dim_str d} ⊑ %{dim_name v}"]
+          | _ -> None)
+      @ List.filter_map b_rows ~f:(fun v ->
+          match Row.find_row_entry s.env v with
+          | Some (Row.Bounds_row { glb = Some r; _ }) ->
+              Some [%string "%{row_str r} ⊑ %{row_name v}"]
+          | _ -> None)
+    in
+    let header = [%string "%{s.label} : %{args} => %{results}"] in
+    String.concat ~sep:"\n" (header :: List.map (dim_rels @ row_rels @ glbs) ~f:(fun r -> "  " ^ r))
 
   let rows_of env (sh : shape) =
     {
@@ -4680,6 +4789,7 @@ module Scheme = struct
         unmarked_unused = Set.to_list (Set.diff unused_start unused_end);
         closure_bound;
         closure_at_trace = !closure_count;
+        env = env_end;
       }
     with
     | Row.Shape_error (msg, trace) ->

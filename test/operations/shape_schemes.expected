@@ -54,3 +54,6 @@ the rewound application's result shape is a discarded handle: true
 applying again after the rewind: inline 2x3 3, scheme 2x3 3
 applying again after the rewind: the scheme's application closes as the inline one does: true
 the closure's error trace carries the scheme's and the application's origin: true
+the argument's concatenated axis is printed: true
+no raw variable id is printed: true
+the text is the same after more traces advanced the ids: true

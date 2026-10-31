@@ -290,13 +290,14 @@ let sym_dim_to_string style { sym; sym_basis; sym_proj_id } =
       in
       [%string "%{basis_size_prefix sym_basis}%{ident}<=%{range}%{proj_part}"]
 
-let rec dim_to_string style = function
+let rec dim_to_string ?var_to_string style = function
   | Dim solved_dim -> solved_dim_to_string style solved_dim
   | Sym sym_dim -> sym_dim_to_string style sym_dim
+  | Var v when Option.is_some var_to_string -> (Option.value_exn var_to_string) v
   | Var { id; name = Some n } -> [%string "$%{id#Int}:%{n}"]
   | Var { id; name = None } -> "$" ^ Int.to_string id
   | Affine { stride; over; conv; stride_offset } -> (
-      let over_str = dim_to_string style over in
+      let over_str = dim_to_string ?var_to_string style over in
       let stride_str = if stride = 1 then over_str else Int.to_string stride ^ "*" ^ over_str in
       let offset_str =
         if stride_offset = 0 then stride_str else [%string "%{stride_str}+%{stride_offset#Int}"]
@@ -304,13 +305,15 @@ let rec dim_to_string style = function
       match conv with
       | None -> offset_str
       | Some { dilation; kernel; use_padding = _ } ->
-          let kernel_str = dim_to_string style kernel in
+          let kernel_str = dim_to_string ?var_to_string style kernel in
           let kernel_str =
             if dilation = 1 then kernel_str else Int.to_string dilation ^ "*" ^ kernel_str
           in
           [%string "conv(%{offset_str}+%{kernel_str})"])
   | Concat dims ->
-      let dims_str = List.map dims ~f:(dim_to_string style) |> String.concat ~sep:"^" in
+      let dims_str =
+        List.map dims ~f:(dim_to_string ?var_to_string style) |> String.concat ~sep:"^"
+      in
       [%string "(%{dims_str})"]
 
 module Row_var = struct
@@ -468,6 +471,9 @@ let get_dim_from_env env var =
 
 let get_row_from_env env var =
   match find_row env.row_env var with Some (Solved_row row) -> Some row | _ -> None
+
+let find_dim_entry env var = find_dim env.dim_env var
+let find_row_entry env var = find_row env.row_env var
 
 type constraint_ =
   | Dim_eq of { d1 : dim; d2 : dim; origin : constraint_origin list }

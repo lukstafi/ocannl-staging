@@ -3138,7 +3138,12 @@
    ocannl_config
    (env_var OCANNL_BACKEND)))
  (libraries base dynlink ocannl stdio arrayjit.verdict)
- (modules hello_world_op zero2hero_1of7 primitive_ops test_threefry4x32)
+ (modules
+  hello_world_op
+  zero2hero_1of7
+  primitive_ops
+  test_threefry4x32
+  reusable_tensor_programs)
  (preprocess
   (pps ppx_here ppx_expect ppx_inline_test ppx_ocannl))
  (modes best))
@@ -3241,6 +3246,28 @@
     -diff-cmd
     -)
    (diff? test_threefry4x32.ml test_threefry4x32.ml.corrected))))
+
+(rule
+ (alias runtest-reusable_tensor_programs)
+ (package neural_nets_lib)
+ (deps
+  (alias runtest-env_spelling_gate)
+  ocannl_config
+  (env_var OCANNL_BACKEND)
+  (sandbox always))
+ (action
+  (progn
+   (run
+    %{dep:.operations_tutorials.inline-tests/inline-test-runner.exe}
+    inline-test-runner
+    operations_tutorials
+    -only-test
+    reusable_tensor_programs.ml
+    -source-tree-root
+    %{workspace_root}
+    -diff-cmd
+    -)
+   (diff? reusable_tensor_programs.ml reusable_tensor_programs.ml.corrected))))
 
 (test
  ; ocannl-backend: none -- drives Utils.resolve_config_value over synthetic alists; neither
@@ -3720,6 +3747,7 @@
   ../../lib/nn_blocks.ml
   ../../lib/train.ml
   layer_norm_test.ml
+  reusable_tensor_programs.ml
   (sandbox always))
  (action
   (run %{dep:doc_examples_extract.exe} %{workspace_root})))

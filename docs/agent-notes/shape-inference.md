@@ -277,3 +277,11 @@ files.
   environment. Export everything else substituted under that environment, so it holds only unsolved
   variables. A reference made before the trace may already be in `open_refs`, which lists each once
   per inference: the trace records its own touches (`trace_touches`).
+- Printing a scheme (gh-ocannl-1753, `Shape.Scheme.to_string`): substituted boundary rows alone
+  say almost nothing -- after a trace an argument's and its result's rows are distinct unsolved
+  variables, related only by broadcasting bounds -- so the scheme keeps the trace's final
+  environment (`env`) and the printer walks `Bounds_row`/`Bounds_dim` monotone chains through the
+  intermediate variables (`res` side: refines; `opnd` side: refined). Names go by first appearance
+  in reading order, never by id: a trace's ids come from the reserved range, and so do the ids in
+  its errors' constraint sexps, which a golden must not pin (the tutorial prints only the message
+  and the `Dim_mismatch` sizes).
