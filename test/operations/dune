@@ -12232,7 +12232,7 @@
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
-;; gh-ocannl-1761: guided registration (the default op_shape_schemes mode) against schemes off:
+;; gh-ocannl-1761: guided registration (op_shape_schemes=guided, opt-in) against schemes off:
 ;; counts, fallbacks, divergence, refusals inside a body, nesting, and nn_blocks parity of dims,
 ;; ids, random initialization, values and gradients; each claim paired with a control.
 
@@ -12243,6 +12243,34 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules op_schemes_guided)
+ (libraries base ocannl stdio arrayjit.verdict)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+;; gh-ocannl-1752: what shape schemes buy in inference cost on repeated blocks (off, check and
+;; guided): registration and constraint counts claimed, timings on stderr; `--bench` measures.
+
+(test
+ (name scheme_payoff)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules scheme_payoff)
+ (libraries base ocannl stdio mtime mtime.clock.os arrayjit.verdict)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+;; gh-ocannl-1752: where op_shape_schemes=off|check|guided report the suite's shape-error classes
+;; (definition, application or closure): the catalogue in docs/shape_inference.md.
+
+(test
+ (name scheme_error_locality)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules scheme_error_locality)
  (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))

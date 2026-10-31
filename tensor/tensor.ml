@@ -1800,7 +1800,7 @@ module Scheme = struct
   let mode : mode Lazy.t =
     lazy
       (match
-         String.lowercase (Utils.get_global_arg ~default:"guided" ~arg_name:"op_shape_schemes")
+         String.lowercase (Utils.get_global_arg ~default:"check" ~arg_name:"op_shape_schemes")
        with
       | "guided" -> `Guided
       | "check" -> `Check
@@ -1821,6 +1821,8 @@ module Scheme = struct
 
   let registration_counts = Shape.registration_counts
   let reset_registration_counts = Shape.reset_registration_counts
+  let registration_times = Shape.registration_times
+  let reset_registration_times = Shape.reset_registration_times
 
   type state =
     | Pending
@@ -1857,6 +1859,7 @@ module Scheme = struct
       ()
     else
       let label = [%string "the trace of the shape scheme %{h.name}"] in
+      Shape.timed `Tracing @@ fun () ->
       with_id_neutral ~label (fun () ->
           let ck = checkpoint ~label () in
           match

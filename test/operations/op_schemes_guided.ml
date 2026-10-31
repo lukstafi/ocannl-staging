@@ -1,10 +1,10 @@
-(* gh-ocannl-1761: guided registration, the default [op_shape_schemes] mode. A schemed [%op]
-   application instantiates its scheme once against the arguments, then runs its body; every update
-   step the body builds that matches the next step of the trace registers without deriving or
-   solving its own inequalities, its new shapes unified with the scheme's renamed rows. The oracle
-   is the same construction with the schemes off: closed shapes, ids, random draws, values and
-   gradients must be identical. Each claim about the mechanism comes with a control that comes out
-   the other way: schemes off, checking mode, or a sabotaged guide. *)
+(* gh-ocannl-1761: guided registration, the opt-in [op_shape_schemes=guided] mode, pinned below. A
+   schemed [%op] application instantiates its scheme once against the arguments, then runs its body;
+   every update step the body builds that matches the next step of the trace registers without
+   deriving or solving its own inequalities, its new shapes unified with the scheme's renamed rows.
+   The oracle is the same construction with the schemes off: closed shapes, ids, random draws,
+   values and gradients must be identical. Each claim about the mechanism comes with a control that
+   comes out the other way: schemes off, checking mode, or a sabotaged guide. *)
 
 open Base
 open Ocannl.Nn_blocks.DSL_modules
@@ -49,18 +49,7 @@ let counted f =
   let c0 = Tensor.Scheme.registration_counts () in
   let result = f () in
   let c1 = Tensor.Scheme.registration_counts () in
-  let d (g : Shape.registration_counts -> int) = g c1 - g c0 in
-  ( result,
-    Shape.
-      {
-        guided_applications = d (fun c -> c.guided_applications);
-        checked_applications = d (fun c -> c.checked_applications);
-        guided_steps = d (fun c -> c.guided_steps);
-        fallback_steps = d (fun c -> c.fallback_steps);
-        unmatched_steps = d (fun c -> c.unmatched_steps);
-        backward_steps = d (fun c -> c.backward_steps);
-        inline_registrations = d (fun c -> c.inline_registrations);
-      } )
+  (result, Shape.diff_registration_counts c1 c0)
 
 let report name (c : Shape.registration_counts) =
   Stdio.eprintf "(not part of the golden) %s: %s\n%!" name

@@ -4060,6 +4060,14 @@ type registration_counts = {
   unmatched_steps : int;
   backward_steps : int;
   inline_registrations : int;
+  instantiated_constraints : int;
+  instantiated_solutions : int;
+  instantiated_boundary : int;
+  tie_equations : int;
+  backward_constraints : int;
+  inline_constraints : int;
+  closures : int;
+  closure_constraints : int;
 }
 [@@deriving sexp_of]
 
@@ -4072,6 +4080,14 @@ let zero_counts =
     unmatched_steps = 0;
     backward_steps = 0;
     inline_registrations = 0;
+    instantiated_constraints = 0;
+    instantiated_solutions = 0;
+    instantiated_boundary = 0;
+    tie_equations = 0;
+    backward_constraints = 0;
+    inline_constraints = 0;
+    closures = 0;
+    closure_constraints = 0;
   }
 
 let counts = ref zero_counts
@@ -4079,6 +4095,77 @@ let counts = ref zero_counts
 
 let registration_counts () = !counts
 let reset_registration_counts () = counts := zero_counts
+
+let diff_registration_counts later earlier =
+  let d f = f later - f earlier in
+  {
+    guided_applications = d (fun c -> c.guided_applications);
+    checked_applications = d (fun c -> c.checked_applications);
+    guided_steps = d (fun c -> c.guided_steps);
+    fallback_steps = d (fun c -> c.fallback_steps);
+    unmatched_steps = d (fun c -> c.unmatched_steps);
+    backward_steps = d (fun c -> c.backward_steps);
+    inline_registrations = d (fun c -> c.inline_registrations);
+    instantiated_constraints = d (fun c -> c.instantiated_constraints);
+    instantiated_solutions = d (fun c -> c.instantiated_solutions);
+    instantiated_boundary = d (fun c -> c.instantiated_boundary);
+    tie_equations = d (fun c -> c.tie_equations);
+    backward_constraints = d (fun c -> c.backward_constraints);
+    inline_constraints = d (fun c -> c.inline_constraints);
+    closures = d (fun c -> c.closures);
+    closure_constraints = d (fun c -> c.closure_constraints);
+  }
+
+(* Where shape-registration time goes (gh-ocannl-1752), process-wide since the last reset. *)
+type registration_times = {
+  tracing_s : float;
+  instantiation_s : float;
+  guided_steps_s : float;
+  backward_steps_s : float;
+  inline_steps_s : float;
+  closure_s : float;
+}
+[@@deriving sexp_of]
+
+let zero_times =
+  {
+    tracing_s = 0.;
+    instantiation_s = 0.;
+    guided_steps_s = 0.;
+    backward_steps_s = 0.;
+    inline_steps_s = 0.;
+    closure_s = 0.;
+  }
+
+let times = ref zero_times [@@mutation_serial.exempt "registration timings, not inference state"]
+let registration_times () = !times
+let reset_registration_times () = times := zero_times
+
+type phase = [ `Tracing | `Instantiation | `Guided_step | `Backward_step | `Inline_step | `Closure ]
+
+let add_time (phase : phase) dt =
+  let t = !times in
+  times :=
+    match phase with
+    | `Tracing -> { t with tracing_s = t.tracing_s +. dt }
+    | `Instantiation -> { t with instantiation_s = t.instantiation_s +. dt }
+    | `Guided_step -> { t with guided_steps_s = t.guided_steps_s +. dt }
+    | `Backward_step -> { t with backward_steps_s = t.backward_steps_s +. dt }
+    | `Inline_step -> { t with inline_steps_s = t.inline_steps_s +. dt }
+    | `Closure -> { t with closure_s = t.closure_s +. dt }
+
+(* Nested timed phases (a guided application's instantiation inside an outer trace, say) are charged
+   to the innermost only: the outer phase's clock pauses meanwhile. *)
+let timing_paused = ref 0. [@@mutation_serial.exempt "registration timings, not inference state"]
+
+let timed (phase : phase) f =
+  let started = Mtime_clock.counter () in
+  let paused0 = !timing_paused in
+  Exn.protect ~f ~finally:(fun () ->
+      let total = Mtime.Span.to_float_ns (Mtime_clock.count started) /. 1e9 in
+      let inner = !timing_paused -. paused0 in
+      add_time phase (total -. inner);
+      timing_paused := paused0 +. total)
 
 let note_checked_application () =
   counts := { !counts with checked_applications = !counts.checked_applications + 1 }
@@ -4098,8 +4185,9 @@ let refuse_discarded_operands update_step =
 let creation_rows (sh : t) =
   Row.canonical_rows (List.map [ sh.batch; sh.input; sh.output ] ~f:(Row.subst_row !state))
 
-(* The registration proper: the step's own inequalities, derived and solved. *)
-let propagate_inline (update_step : update_step) : unit =
+(* The registration proper: the step's own inequalities, derived and solved. [backward]: a gradient
+   helper of a guided application, for the statistics. *)
+let propagate_inline ?(backward = false) (update_step : update_step) : unit =
   (* The step and its inequalities are registered before the solver runs: a solver failure leaves
      them registered against the old environment, so it taints the session (gh-ocannl-1301). *)
   with_taint_on_failure
@@ -4139,6 +4227,11 @@ let propagate_inline (update_step : update_step) : unit =
       in
       active_update_steps := update_step :: !active_update_steps;
       active_constraints := ineqs @ !active_constraints;
+      (if not (tracing_in_progress ()) then
+         let n = List.length ineqs in
+         counts :=
+           if backward then { !counts with backward_constraints = !counts.backward_constraints + n }
+           else { !counts with inline_constraints = !counts.inline_constraints + n });
       Option.iter log ~f:(fun e ->
           trace_step_log := Option.map !trace_step_log ~f:(fun l -> e :: l));
       let ineqs', env = Row.solve_inequalities ~stage:Row.Stage1 ~discardable_vars ineqs !state in
@@ -4151,13 +4244,20 @@ let%debug4_sexp propagate_shapes (update_step : update_step) : unit =
   refuse_discarded_operands update_step;
   match !active_guide with
   | Some g when not (tracing_in_progress ()) -> g.guide_register update_step
-  | _ -> propagate_inline update_step
+  | _ when tracing_in_progress () -> propagate_inline update_step
+  | _ -> timed `Inline_step (fun () -> propagate_inline update_step)
 
 let with_construction_window f =
   Int.incr construction_depth;
   Exn.protect ~f ~finally:(fun () -> Int.decr construction_depth)
 
 let%debug4_sexp finish_inference_body (() : unit) : unit =
+  counts :=
+    {
+      !counts with
+      closures = !counts.closures + 1;
+      closure_constraints = !counts.closure_constraints + List.length !active_constraints;
+    };
   let unsolved =
     List.filter !active_constraints ~f:(function
       | Shape_row (r, _) | Terminal_row (_, r, _) ->
@@ -4232,7 +4332,7 @@ let finish_inference (() : unit) : unit =
   check_untainted ();
   (* A failed closure leaves the open state unsatisfiable (or partially applied): it always taints,
      and it marks nothing closed and moves no checkpoint (gh-ocannl-1301). *)
-  try finish_inference_body ()
+  try timed `Closure finish_inference_body
   with exn ->
     let bt = Stdlib.Printexc.get_raw_backtrace () in
     taint_session ~provenance:("finish_inference: " ^ exn_summary exn);
@@ -4605,6 +4705,7 @@ module Scheme = struct
     mark : int;  (** Variables with larger ids were minted by the trace: generalized. *)
     constraints : Row.constraint_ list;
         (** The trace's constraints, oldest first, then the solution equations. *)
+    num_solutions : int;  (** How many of [constraints] are solution equations: the last ones. *)
     arg_rows : rows list;
     result_rows : rows list;
     internal_rows : (Row.t * Row.constraint_origin) list;
@@ -5061,6 +5162,7 @@ module Scheme = struct
         label;
         mark = var_mark;
         constraints = constraints @ solutions;
+        num_solutions = List.length solutions;
         arg_rows;
         result_rows;
         internal_rows;
@@ -5195,6 +5297,15 @@ module Scheme = struct
           List.iter s.unmarked_unused ~f:unmark_unused;
           if not (sabotaged No_marks) then Row.add_marks rn s.marks;
           active_constraints := List.rev_append all !active_constraints;
+          (let c = !counts and n = List.length constraints in
+           counts :=
+             {
+               c with
+               instantiated_constraints = c.instantiated_constraints + n - s.num_solutions;
+               instantiated_solutions = c.instantiated_solutions + s.num_solutions;
+               instantiated_boundary =
+                 c.instantiated_boundary + List.length boundary + List.length anchors;
+             });
           if instance then active_instances := { inst_shapes; inst_rows } :: !active_instances;
           let _, env = Row.solve_inequalities ~stage:Row.Stage1 ~discardable_vars all !state in
           state := env;
@@ -5224,9 +5335,10 @@ module Scheme = struct
         (args @ List.map s.anchors ~f:fst)
         ~f:(fun (sh : shape) -> (sh, sh.batch, sh.input, sh.output))
     in
-    Exn.protect
-      ~f:(fun () -> instantiate ?sabotage s ~application ~args ~results:[])
-      ~finally:(fun () -> restore_after_check ~globals ~row_globals ~taint:taint0 rows)
+    timed `Instantiation (fun () ->
+        Exn.protect
+          ~f:(fun () -> instantiate ?sabotage s ~application ~args ~results:[])
+          ~finally:(fun () -> restore_after_check ~globals ~row_globals ~taint:taint0 rows))
 
   (* {3 Guided registration (gh-ocannl-1761)}
 
@@ -5249,7 +5361,9 @@ module Scheme = struct
         ~f:(fun (sh : shape) -> (sh, sh.batch, sh.input, sh.output))
     in
     let rn, origin =
-      try instantiate_core ?sabotage ~instance:false s ~application ~args ~results:[]
+      try
+        timed `Instantiation (fun () ->
+            instantiate_core ?sabotage ~instance:false s ~application ~args ~results:[])
       with exn ->
         let bt = Stdlib.Printexc.get_raw_backtrace () in
         restore_after_check ~globals ~row_globals ~taint:taint0 rows;
@@ -5334,11 +5448,12 @@ module Scheme = struct
     in
     let solve_ties step eqs =
       active_constraints := eqs @ !active_constraints;
+      counts := { !counts with tie_equations = !counts.tie_equations + List.length eqs };
       let _, env = Row.solve_inequalities ~stage:Row.Stage1 eqs !state in
       apply_env_step env step;
       state := env
     in
-    let register (step : update_step) =
+    let register_untimed (step : update_step) =
       let matched =
         if !backward_depth > 0 || !cursor >= n then None
         else
@@ -5347,10 +5462,11 @@ module Scheme = struct
       in
       match matched with
       | None ->
+          let backward = !backward_depth > 0 in
           counts :=
-            if !backward_depth > 0 then { !counts with backward_steps = !counts.backward_steps + 1 }
+            if backward then { !counts with backward_steps = !counts.backward_steps + 1 }
             else { !counts with unmatched_steps = !counts.unmatched_steps + 1 };
-          propagate_inline step
+          propagate_inline ~backward step
       | Some (sk, binds) -> (
           Int.incr cursor;
           List.iter binds ~f:(fun (c, (sh : shape)) ->
@@ -5373,6 +5489,11 @@ module Scheme = struct
                   List.iter sk.sk_unmarks ~f:(fun i -> unmark_unused shapes.(i).id);
                   active_update_steps := step :: !active_update_steps;
                   solve_ties step (ties binds)))
+    in
+    let register step =
+      timed
+        (if !backward_depth > 0 then `Backward_step else `Guided_step)
+        (fun () -> register_untimed step)
     in
     let outer = !active_guide in
     active_guide := Some { guide_label = s.label; guide_register = register };

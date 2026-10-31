@@ -448,13 +448,54 @@ type registration_counts = {
   unmatched_steps : int;
   backward_steps : int;
   inline_registrations : int;
+  instantiated_constraints : int;
+  instantiated_solutions : int;
+  instantiated_boundary : int;
+  tie_equations : int;
+  backward_constraints : int;
+  inline_constraints : int;
+  closures : int;
+  closure_constraints : int;
 }
 [@@deriving sexp_of]
 (** Registration statistics (gh-ocannl-1761), process-wide since the last reset: guided and checked
     [%op] applications; matched steps registered guided (no [get_inequalities]) or normally (a
     fallback kind); steps a guided application's trace lacked, and the gradient helpers its body
     built (both registered normally); and every registration outside a trace that ran
-    [get_inequalities]. Projection derivation is not counted. *)
+    [get_inequalities]. Projection derivation is not counted.
+
+    The constraint counts (gh-ocannl-1752) say what each source adds to the open constraint store: a
+    scheme instantiation's renamed trace constraints (C'), its renamed solution equations (E'), and
+    its boundary and anchor equations -- checked instantiations included, though their window is
+    rewound -- each guided step's tie equations, the gradient helpers' inequalities under a guided
+    application, and every other registration's own inequalities outside a trace.
+    [closure_constraints] sums the store's size at the entry of each [finish_inference] ([closures]
+    counts them). *)
+
+type registration_times = {
+  tracing_s : float;
+  instantiation_s : float;
+  guided_steps_s : float;
+  backward_steps_s : float;
+  inline_steps_s : float;
+  closure_s : float;
+}
+[@@deriving sexp_of]
+(** Where shape-registration wall time goes (gh-ocannl-1752), process-wide since the last reset, in
+    seconds: tracing schemes (the body on tracers, and the rewind), instantiating them (guided and
+    checked applications), a guided application's steps (matched, fallback and unmatched alike), its
+    gradient helpers, every other step registered outside a trace, and [finish_inference]. A phase
+    nested in another (an instantiation inside a closure built mid-construction, say) is charged to
+    the inner phase alone. Construction work that is not shape registration (building tensors, their
+    code) is in none of them. *)
+
+type phase = [ `Tracing | `Instantiation | `Guided_step | `Backward_step | `Inline_step | `Closure ]
+
+val timed : phase -> (unit -> 'a) -> 'a
+(** Runs the function, charging its wall time, less that of nested timed phases, to the phase. *)
+
+val registration_times : unit -> registration_times
+val reset_registration_times : unit -> unit
 
 val with_backward_construction : (unit -> 'a) -> 'a
 (** Runs gradient-code construction ([Tensor.op]'s [grad_asn]): the helper tensors it builds depend
@@ -463,6 +504,10 @@ val with_backward_construction : (unit -> 'a) -> 'a
 
 val registration_counts : unit -> registration_counts
 val reset_registration_counts : unit -> unit
+
+val diff_registration_counts : registration_counts -> registration_counts -> registration_counts
+(** [diff_registration_counts later earlier]: what happened in between. *)
+
 val note_checked_application : unit -> unit
 
 (** {3 Checkpoints (gh-ocannl-903)}

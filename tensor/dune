@@ -29,6 +29,8 @@
   sexplib
   num
   str
+  mtime
+  mtime.clock.os
   arrayjit.utils
   ppx_here.runtime-lib
   ppx_minidebug.runtime

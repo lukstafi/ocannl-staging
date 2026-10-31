@@ -42,6 +42,8 @@ tensor/shape.ml: checkpoint_lineage (ref) -- exempt: the lineage of valid checkp
 tensor/shape.ml: checkpoint_seq (ref) -- exempt: a fresh-id counter: ids are never reused, so a rewind need not restore it
 tensor/shape.ml: failed_reads (ref) -- exempt: a record of reads that raised, consulted by a rewind's validity check: never restored
 tensor/shape.ml: counts (ref) -- exempt: registration statistics, not inference state
+tensor/shape.ml: times (ref) -- exempt: registration timings, not inference state
+tensor/shape.ml: timing_paused (ref) -- exempt: registration timings, not inference state
 tensor/shape.ml: live (unread state) -- exempt
 tensor/shape.ml: boundary add_discarded_updates -- part of a rewind: it records the discarded update range, which no rewind restores
 tensor/shape.ml: boundary restore_globals -- part of a rewind: puts back the globals a checkpoint captured
