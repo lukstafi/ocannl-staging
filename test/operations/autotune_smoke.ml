@@ -138,6 +138,7 @@ let () =
         merge_node = None;
         workgroup_shared = Set.empty (module Ir.Tnode);
         simdgroup_fragments = Set.empty (module Ir.Tnode);
+        masked_fragments = Set.empty (module Ir.Tnode);
         swizzled = Map.empty (module Ir.Tnode);
         pipelined = Map.empty (module Ir.Tnode);
         zero_fringe = Set.empty (module Ir.Tnode);

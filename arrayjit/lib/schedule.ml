@@ -3627,10 +3627,11 @@ let contract_tensorized_accumulator ~lane ~(masks : pad_mask list) (opt : Low_le
      fragment-resident scope, and per-thread [Local] arrays are not loadable by the simdgroup/wmma
      intrinsics — a threadgroup-resident fragment keeps the intrinsic path firing, at the cost of a
      per-statement load/store round-trip and a barrier pair around the reduction loop. A masked
-     fragment is therefore never marked in [simdgroup_fragments] and never reaches the
-     persistent-fragment rendering: a recorded decline (gh-ocannl-1707, see
-     [Low_level.fragment_transfer]), which the seed-parity smoke's shapes avoid so that its negative
-     control still judges a persistent region. *)
+     fragment is therefore never marked in [simdgroup_fragments] (it is marked in
+     [masked_fragments], its identity for [Fuse_epilogue]) and never reaches the persistent-fragment
+     rendering: a recorded decline (gh-ocannl-1707, see [Low_level.fragment_transfer]), which the
+     seed-parity smoke's shapes avoid so that its negative control still judges a persistent
+     region. *)
   let masked = not (List.is_empty masks) in
   let shared_frag = masked && not (Set.is_empty opt.workgroup_shared) in
   let iprec = Ops.index_prec () in
@@ -3996,6 +3997,7 @@ let contract_tensorized_accumulator ~lane ~(masks : pad_mask list) (opt : Low_le
           llc;
           workgroup_shared =
             (if shared_frag then Set.add opt.workgroup_shared fragment else opt.workgroup_shared);
+          masked_fragments = Set.add opt.masked_fragments fragment;
         }
       else { opt with llc; simdgroup_fragments = Set.add opt.simdgroup_fragments fragment }
 
@@ -4264,13 +4266,12 @@ let apply_fuse_epilogue ~target ~shared (opt : Low_level.optimized) : Low_level.
      the padded block away) is recognized through its guards, which are collected and re-imposed on
      the relocated tail — the tail then writes exactly the valid cells the store-back writes. --- *)
   let is_fragment frag =
-    (* Masked non-shared fragments (the CPU padded pipelines) are registered in neither the
-       [simdgroup_fragments] nor the [workgroup_shared] set; recognize them by the label
-       [contract_around] mints. *)
+    (* Identity is membership in the sets the contraction fills (gh-ocannl-1721): a pad-masked
+       fragment, shared or not, is in [masked_fragments], an unmasked one in [simdgroup_fragments].
+       Neither its label (a display name a user tensor can share) nor [workgroup_shared] (which also
+       holds staged operand tiles) says that a node is a fragment. *)
     (not (Tn.equal frag target))
-    && (Set.mem opt.simdgroup_fragments frag
-       || Set.mem opt.workgroup_shared frag
-       || match frag.Tn.label with "fragment" :: _ -> true | _ -> false)
+    && (Set.mem opt.simdgroup_fragments frag || Set.mem opt.masked_fragments frag)
   in
   let match_storeback = function
     | For_loop { index = lane; from_ = 0; to_; axis = Workgroup; body; _ } -> (
@@ -8387,6 +8388,7 @@ let segment_optimized (full : Low_level.optimized) (llc : Low_level.t) : Low_lev
     merge_node = (if reads_merge then full.Low_level.merge_node else None);
     workgroup_shared = Set.filter full.Low_level.workgroup_shared ~f:(Set.mem tns);
     simdgroup_fragments = Set.filter full.Low_level.simdgroup_fragments ~f:(Set.mem tns);
+    masked_fragments = Set.filter full.Low_level.masked_fragments ~f:(Set.mem tns);
     swizzled = Map.filter_keys full.Low_level.swizzled ~f:(Set.mem tns);
     pipelined = Map.filter_keys full.Low_level.pipelined ~f:(Set.mem tns);
     zero_fringe = Set.filter full.Low_level.zero_fringe ~f:(Set.mem tns);
