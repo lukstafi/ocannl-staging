@@ -12206,6 +12206,21 @@
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
+;; gh-ocannl-1761: guided registration (the default op_shape_schemes mode) against schemes off:
+;; counts, fallbacks, divergence, refusals inside a body, nesting, and nn_blocks parity of dims,
+;; ids, random initialization, values and gradients; each claim paired with a control.
+
+(test
+ (name op_schemes_guided)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules op_schemes_guided)
+ (libraries base ocannl stdio arrayjit.verdict)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
 ;; gh-ocannl-1751: Tensor.Scheme.check_definition over every schemed nn_blocks block, with an
 ;; inconsistent definition as the control.
 

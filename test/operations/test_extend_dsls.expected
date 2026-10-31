@@ -1,5 +1,5 @@
 HERE: test/operations/test_extend_dsls.ml:23:21
-[28]: relu shape 0:$92  <no-context>
+[28]: relu shape 0:$115  <no-context>
 grad_relu <no-context>
 HERE: test/operations/test_extend_dsls.ml:31:21
-[52]: relu shape 0:$185  <no-context>
+[52]: relu shape 0:$208  <no-context>
