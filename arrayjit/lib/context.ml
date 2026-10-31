@@ -853,8 +853,16 @@ let check_requirements ctx routine =
             routine.name listed)
 
 (* The public form of a backend's missing-prior-node failure, with what the lineage knows about the
-   node when the computation requires a backprop fragment propagating from it (gh-ocannl-1724): the
-   dangling gradient is materialized, so the link fails before [run]'s requirement check could. *)
+   node. When the computation requires a backprop fragment propagating from it (gh-ocannl-1724), the
+   dangling gradient is materialized, so the link fails before [run]'s requirement check could.
+   Otherwise, when the computation's own gradient code accumulates into it, the missing node is a
+   gradient whose reset this computation does not carry: [Tensor.op] embeds an operand's gradient
+   (and carries its zeroing) only while the operand is still a backprop root, and an embedded node
+   is allocated by the routine rather than demanded of the context. So no accumulating operation of
+   this computation found the operand a root: an earlier-constructed consumer had taken its backprop
+   and zeroing (gh-ocannl-1744), and -- as no routine of the lineage zeroes it -- that consumer is
+   not compiled here. The lineage cannot tell which consumer, nor whether it was evaluated
+   forward-only or compiled elsewhere, so the message names the typical case as typical. *)
 let lacks_node_error ctx (comp : Asgns.comp) tn =
   let base = "The linked context lacks node " ^ Tn.debug_name tn in
   let fragment = (tn, Asgns.Bprop) in
@@ -869,6 +877,24 @@ let lacks_node_error ctx (comp : Asgns.comp) tn =
           the context its compile returned."
          base (Tn.debug_name tn)
          (describe_unmet ctx ctx.frontier fragment))
+  else if
+    Set.mem comp.accumulates tn
+    && (not (Set.mem comp.zeroes tn))
+    && (not (Set.mem comp.embedded_nodes tn))
+    && not
+         (List.exists (Map.find_multi ctx.frontier.grad_roles tn.Tn.uid) ~f:(fun r -> r.gr_zeroes))
+  then
+    Utils.User_error
+      (Printf.sprintf
+         "%s: this computation's backprop accumulates into the gradient %s without zeroing it, and \
+          no routine of its lineage zeroes it. Its reset is carried by an earlier-constructed \
+          consumer of its tensor, beside that consumer's backprop (gh-ocannl-1744), and that \
+          consumer is not compiled in this lineage -- typically a parameter's first consumer that \
+          was evaluated forward-only (Train.forward_once, Train.forward), whether or not it has \
+          since been dropped, or one compiled outside this lineage. Compile a zeroing of the \
+          gradient first -- Train.zero_params_grads ~params for a parameter's -- then compile this \
+          routine from the context that compile returned, and run the zeroing before each step."
+         base (Tn.debug_name tn))
   else Utils.User_error base
 
 let compile_outcome ?name ?lowered_transform ?prelowered ?reuse ~provenance ?candidate ?retain ctx

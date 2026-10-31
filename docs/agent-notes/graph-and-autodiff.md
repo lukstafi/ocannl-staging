@@ -59,7 +59,11 @@ files.
   emitted `Fetch`es). Traps: siblings bind the ancestor's gradient buffer, so a sibling's value
   claim needs its own reset; a routine reading a term whose init another consumer embeds needs the
   value uploaded (`Context.set_values`), and a hand-built owner (`l1.grad =: 1; l1.backprop`)
-  needs `l1.forward` for its constants (`shared_grad_refusal.ml`).
+  needs `l1.forward` for its constants (`shared_grad_refusal.ml`). A loss over a leaf whose first
+  consumer is not compiled in the lineage (evaluated forward-only, since dropped, or a sibling's
+  update) accumulates into a gradient it neither zeroes nor embeds, so no routine allocates it: the
+  LINK fails before this check sees anything, and `Context.lacks_node_error` names the missing reset
+  and `zero_params_grads` (`lacks_grad_reset_hint.ml`).
 - Within ONE comp, `owned` is a set, so a fragment carried twice merged unseen while `asgns` ran
   it twice: `Asgns.sequence` refuses members sharing a fragment, naming it (gh-ocannl-1746,
   `fragment_sequenced_twice.ml`). A comp built past `sequence` (a hand-made `Seq`) owes the same
