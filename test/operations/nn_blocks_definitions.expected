@@ -1,0 +1,15 @@
+mlp_layer: its own scheme was traced: true
+mlp: its own scheme was traced: true
+softmax: its own scheme was traced: true
+cross_entropy_loss: its own scheme was traced: true
+layer_norm: its own scheme was traced: true
+conv2d: its own scheme was traced: true
+depthwise_separable_conv2d: its own scheme was traced: true
+max_pool2d: its own scheme was traced: true
+max_pool2d_copy: its own scheme was traced: true
+avg_pool2d: its own scheme was traced: true
+the checks allocated no session id: true
+the checks left the session as it was: true
+the inconsistent definition is refused, naming the definition and its scheme: true
+the failed check left the session as it was: true
+the session is usable after the failed check: true

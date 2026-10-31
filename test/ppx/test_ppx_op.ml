@@ -74,3 +74,18 @@ let%op _capture_nested x =
 let%op _capture_nested_toplevel =
   let g y = y ++ "ab => a" [ "b" ] in
   g ({ cn } ++ "abc => ab" [ "b" ])
+
+(* Automatic shape schemes (gh-ocannl-1751). The returned function of a [()] stage gets one when its
+   parameters are tensors -- unlabelled, or labelled with an operand use -- including a returned
+   function after the sub-layers; a non-tensor parameter after [()], an optional one, a rebound
+   labelled one, [let rec] and [[@@ocannl.no_scheme]] leave the expansion as it was. *)
+let%op _scheme_labelled () ~gamma ~beta x = (gamma *. x) + beta
+
+let%op _scheme_tail () =
+  let l = mlp_layer ~label:[ "tail" ] ~hid_dim:2 () in
+  fun x -> l ~x
+
+let%op _scheme_step () ~train_step x = match train_step with Some () -> x + 1.0 | None -> x
+let%op _scheme_mask () ?mask x = match mask with None -> x | Some m -> x *. m
+let%op _scheme_opted_out () x = { ow } * x [@@ocannl.no_scheme]
+let%op rec _scheme_rec () x = if false then _scheme_rec () x else x + 1.0

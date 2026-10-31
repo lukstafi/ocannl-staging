@@ -176,6 +176,27 @@ let exempt_zero_reference_exports =
     "Ppx_op.make_vb_nd";
     "Ppx_op.translate_block_tensor";
     "Ppx_op.translate_tdsl";
+    (* gh-ocannl-1751's automatic-scheme expansion: the classification and wrapping helpers the
+       translation arms share. Ppx_op has no .mli, like the helpers above. *)
+    "Ppx_op.default_scheme_name";
+    "Ppx_op.drop_attr_named";
+    "Ppx_op.eligible_function";
+    "Ppx_op.first_operand_ops";
+    "Ppx_op.has_attr_named";
+    "Ppx_op.is_ident";
+    "Ppx_op.mark_schemed";
+    "Ppx_op.mark_tail";
+    "Ppx_op.no_scheme_attr";
+    "Ppx_op.opt_out";
+    "Ppx_op.opt_out_binding";
+    "Ppx_op.opted_out";
+    "Ppx_op.rebinds";
+    "Ppx_op.scheme_attr";
+    "Ppx_op.schemed_name";
+    "Ppx_op.tensor_operand_evidence";
+    "Ppx_op.tensor_operand_ops";
+    "Ppx_op.tensor_params";
+    "Ppx_op.wrap_schemed";
     "Ppx_shared.axes_or_dims_arg";
     "Ppx_shared.axis_basis_of_type";
     "Ppx_shared.dim_spec_to_string";
@@ -283,7 +304,6 @@ let exempt_zero_reference_exports =
        entry here is a block nothing in the tree calls yet rather than a leaked helper. Some --
        [normal], [kaiming], [xavier] -- are reached through [Nn_blocks.DSL_modules] re-exports this
        census does not follow. *)
-    "Nn_blocks.avg_pool2d";
     (* The state construction batch_norm1d/2d share. Published like every other block: by
        gh-ocannl-1010's decision Nn_blocks has no interface to hide components in, and this one is
        usable for a custom normalization over the same running-state semantics. *)

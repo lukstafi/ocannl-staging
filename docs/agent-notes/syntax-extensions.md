@@ -31,5 +31,14 @@ files.
   an assignment: nested `(p.grad * s) + t` expands to `Option.map p.diff ... * s`, which does not
   typecheck — give the scaled read its own statement into an intermediate.
 
+- Automatic shape schemes (gh-ocannl-1751, `Tensor.Scheme.For_ppx`): `Ppx_op` marks the function a
+  `()` stage returns (or a unit body's tail `fun`) with an internal `ocannl.scheme` attribute
+  before translating, and the non-toplevel function arm wraps it; the no-unit toplevel arm wraps
+  with `deferred`. Parameter classification is syntactic (`tensor_params`): unlabelled variables
+  by convention, labelled ones only with direct-operand evidence. The trace adapter ignores the
+  result, so results are never classified. Two traps: a body that builds a closure whose `{ w }`
+  takes the default random initialization makes the enclosing trace refused (an RNG lazy in the
+  window), so the enclosing function degrades to unschemed; and a body's OCaml side effects run
+  once more per closure, so a test counting body runs opts out with `[@@ocannl.no_scheme]`.
 - A dimension capture needs a literal spec containing `=>`; this example captures the reduced axis.
   Doc-check `note_dimension_capture`: `let sum_last x = let open Ocannl.Nn_blocks.DSL_modules in [%op x ++ "ab => a" ["b"]]`.

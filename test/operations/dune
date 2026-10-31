@@ -12050,6 +12050,34 @@
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
+;; gh-ocannl-1751: [%op] functions get their shape schemes automatically, in checking mode;
+;; each claim is paired with an opted-out or schemes-off control.
+
+(test
+ (name op_schemes)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules op_schemes)
+ (libraries base ocannl stdio arrayjit.verdict)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+;; gh-ocannl-1751: Tensor.Scheme.check_definition over every schemed nn_blocks block, with an
+;; inconsistent definition as the control.
+
+(test
+ (name nn_blocks_definitions)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules nn_blocks_definitions)
+ (libraries base ocannl stdio arrayjit.verdict)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
 (test
  (name closed_shape_write_guard)
  (package neural_nets_lib)
