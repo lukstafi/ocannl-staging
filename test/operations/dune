@@ -4178,8 +4178,13 @@
   (glob_files_rec ../../arrayjit/lib/*.ml)
   ; gh-ocannl-1652: the `copy_files#` copies of the GPU backends compiled against the vendor
   ; stubs. Their libraries declare the same tracing gates as the real ones, which this check
-  ; verifies against the sources the gates are declared for.
-  (glob_files_rec ../../arrayjit/vendor_stubs/*.ml)
+  ; verifies against the sources the gates are declared for. Not `vendor_stubs/arms/`
+  ; (gh-ocannl-1688): its copies are of test and tool `select` arms this check already reads
+  ; where their executables select them, and read again as modules of the unlinked libraries
+  ; that type-check them, they would be refused for what only linking could make true.
+  (glob_files_rec ../../arrayjit/vendor_stubs/cudajit/*.ml)
+  (glob_files_rec ../../arrayjit/vendor_stubs/hipjit/*.ml)
+  (glob_files_rec ../../arrayjit/vendor_stubs/metal/*.ml)
   (glob_files_rec ../../tensor/*.ml)
   (glob_files_rec ../../lib/*.ml)
   (glob_files_rec ../../bin/*.ml)

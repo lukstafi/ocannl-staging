@@ -152,6 +152,12 @@ let gateless_dirs =
         "its actions diff checked-in interface copies against the installed hipjit's, or echo a \
          skip line where it is absent (gh-ocannl-1652): they spawn no program, so no startup check \
          is in reach to gate" ) );
+    ( "arrayjit/vendor_stubs/metal/dune",
+      ( None,
+        "its actions diff a checked-in interface copy against the installed metal's, depend on the \
+         compiled signature check of its hand-written runtime stub, or echo a skip line where \
+         metal is absent (gh-ocannl-1688): they spawn no program, so no startup check is in reach \
+         to gate" ) );
   ]
 
 (* gh-ocannl-1280: the credential variables no stanza may declare. Dune writes the environment of
