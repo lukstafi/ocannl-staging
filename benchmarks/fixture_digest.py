@@ -42,6 +42,12 @@ ones whose fixtures predate any venv you could reconstruct.
     python3 benchmarks/fixture_digest.py --check --expect-recorded rog-nv
                                                     # ...and exit 0 only if rog-nv has a record
                                                     # for every fixture (whatever its bytes)
+    python3 benchmarks/fixture_digest.py --check-names --expect-recorded rog-nv
+                                                    # ...the same question by NAME, without the
+                                                    # bytes: any checkout, any fixture set
+    python3 benchmarks/fixture_digest.py --record-matching --origin rog-nv <copies>
+                                                    # record copies of bytes already on record,
+                                                    # refusing anything that would be a baseline
     python3 benchmarks/fixture_digest.py --list-declared-measurement-boxes
                                                     # the fleet matrix, one box per line
 """
@@ -755,6 +761,112 @@ def missing_origins(name, entries, measurement_boxes):
     return sorted(set(measurement_boxes) - recorded)
 
 
+def workload_fixture_names(workloads_dir):
+    """The fixture file names the workload specs in `workloads_dir` generate, sorted.
+
+    `gen_fixtures.py` names a fixture by its spec's `name` field, not by the spec's file name, so
+    this reads that field -- with nothing but `json`, as everything here does. A workload with no
+    digest row anywhere is exactly the gap a by-name check exists to show, and DIGESTS alone
+    cannot name it.
+    """
+    names = set()
+    for spec in sorted(Path(workloads_dir).glob("*.json")):
+        try:
+            name = json.loads(spec.read_text())["name"]
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            raise ValueError(f"{spec}: cannot read the workload's name: {error}") from None
+        names.add(check_fixture_name(f"{name}.safetensors"))
+    return sorted(names)
+
+
+def fixture_file_name(name):
+    """`name` as the fixture file name a digest row carries: `gpt2_mini_b1`, its `.safetensors`
+    file name and a path to that file all name `gpt2_mini_b1.safetensors`."""
+    name = Path(name).name
+    if not name.endswith(".safetensors"):
+        name += ".safetensors"
+    return check_fixture_name(name)
+
+
+def record_matching(path, fixtures, origin=None):
+    """Record `fixtures` as `origin`'s bytes ONLY where they are bytes already on record.
+
+    The guarded form of `record` that recording one box's COPY of another box's fixture needs
+    (lukstafi/ocannl-staging#1136 and #1149 each scripted it by hand): a fixture is recorded only
+    when its canonical digest equals an existing content-v1 row, so the new row states that this
+    box measures the workload some box already measures, and nothing else. It refuses:
+
+    - bytes that match no content-v1 row (an unrecorded name, a regenerated or foreign copy, or a
+      match against a raw-v1 row only, which certifies the file but is no canonical baseline):
+      recording them would start a new baseline, which is plain `--record`'s announced act;
+    - a fixture `origin` already has a row for with a different identity: replacing it is a
+      content change or a new content baseline, which redefine what that box's past reports were
+      on, or a raw-v1 migration -- each of which plain `--record` classifies and announces;
+    - an `origin` that is not a declared measurement box: `record` would add it to the
+      declaration, and a misspelt box (`rog-nv-linux` for `rog-nv`) would become a new one.
+
+    All or nothing: every fixture is judged before the file is touched, and one refusal leaves it
+    unchanged, so a refused run never half-records a box. A fixture whose row `origin` already
+    holds with this identity is kept as it is, not counted as a refusal.
+
+    Returns `[(name, entry, matched_origins, new)]` per fixture, `new` False for one already
+    recorded; raises ValueError naming every refusal.
+    """
+    origin = resolve_origin(origin)
+    fixtures = one_path_per_name(fixtures)
+    entries, declared_boxes = _read_document(path)
+    boxes = (
+        set(declared_boxes)
+        if declared_boxes is not None
+        else {e.origin for recorded in entries.values() for e in recorded}
+    )
+    if origin not in boxes:
+        raise ValueError(
+            f"{origin!r} is not a measurement box of {path} (those are: "
+            f"{', '.join(sorted(boxes)) or 'none'}); --record-matching records rows for a declared "
+            "box and never declares one -- a new box is plain --record's act"
+        )
+    outcomes, refusals = [], []
+    for fixture in fixtures:
+        fixture = Path(fixture)
+        now = Entry(sha256_file(fixture), fixture.stat().st_size, origin, "content-v1")
+        recorded = entries.get(fixture.name, [])
+        mine = next((e for e in recorded if e.origin == origin), None)
+        matched = sorted(
+            e.origin
+            for e in recorded
+            if e.origin != origin and e.kind == "content-v1" and e.sha256 == now.sha256
+        )
+        if mine is not None and same_identity(mine, now):
+            outcomes.append((fixture.name, mine, matched, False))
+        elif mine is not None:
+            kind = replacement_kind(fixture, mine).replace("-", " ")
+            refusals.append(
+                f"{fixture.name}: {origin} already has a {mine.kind} row "
+                f"({mine.sha256[:12]}…) that these bytes ({now.sha256[:12]}…) are not; replacing "
+                f"it is a {kind}, which plain --record performs and announces"
+            )
+        elif not matched:
+            refusals.append(
+                f"{fixture.name}: these bytes ({now.sha256[:12]}…) match no content-v1 row "
+                f"(recorded: {describe(fixture.name, entries)}); recording them would be a new "
+                "baseline, which plain --record performs and announces"
+            )
+        else:
+            outcomes.append((fixture.name, now, matched, True))
+    if refusals:
+        raise ValueError(
+            f"--record-matching refused {len(refusals)} of {len(fixtures)} fixture(s) for "
+            f"{origin!r}, so nothing was recorded:\n  " + "\n  ".join(refusals)
+        )
+    added = [(name, entry) for name, entry, _, new in outcomes if new]
+    if added:
+        for name, entry in added:
+            entries[name] = sorted(entries.get(name, []) + [entry], key=lambda e: e.origin)
+        write_digests(path, entries, boxes)
+    return outcomes
+
+
 def _main(argv=None):
     here = Path(__file__).parent
     ap = argparse.ArgumentParser(
@@ -771,7 +883,24 @@ def _main(argv=None):
         "without regenerating anything",
     )
     mode.add_argument(
+        "--record-matching",
+        action="store_true",
+        help="record the given fixtures as this origin's bytes ONLY if each one's bytes equal an "
+        "existing content-v1 row (another box's copy of a recorded workload): refuses bytes that "
+        "match no content-v1 row, a fixture this origin already has a different row for, and an "
+        "undeclared origin -- every fixture is judged first, and any refusal records nothing",
+    )
+    mode.add_argument(
         "--check", action="store_true", help="report each fixture's status against the record"
+    )
+    mode.add_argument(
+        "--check-names",
+        action="store_true",
+        help="report, per fixture NAME, which declared boxes have a digest row, reading no "
+        "fixture bytes: positional arguments are names (gpt2_mini_b1, its .safetensors file name, "
+        "or a path whose file name is used; no file need exist), by default every name with a "
+        "row or a workload spec. With --expect-recorded it is the completeness check any "
+        "checkout can run for boxes whose fixtures it does not hold",
     )
     mode.add_argument(
         "--list-declared-measurement-boxes",
@@ -779,7 +908,12 @@ def _main(argv=None):
         help="print the explicit measurement-boxes header, one box per line; print nothing for "
         "a legacy file with no declaration",
     )
-    ap.add_argument("fixtures", nargs="*", type=Path, help="fixture paths (default: all of them)")
+    ap.add_argument(
+        "fixtures",
+        nargs="*",
+        type=Path,
+        help="fixture paths (default: all of them); names, with --check-names",
+    )
     ap.add_argument(
         "--origin",
         default=None,
@@ -809,19 +943,31 @@ def _main(argv=None):
         metavar="BOX",
         action="append",
         default=[],
-        help="with --check: exit 0 only if BOX has a digest entry for every fixture -- whether or "
-        "not that entry is the bytes on disk (that is --expect-origin's question). --check always "
-        "prints each fixture's declared measurement boxes that have no entry; this turns 'the "
-        "record is complete for BOX' into an exit status. Repeatable.",
+        help="with --check or --check-names: exit 0 only if BOX has a digest entry for every "
+        "fixture -- whether or not that entry is the bytes on disk (that is --expect-origin's "
+        "question). Both modes always print each fixture's declared measurement boxes that have no "
+        "entry; this turns 'the record is complete for BOX' into an exit status. Repeatable.",
     )
     ap.add_argument("--digests", type=Path, default=None, help=f"path to {DIGEST_FILE}")
     ap.add_argument("--fixture-dir", type=Path, default=here / "fixtures")
+    ap.add_argument(
+        "--workloads-dir",
+        type=Path,
+        default=here / "workloads",
+        help="with --check-names: the workload specs whose fixture names join the default names",
+    )
     args = ap.parse_args(argv)
     if args.expect_origin is not None and not args.check:
         # Before every mode's branch: a mode that returned first would accept the flag and exit 0.
-        ap.error("--expect-origin is a condition on --check's verdict; no other mode reads it")
-    if args.expect_recorded and not args.check:
-        ap.error("--expect-recorded is a condition on --check's verdict; no other mode reads it")
+        ap.error(
+            "--expect-origin is a condition on --check's verdict about the bytes on disk; no "
+            "other mode reads it"
+        )
+    if args.expect_recorded and not (args.check or args.check_names):
+        ap.error(
+            "--expect-recorded is a condition on --check's or --check-names's verdict; no other "
+            "mode reads it"
+        )
     if args.list_declared_measurement_boxes:
         if args.fixtures:
             ap.error("--list-declared-measurement-boxes reads only --digests; give no fixtures")
@@ -833,21 +979,75 @@ def _main(argv=None):
             print(box)
         return 0
     if args.adopt_legacy is not None:
-        if args.check:
-            ap.error("--adopt-legacy rewrites the file, so it belongs with --record, not --check")
+        if not args.record:
+            ap.error(
+                "--adopt-legacy attributes legacy rows while recording, so it belongs with "
+                "--record alone"
+            )
         # Here, not only where a legacy row is attributed: with an explicit --origin and no
         # three-field row in the file, nothing downstream reads the name, and a malformed claim
         # would be accepted as if it had been checked.
         check_origin(args.adopt_legacy)
-    if args.check and args.origin is not None:
+    if (args.check or args.check_names) and args.origin is not None:
         # Silently accepting it would let automation believe `--check --origin "$BOX"` verified
         # that box's bytes, when the verdict is against every recorded origin.
         ap.error(
-            "--check reports each fixture against EVERY recorded origin, so --origin has no "
-            "effect there; drop it, or use --record to write bytes under an origin"
+            "--check and --check-names report each fixture against EVERY recorded origin, so "
+            "--origin has no effect there; drop it (--expect-recorded names a box), or use "
+            "--record to write bytes under an origin"
         )
 
     digests = args.digests or args.fixture_dir / DIGEST_FILE
+
+    def declared_boxes_or_refuse(flags):
+        """The file's measurement boxes, refusing any `(flag, box)` naming a box outside them."""
+        boxes = measurement_boxes(digests)
+        for flag, box in flags:
+            if box is not None and box not in boxes:
+                # No entry can name an undeclared box (reading refuses one), so the check would
+                # fail every fixture; a misspelled box should read as the misspelling it is.
+                ap.error(
+                    f"{flag} {box!r} is not a measurement box of {digests} "
+                    f"(those are: {', '.join(boxes) or 'none'})"
+                )
+        return boxes
+
+    if args.check_names:
+        # Reads no fixture bytes and needs no fixture to exist: the question is what the file
+        # records, so a checkout holding none of a box's fixtures can still answer it.
+        entries = read_digests(digests)
+        boxes = declared_boxes_or_refuse(("--expect-recorded", b) for b in args.expect_recorded)
+        if args.fixtures:
+            try:
+                names = sorted({fixture_file_name(f) for f in args.fixtures})
+            except ValueError as e:
+                ap.error(str(e))
+            known = set(entries) | set(workload_fixture_names(args.workloads_dir))
+            unknown = [name for name in names if name not in known]
+            if unknown:
+                # A name nothing records and no workload generates is a misspelling until shown
+                # otherwise; reading it as "recorded for nobody" would hide that.
+                ap.error(
+                    f"{', '.join(unknown)}: no digest row in {digests} and no workload spec in "
+                    f"{args.workloads_dir} names it"
+                )
+        else:
+            names = sorted(set(entries) | set(workload_fixture_names(args.workloads_dir)))
+        if not names:
+            sys.exit(f"no fixture names given and none in {digests} or {args.workloads_dir}")
+        bad = 0
+        for name in names:
+            recorded = entries.get(name, [])
+            rows = ", ".join(f"{e.origin} {e.kind} {e.sha256[:12]}…" for e in recorded)
+            print(f"{name}: {rows or 'no digest row'}")
+            missing = missing_origins(name, entries, boxes)
+            if missing:
+                print(f"    no entry for declared measurement box(es): {', '.join(missing)}")
+            unrecorded = sorted(set(args.expect_recorded) & set(missing))
+            if unrecorded:
+                print(f"    not recorded for {', '.join(unrecorded)} (--expect-recorded)")
+                bad += 1
+        return 1 if bad else 0
     fixtures = args.fixtures or sorted(args.fixture_dir.glob("*.safetensors"))
     if not fixtures:
         sys.exit(f"no fixtures given and none in {args.fixture_dir}; nothing to do")
@@ -857,18 +1057,11 @@ def _main(argv=None):
 
     if args.check:
         entries = read_digests(digests)
-        boxes = measurement_boxes(digests)
         expected = args.expect_origin
-        for flag, box in [("--expect-origin", expected)] + [
-            ("--expect-recorded", box) for box in args.expect_recorded
-        ]:
-            if box is not None and box not in boxes:
-                # No entry can name an undeclared box (reading refuses one), so the check would
-                # fail every fixture; a misspelled box should read as the misspelling it is.
-                ap.error(
-                    f"{flag} {box!r} is not a measurement box of {digests} "
-                    f"(those are: {', '.join(boxes) or 'none'})"
-                )
+        boxes = declared_boxes_or_refuse(
+            [("--expect-origin", expected)]
+            + [("--expect-recorded", box) for box in args.expect_recorded]
+        )
         bad = 0
         for fx in fixtures:
             verdict, sha, size, origins = matching_origins(fx, entries)
@@ -893,6 +1086,23 @@ def _main(argv=None):
                 failed = True
             bad += failed
         return 1 if bad else 0
+
+    if args.record_matching:
+        try:
+            outcomes = record_matching(digests, fixtures, args.origin)
+        except ValueError as e:
+            sys.exit(f"refused: {e}")
+        origin = resolve_origin(args.origin)
+        added = sum(new for _, _, _, new in outcomes)
+        print(
+            f"recorded {added} of {len(outcomes)} fixture(s) in {digests} as origin {origin!r}, "
+            "each a copy of bytes already on record"
+        )
+        for name, entry, matched, new in outcomes:
+            label = "new" if new else "already recorded"
+            agrees = f", the bytes of {','.join(matched)}" if matched else ""
+            print(f"  {label}: {name} sha256 {entry.sha256} ({entry.size} bytes) [{origin}]{agrees}")
+        return 0
 
     origin = resolve_origin(args.origin, adopting=args.adopt_legacy)
     changes = record(digests, fixtures, origin, legacy_origin=args.adopt_legacy)

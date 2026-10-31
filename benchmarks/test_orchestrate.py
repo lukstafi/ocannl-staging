@@ -673,6 +673,7 @@ class Gh1003SummaryTest(unittest.TestCase):
 # fragment of the call's line; an entry that matches nothing fails as stale.
 JSON_LOADS_NOT_RESULT_LINES = {
     ("fixture_digest.py", "json.loads(raw_header"): "safetensors fixture header",
+    ("fixture_digest.py", 'name = json.loads(spec.read_text())'): "workload spec",
     ("runners/bench_common.py", "json.loads(f.read(n))"): "safetensors fixture header",
     ("gen_fixtures.py", "spec = json.loads(spec_path"): "workload spec",
     ("gen_fixtures.py", 'name = json.loads(spec_path'): "workload spec",
@@ -3435,6 +3436,180 @@ class FixtureDigestTest(unittest.TestCase):
                         [*mode, "--digests", str(digests), "--expect-recorded", "m4-max"]
                     )
             self.assertEqual(refused.exception.code, 2, f"--expect-recorded with {mode[0]}")
+
+    def names_cli(self, digests, *names, expect_recorded=(), workloads=None, extra=()):
+        """`--check-names` over `names`: (exit status, report)."""
+        argv = ["--check-names", *map(str, names), "--digests", str(digests), *extra]
+        argv += ["--workloads-dir", str(workloads or self.dir / "no-workloads")]
+        for box in expect_recorded:
+            argv += ["--expect-recorded", box]
+        with contextlib.redirect_stdout(io.StringIO()) as report:
+            code = fixture_digest._main(argv)
+        return code, report.getvalue()
+
+    def test_check_names_decides_completeness_without_the_bytes(self):
+        # gh-ocannl-1356 (1): `--check --expect-recorded` hashes files, so confirming that a box's
+        # rows landed needed that box's fixtures on disk. By name, the record alone answers it:
+        # here every fixture is deleted before the question is asked.
+        digests = self.dir / fixture_digest.DIGEST_FILE
+        digests.write_text(fixture_digest.header(["m4-max", "minix", "rog-nv"]))
+        a = self.fixture("gpt2_mini.safetensors", b"m4-max bytes")
+        b = self.fixture("gpt2_mini_b1.safetensors", b"b1 bytes")
+        fixture_digest.record(digests, [a, b], "m4-max")
+        fixture_digest.record(digests, [a], "rog-nv")
+        a.unlink()
+        b.unlink()
+
+        code, report = self.names_cli(digests, expect_recorded=["m4-max"])
+        self.assertEqual(code, 0, report)
+        self.assertIn("gpt2_mini.safetensors: m4-max content-v1 ", report)
+        self.assertIn("    no entry for declared measurement box(es): minix, rog-nv\n", report)
+        code, report = self.names_cli(digests, expect_recorded=["rog-nv"])
+        self.assertEqual(code, 1, "rog-nv has no gpt2_mini_b1 row")
+        self.assertIn("not recorded for rog-nv (--expect-recorded)", report)
+        self.assertEqual(report.count("(--expect-recorded)"), 1, "gpt2_mini's row is there")
+        # Narrowed by name, spelt any of the three ways a caller holds one.
+        for spelling in ("gpt2_mini", "gpt2_mini.safetensors", self.dir / "x" / "gpt2_mini.safetensors"):
+            code, report = self.names_cli(digests, spelling, expect_recorded=["rog-nv"])
+            self.assertEqual(code, 0, f"{spelling}: {report}")
+            self.assertNotIn("gpt2_mini_b1", report, "only the named fixture is judged")
+        self.assertEqual(self.names_cli(digests, "gpt2_mini_b1")[0], 0, "informational alone")
+
+        # A workload spec with no row anywhere is a gap DIGESTS alone cannot name.
+        workloads = self.dir / "workloads"
+        workloads.mkdir()
+        (workloads / "spec_file_name.json").write_text(json.dumps({"name": "lenet"}))
+        code, report = self.names_cli(digests, workloads=workloads, expect_recorded=["m4-max"])
+        self.assertEqual(code, 1, report)
+        self.assertIn("lenet.safetensors: no digest row\n", report, "named by the spec's name")
+        self.assertIn("box(es): m4-max, minix, rog-nv\n    not recorded for m4-max", report)
+        self.assertEqual(self.names_cli(digests, "lenet", workloads=workloads)[0], 0)
+
+    def test_check_names_refuses_what_it_cannot_answer(self):
+        digests = self.dir / fixture_digest.DIGEST_FILE
+        fixture_digest.record(digests, [self.fixture("gpt2_mini.safetensors")], "m4-max")
+        refusals = {
+            "a misspelt name": (["gpt2_mni"], []),
+            "an undeclared box": (["gpt2_mini"], ["--expect-recorded", "m4max"]),
+            "--origin": (["gpt2_mini"], ["--origin", "m4-max"]),
+            "--expect-origin, a question about bytes": (["gpt2_mini"], ["--expect-origin", "m4-max"]),
+            "--adopt-legacy": (["gpt2_mini"], ["--adopt-legacy", "m4-max"]),
+        }
+        for what, (names, extra) in refusals.items():
+            with contextlib.redirect_stderr(io.StringIO()) as err:
+                with self.assertRaises(SystemExit, msg=what) as refused:
+                    self.names_cli(digests, *names, extra=extra)
+            self.assertEqual(refused.exception.code, 2, f"{what}: {err.getvalue()}")
+        self.assertEqual(self.names_cli(digests, "gpt2_mini")[0], 0, "control: the name exists")
+
+    def record_matching_cli(self, digests, *fixtures, origin):
+        """`--record-matching` as `origin`: (exit status or SystemExit message, stdout)."""
+        argv = ["--record-matching", *map(str, fixtures), "--digests", str(digests)]
+        argv += ["--origin", origin]
+        with contextlib.redirect_stdout(io.StringIO()) as report:
+            try:
+                code = fixture_digest._main(argv)
+            except SystemExit as exit_:
+                code = exit_.code
+        return code, report.getvalue()
+
+    def copies_on_record(self):
+        """A digest file declaring three boxes, with m4-max's `gpt2_mini_b1` and `lenet` rows."""
+        digests = self.dir / fixture_digest.DIGEST_FILE
+        digests.write_text(fixture_digest.header(["m4-max", "minix", "rog-nv"]))
+        anchor = [
+            self.fixture("m4/gpt2_mini_b1.safetensors", b"anchor b1"),
+            self.fixture("m4/lenet.safetensors", b"anchor lenet"),
+        ]
+        fixture_digest.record(digests, anchor, "m4-max")
+        return digests
+
+    def test_record_matching_records_a_box_copy_of_bytes_on_record(self):
+        # gh-ocannl-1356 (2): the guarded record #1136 and #1149 each scripted by hand. The copy
+        # is re-serialized (other padding, other metadata order): content-v1 identity is what
+        # has to match, not the file.
+        digests = self.copies_on_record()
+        copy = self.fixture(
+            "rog/gpt2_mini_b1.safetensors", b"anchor b1", extra_padding=8,
+            metadata={"name": "gpt2_mini_b1"},
+        )
+        self.assertNotEqual(copy.read_bytes(), (self.dir / "m4/gpt2_mini_b1.safetensors").read_bytes())
+
+        code, report = self.record_matching_cli(digests, copy, origin="rog-nv")
+
+        self.assertEqual(code, 0, report)
+        self.assertIn("recorded 1 of 1 fixture(s)", report)
+        self.assertIn("  new: gpt2_mini_b1.safetensors sha256 ", report)
+        self.assertIn("[rog-nv], the bytes of m4-max\n", report)
+        rows = {e.origin: e for e in fixture_digest.read_digests(digests)["gpt2_mini_b1.safetensors"]}
+        self.assertEqual(sorted(rows), ["m4-max", "rog-nv"])
+        self.assertEqual((rows["rog-nv"].sha256, rows["rog-nv"].kind), (rows["m4-max"].sha256, "content-v1"))
+        self.assertEqual(rows["rog-nv"].size, copy.stat().st_size, "the copy's own physical size")
+        with contextlib.redirect_stdout(io.StringIO()):
+            accepted = fixture_digest._main(
+                ["--check", str(copy), "--digests", str(digests), "--expect-origin", "rog-nv"]
+            )
+        self.assertEqual(accepted, 0, "the vanished-fixture acceptance check now passes")
+        self.assertEqual(self.names_cli(digests, "gpt2_mini_b1", expect_recorded=["rog-nv"])[0], 0)
+
+        # Again: nothing to add, and the file is left byte for byte as it was.
+        before = digests.read_bytes()
+        code, report = self.record_matching_cli(digests, copy, origin="rog-nv")
+        self.assertEqual(code, 0, report)
+        self.assertIn("recorded 0 of 1 fixture(s)", report)
+        self.assertIn("  already recorded: gpt2_mini_b1.safetensors", report)
+        self.assertEqual(digests.read_bytes(), before)
+
+    def test_record_matching_refuses_every_baseline_and_records_nothing(self):
+        # The negative controls: each refusal leaves the digest file byte for byte as it was --
+        # including the good fixture recorded beside a bad one (all or nothing).
+        digests = self.copies_on_record()
+        good = self.fixture("rog/lenet.safetensors", b"anchor lenet")
+        raw_only = self.fixture("rog/gpt2_mini.safetensors", b"legacy bytes")
+        # A raw-v1 row (minix's) is the only record of gpt2_mini: its bytes match it as a file,
+        # and still no CONTENT row says what workload they are.
+        entries, boxes = fixture_digest._read_document(digests)
+        entries[raw_only.name] = [fixture_digest.Entry(
+            fixture_digest._raw_sha256_file(raw_only), raw_only.stat().st_size, "minix", "raw-v1"
+        )]
+        fixture_digest.write_digests(digests, entries, boxes)
+        self.assertEqual(fixture_digest.status(raw_only, fixture_digest.read_digests(digests))[0], "MATCH")
+        before = digests.read_bytes()
+        cases = {
+            "non-matching bytes": (
+                [self.fixture("rog/gpt2_mini_b1.safetensors", b"regenerated b1")], "rog-nv",
+                "match no content-v1 row (recorded: m4-max",
+            ),
+            "a new baseline: a name nothing records": (
+                [self.fixture("rog/mlp_small.safetensors", b"anchor lenet")], "rog-nv",
+                "match no content-v1 row (recorded: nothing)",
+            ),
+            "a match against a raw-v1 row only": ([raw_only], "rog-nv", "recorded: minix "),
+            "the good fixture beside a bad one": (
+                [good, self.fixture("bad/gpt2_mini_b1.safetensors", b"regenerated b1")], "rog-nv",
+                "refused 1 of 2 fixture(s)",
+            ),
+            "an undeclared origin": ([good], "rog-nv-linux", "is not a measurement box"),
+        }
+        for what, (fixtures, origin, why) in cases.items():
+            code, report = self.record_matching_cli(digests, *fixtures, origin=origin)
+            self.assertIsInstance(code, str, f"{what}: refused through sys.exit, status 1")
+            self.assertIn(why, code, what)
+            self.assertNotIn("recorded ", report, what)
+            self.assertEqual(digests.read_bytes(), before, f"{what}: nothing was written")
+
+        # This origin's own different row: replacing it is plain --record's announced act.
+        fixture_digest.record(digests, [self.fixture("old/lenet.safetensors", b"old lenet")], "rog-nv")
+        before = digests.read_bytes()
+        code, _ = self.record_matching_cli(digests, good, origin="rog-nv")
+        self.assertIn("rog-nv already has a content-v1 row", code)
+        self.assertIn("it is a content change", code)
+        self.assertEqual(digests.read_bytes(), before)
+
+        # Control: the same good fixture, for a box without a row, records.
+        code, report = self.record_matching_cli(digests, good, origin="minix")
+        self.assertEqual(code, 0, report)
+        self.assertIn("  new: lenet.safetensors", report)
 
     def test_a_host_that_cannot_name_itself_is_refused_not_given_a_placeholder(self):
         # A literal `unknown-host` is not an origin, it is every nameless box sharing one name:

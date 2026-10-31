@@ -517,7 +517,13 @@ files.
   pinned to one box's records by its exit status -- never grep the report for the box, since its
   origin field joins every agreeing box (`m4-max,tuf's bytes`). `--check` names each fixture's
   declared boxes with no entry, and `--expect-recorded <box>` fails on any, so confirming a
-  newly recorded box needs no `python -c` over `missing_origins`. Regeneration is a cross-box
+  newly recorded box needs no `python -c` over `missing_origins`; `--check-names --expect-recorded
+  <box>` asks it by NAME, reading no bytes, so any checkout confirms rows for fixtures it does not
+  hold (gh-ocannl-1356). Recording a box's COPY of another box's bytes is `--record-matching
+  --origin <box> <copies>`, never plain `--record`: it records only bytes equal to an existing
+  `content-v1` row and refuses, all or nothing, anything else -- unmatched bytes, a match against a
+  `raw-v1` row only, a box's own different row (a new baseline is plain `--record`'s announced
+  act and the user's call) and an undeclared origin. Regeneration is a cross-box
   event to be coordinated across every origin in `DIGESTS.txt`'s `# measurement-boxes:` header
   field at once (gh-ocannl-759, gh-ocannl-850). That list is independent of the entry rows, so
   `divergent_origins` and generated reports name a declared box even when its fixture entry is
