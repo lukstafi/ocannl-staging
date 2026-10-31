@@ -786,6 +786,82 @@ type async_copy_syntax = {
 (** gh-ocannl-487 phase 2: asynchronous staging copies for software-pipelined tiles (see
     {!C_syntax_config.async_copy}). *)
 
+(** How a backend renders a value select both of whose arms it may evaluate (gh-ocannl-1622,
+    gh-ocannl-1695): {!C_syntax_config.select_blend_syntax}'s answer.
+
+    - [Blend_truth blend]: [blend truth a b], applied to the select's C truth expression -- built by
+      [C_syntax.pp_scalar_op] as the C spelling's own test -- and the two arms (cc, whose
+      [OCANNL_SELECT] final step needs the truth apart from the arms);
+    - [Blend_over_locals decl]: the backend's own short-circuiting spelling ([ternop_syntax] /
+      [binop_syntax]) applied to arms first bound to locals declared [decl] (C++'s [auto]) in an
+      immediately-invoked lambda. The truth is then exactly the dialect's own test, whatever it is
+      ([Satur01_gate]'s differs between cc and the GPU dialects, ahrefs/ocannl#1647), and each local
+      keeps its arm's type, so the value and type are the short-circuiting spelling's (a lambda
+      returns the decayed type of its one [return], the [?:]'s). A lambda rather than cc's GNU
+      statement expression: NVRTC (13.4) rejects [({ ... })] ("expected an expression"). *)
+type select_blend =
+  | Blend_truth of (PPrint.document -> PPrint.document -> PPrint.document -> PPrint.document)
+  | Blend_over_locals of string
+
+(* The names a blend binds its arms to, in its own block, so an inner blend shadows an outer one's
+   and no arm can mention them. *)
+let blend_local_a = "ocannl_sel_a__"
+
+(** The two [Blend_over_locals] renderings, shared by [C_syntax.pp_scalar_op] and
+    {!operand_conditionality_violations} so the checked text is the emitted one: an
+    immediately-invoked lambda capturing by reference ([[&]() { ... }()]) that binds the arms to
+    [decl] locals, in order, then returns the dialect's own short-circuiting spelling over the
+    names. A [Where] binds both arms, a gate ([Relu_gate], [Satur01_gate]) its gated operand -- its
+    other arm is the spelling's own constant. The first binding's declaration shares the opening
+    line, as cc's blend does, so a reader of the emitted text finds a blend's block by its opening
+    line. *)
+module Over_locals : sig
+  val blend_where :
+    decl:string ->
+    ternop_syntax:
+      (Ops.prec ->
+      Ops.ternop ->
+      PPrint.document ->
+      PPrint.document ->
+      PPrint.document ->
+      PPrint.document) ->
+    Ops.prec ->
+    PPrint.document ->
+    PPrint.document ->
+    PPrint.document ->
+    PPrint.document
+
+  val blend_gate :
+    decl:string ->
+    binop_syntax:(Ops.prec -> Ops.binop -> PPrint.document -> PPrint.document -> PPrint.document) ->
+    Ops.prec ->
+    Ops.binop ->
+    PPrint.document ->
+    PPrint.document ->
+    PPrint.document
+end = struct
+  let blend_local_b = "ocannl_sel_b__"
+
+  let lambda ~decl bindings body =
+    let open PPrint in
+    let binding (name, value) =
+      string decl ^^ space ^^ string name ^^ string " =" ^^ nest 2 (break 1 ^^ value) ^^ string ";"
+    in
+    group
+      (string "[&]() { "
+      ^^ separate (break 1) (List.map bindings ~f:binding)
+      ^^ break 1 ^^ string "return " ^^ body ^^ string "; }()")
+
+  let blend_where ~decl ~ternop_syntax prec cond a b =
+    let open PPrint in
+    lambda ~decl
+      [ (blend_local_a, a); (blend_local_b, b) ]
+      (ternop_syntax prec Ops.Where cond (string blend_local_a) (string blend_local_b))
+
+  let blend_gate ~decl ~binop_syntax prec op cond v =
+    lambda ~decl [ (blend_local_a, v) ] (binop_syntax prec op cond (PPrint.string blend_local_a))
+end
+
 module type C_syntax_config = sig
   val procs : Low_level.t array
   (** The low-level procedures this functor application will render: one per kernel of the
@@ -883,22 +959,21 @@ module type C_syntax_config = sig
 
   val binop_syntax : Ops.prec -> Ops.binop -> PPrint.document -> PPrint.document -> PPrint.document
 
-  val select_blend_syntax :
-    Ops.prec -> (PPrint.document -> PPrint.document -> PPrint.document -> PPrint.document) option
-  (** A branchless rendering of a value select at this compute precision (gh-ocannl-1622): applied
-      to a C truth expression and the two arms, it must evaluate both arms unconditionally — each
-      rendered before any [?:], [&&] or [||] ({!operand_conditionality_violations} checks it) — and
-      have exactly the C type and value of the short-circuiting spelling it replaces, bit for bit.
-      [pp_scalar_op] uses it for a [Where], [Relu_gate] or [Satur01_gate] that
-      {!Low_level.speculable_select} admits, keeping the condition exactly as the short-circuiting
-      spelling tests it.
+  val select_blend_syntax : Ops.prec -> select_blend option
+  (** A branchless rendering of a value select at this compute precision (gh-ocannl-1622), in one of
+      the {!select_blend} forms: it must evaluate both arms unconditionally — each rendered before
+      any [?:], [&&] or [||] ({!operand_conditionality_violations} checks it) — and have exactly the
+      C type and value of the short-circuiting spelling it replaces, bit for bit. [pp_scalar_op]
+      uses it for a [Where], [Relu_gate] or [Satur01_gate] that {!Low_level.speculable_select}
+      admits, keeping the condition exactly as the short-circuiting spelling tests it.
 
       Why: C forbids evaluating the unselected arm of [?:], so where an arm holds a load the
       compiler cannot prove dereferenceable it emits a conditional branch, and a step's time follows
       the data (cifar_resnet's inlined ReLU and max-pool backward selects on cc, gh-ocannl-1557).
-      With both arms already values, the compiler if-converts. [None] (the {!Pure_C_config} default,
-      kept by the GPU backends, which predicate a short ternary themselves) keeps the
-      short-circuiting [ternop_syntax] / [binop_syntax] spelling. *)
+      With both arms already values, the compiler if-converts. AMDGPU branches too (gh-ocannl-1695),
+      so HIP blends over [auto] locals. [None] (the {!Pure_C_config} default) keeps the
+      short-circuiting [ternop_syntax] / [binop_syntax] spelling: CUDA's, which ptxas if-converts
+      itself, and Metal's, whose compiler no tool here can read. *)
 
   val unop_syntax : Ops.prec -> Ops.unop -> PPrint.document -> PPrint.document
   val vec_unop_syntax : Ops.prec -> Ops.vec_unop -> PPrint.document -> PPrint.document
@@ -1689,20 +1764,37 @@ let operand_conditionality_violations ~ternop_syntax ~binop_syntax ~select_blend
       (* gh-ocannl-1622: the blend is the one rendering that must evaluate both arms
          unconditionally: each arm is rendered before any construct that could skip it. (The
          selection itself may be a [?:] -- over values already computed, it skips nothing.) *)
+      let check_blend what f ~arms =
+        match render f with
+        | None -> ()
+        | Some s -> (
+            match (at s "$1", List.map arms ~f:(at s)) with
+            | None, _ -> report what "not every operand is rendered"
+            | Some _, positions when List.exists positions ~f:Option.is_none ->
+                report what "not every operand is rendered"
+            | Some _, positions ->
+                let last =
+                  List.fold positions ~init:0 ~f:(fun m p -> Int.max m (Option.value_exn p))
+                in
+                if gated_before s last then
+                  report what
+                    "must evaluate both arms unconditionally, but the rendering reaches an arm \
+                     after a [?], [&&] or [||]")
+      in
       match select_blend_syntax prec with
       | None -> ()
-      | Some blend -> (
-          match render (fun () -> blend a1 a2 a3) with
-          | None -> ()
-          | Some s -> (
-              let what = at_prec "select blend" in
-              match (at s "$1", at s "$2", at s "$3") with
-              | None, _, _ | _, None, _ | _, _, None -> report what "not every operand is rendered"
-              | Some _, Some i2, Some i3 ->
-                  if gated_before s (Int.max i2 i3) then
-                    report what
-                      "must evaluate both arms unconditionally, but the rendering reaches an arm \
-                       after a [?], [&&] or [||]")));
+      | Some (Blend_truth blend) ->
+          check_blend (at_prec "select blend") (fun () -> blend a1 a2 a3) ~arms:[ "$2"; "$3" ]
+      | Some (Blend_over_locals decl) ->
+          check_blend
+            (at_prec "select blend over a where")
+            (fun () -> Over_locals.blend_where ~decl ~ternop_syntax prec a1 a2 a3)
+            ~arms:[ "$2"; "$3" ];
+          List.iter [ Ops.Relu_gate; Ops.Satur01_gate ] ~f:(fun op ->
+              check_blend
+                (at_prec ("select blend over " ^ Ops.binop_cd_fallback_syntax op))
+                (fun () -> Over_locals.blend_gate ~decl ~binop_syntax prec op a1 a2)
+                ~arms:[ "$2" ]));
   List.rev !violations
 
 (** The names defined by a backend's builtins table (the keys of its
@@ -2993,6 +3085,19 @@ module C_syntax (B : C_syntax_config) = struct
      [p], returning its local definitions with its value expression. [pp_scalar] passes itself;
      [lane_expr] passes a renderer of pack lanes, after declining the operators whose operands it
      cannot render per lane. *)
+  (* Whether an operand's own expression -- not a hoisted [Local_scope] body, which renders as
+     statements of its own -- holds a NaN [Constant]. *)
+  let rec holds_nan_literal (s : Low_level.scalar_t) =
+    match s with
+    | Constant c -> Float.is_nan c
+    | Ternop (_, (a, _), (b, _), (c, _)) ->
+        holds_nan_literal a || holds_nan_literal b || holds_nan_literal c
+    | Binop (_, (a, _), (b, _)) -> holds_nan_literal a || holds_nan_literal b
+    | Unop (_, (a, _)) -> holds_nan_literal a
+    | Get_dynamic { dyn_value = v, _; _ } -> holds_nan_literal v
+    | Local_scope _ | Get_local _ | Get_merge_buffer _ | Get _ | Constant_bits _ | Embed_index _ ->
+        false
+
   let pp_scalar_op ~operand (prec : Ops.prec) (vcomp : Low_level.scalar_t) :
       (int * PPrint.document) list * PPrint.document =
     let open PPrint in
@@ -3002,6 +3107,13 @@ module C_syntax (B : C_syntax_config) = struct
       if not (Ops.is_float prec) then None
       else
         match B.select_blend_syntax prec with
+        | Some (Blend_over_locals _) when List.exists arms ~f:(fun (a, _) -> holds_nan_literal a) ->
+            (* gh-ocannl-1695: the GPU dialects compile under no-NaNs fast math (HIP's
+               [-ffast-math]), where a NaN literal bound to a local is the one NaN the optimizer can
+               see, and a select of it is its to drop: blended, a masked attention's [where mask s
+               NAN] came back finite on gfx1151 where the short-circuiting spelling kept the NaN
+               rows (online_softmax, online_softmax_block). The mask fill keeps [?:]. *)
+            None
         | Some blend when Low_level.speculable_select ~cond ~arms -> Some blend
         | _ -> None
     in
@@ -3052,10 +3164,12 @@ module C_syntax (B : C_syntax_config) = struct
         let defs = List.concat [ d1; d2; d3 ] in
         let expr =
           match (op, blend_for prec ~cond:v1 ~arms:[ (v2, prec); (v3, prec) ]) with
-          | Ops.Where, Some blend ->
+          | Ops.Where, Some (Blend_truth blend) ->
               (* The truth is the short-circuiting spelling's own test ([Ops.ternop_c_syntax]'s
                  float arm), so a NaN condition still selects the then-arm. *)
               blend (parens e1 ^^ string " != 0.0") e2 e3
+          | Ops.Where, Some (Blend_over_locals decl) ->
+              Over_locals.blend_where ~decl ~ternop_syntax:B.ternop_syntax prec e1 e2 e3
           | _ -> group (B.ternop_syntax prec op e1 e2 e3)
         in
         (defs, expr)
@@ -3092,17 +3206,19 @@ module C_syntax (B : C_syntax_config) = struct
                  float arms), arms in its order: [Satur01_gate] yields its second operand where the
                  test FAILS. *)
               match op with
-              | Ops.Relu_gate -> (
-                  match gate_blend () with
-                  | Some blend -> blend (parens e1 ^^ string " > 0.0") e2 (string "0.0")
-                  | None -> group (B.binop_syntax prec op e1 e2))
-              | Ops.Satur01_gate -> (
-                  match (gate_blend (), prec) with
-                  | Some blend, Ops.Single_prec _ ->
+              | Ops.Relu_gate | Ops.Satur01_gate -> (
+                  match (op, gate_blend (), prec) with
+                  | Ops.Relu_gate, Some (Blend_truth blend), _ ->
+                      blend (parens e1 ^^ string " > 0.0") e2 (string "0.0")
+                  | _, Some (Blend_truth blend), Ops.Single_prec _ ->
                       blend (string "fabsf(floorf(" ^^ e1 ^^ string ")) > 0.0") (string "0.0") e2
-                  | Some blend, _ ->
+                  | _, Some (Blend_truth blend), _ ->
                       blend (string "fabs(floor(" ^^ e1 ^^ string ")) > 0.0") (string "0.0") e2
-                  | None, _ -> group (B.binop_syntax prec op e1 e2))
+                  | _, Some (Blend_over_locals decl), _ ->
+                      (* The dialect's own gate over its operand's value: the GPU [Satur01_gate]
+                         tests [0 < x && x < 1], not cc's [fabs(floor(x)) > 0]. *)
+                      Over_locals.blend_gate ~decl ~binop_syntax:B.binop_syntax prec op e1 e2
+                  | _, None, _ -> group (B.binop_syntax prec op e1 e2))
               | _ -> group (B.binop_syntax prec op e1 e2)
             in
             (defs, expr))

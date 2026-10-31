@@ -56,6 +56,24 @@ files.
   evaluates BOTH branches, so any range guard's deliberately out-of-range read (clamped windows,
   inlined-concat component guards) would still be evaluated. Codegen pins:
   `test_where_precision.metal.expected`, `test_metal_guarded_gather_codegen`.
+- HIP blends a value select (`Low_level.speculable_select`) over `auto` locals in an
+  immediately-invoked lambda, `[&]() { auto ocannl_sel_a__ = A; ...; return <the dialect's own
+  ?:>; }()` (`Cuda_like_config`'s `blends_value_selects`, `C_syntax.Over_locals`, gh-ocannl-1695):
+  AMDGPU branched around an arm's load on every census leg (`s_cbranch_scc1` over a uniform
+  condition, an `s_and_saveexec`/`s_cbranch_execz` region over a divergent one). CUDA keeps `?:`:
+  ptxas (13.4, sm_120) predicated the load in every OCANNL-emitted shape (serial, `Grid`,
+  bounds-guarded, the realistic pool), though a hand-written nvcc probe with an `if (i < n)` guard
+  did branch -- census the emitted kernels, not a probe. NVRTC 13.4 rejects GNU statement
+  expressions (`({ ... })`: "expected an expression"), which HIPRTC and cc accept, hence the lambda.
+  The truth stays the dialect's own test: the GPU `Satur01_gate` spells `0 < x && x < 1`, not cc's
+  `fabs(floor(x)) > 0`. On HIP the blend moved ahrefs/ocannl#1647's NaN-condition divergence:
+  `Relu_gate` became exact and the zero-else `Where` took the else-arm. HIP compiles under
+  no-NaNs fast math, so a NaN LITERAL bound to a local is the optimizer's to drop: a blended
+  masked-attention fill `where mask s NAN` came back finite (`online_softmax*`), so
+  `C_syntax.pp_scalar_op` leaves a select with a NaN-literal arm short-circuiting under
+  `Blend_over_locals` (`bs_nan_fill`). Metal keeps `?:`: its
+  offline compiler ships with full Xcode only and Apple's GPU ISA has no public disassembler, so no
+  census can say whether it branches.
 - Metal has no `double`, and f64 stays rejected in `typ_of_prec` — a declared double buffer must
   fail rather than be silently degraded; only scalar expression casts render as `float`. So a
   backend-agnostic test must never reach for `double` just to have a second precision:

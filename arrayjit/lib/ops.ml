@@ -555,7 +555,7 @@ type op = Ternop of ternop | Binop of binop | Unop of unop [@@deriving sexp_of]
 
     The classification says which operands a rendering is REQUIRED to leave unevaluated, at most.
     One per-instance exception evaluates more (gh-ocannl-1622): a backend with a branchless
-    [select_blend_syntax] (cc) evaluates every arm of a value select that
+    [select_blend_syntax] (cc, HIP) evaluates every arm of a value select that
     {!Low_level.speculable_select} admits. Floors over this classification stay floors. *)
 
 type binop_conditionality =
