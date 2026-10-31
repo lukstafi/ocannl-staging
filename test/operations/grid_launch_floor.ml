@@ -119,90 +119,86 @@ let run ~name ~n ~bm ~bk ~layout =
 
 let grid = Some Bench_gebp.Grid_outermost
 
-(* Every claim, in the order the CPU branch below emits them. Off a CPU backend each is skipped by
-   name, so this list IS the golden's order there. It once had the Grid census claims appended while
-   the CPU branch emits them mid-sequence, which reddened master's HIP golden. So the CPU branch
-   records the name of each claim it makes ([named]), and its last claim holds that record equal to
-   this list. *)
-let claim_order =
-  [
-    "32^3 at 16x32, default floor: both Grid launches render serial";
-    "32^3 at 16x32, default floor: values match the unscheduled kernel bitwise";
-    "32^3 at 16x32, default floor: every Tile_mma renders the register tiling";
-    "32^3 at 16x32, default floor: the Grid census records every launch serial for the floor";
-    "32^3 at 16x32, floor disabled: the launches render pool-parallel";
-    "32^3 at 16x32, floor disabled: the Grid census records every launch on the pool";
-    "32^3 at 16x32, floor disabled: values match the unscheduled kernel bitwise";
-    "128^3 at 16x32, default floor: the launches render pool-parallel";
-    "128^3 at 16x32, default floor: values match the unscheduled kernel bitwise";
-    "32^3 at 16x32: every Grid launch estimates below the default floor";
-    "32^3 at 16x32: with MACs charged at par, the Tile_mma launch reaches the default floor";
-  ]
-
-let order_claim = "every claim this test makes, in the order the off-CPU branch skips them"
-let emitted = ref []
-
-let named name =
-  emitted := name :: !emitted;
-  name
+(* Off a CPU backend every claim is skipped by name, in the order this one sequence makes them: the
+   claims are written once, in a leg that is open on a CPU backend (gh-ocannl-1703). A hand-written
+   skip list once had the Grid census claims appended to its end while the evaluating branch made
+   them mid-sequence, which reddened master's HIP golden. *)
+let leg = Verdict.leg ~when_:on_cpu ~on:backend_name ()
 
 let () =
-  if not on_cpu then List.iter (claim_order @ [ order_claim ]) ~f:(skipped ~backend:backend_name)
-  else
-    (* Without a native pool (cc_parallel_grid resolved to none) no Grid renders parallel at all, so
-       the legs that expect a parallel construct are skipped; which branch ran goes to stderr. *)
-    let pool = Context.Cc_backend.pool_parallel_grid () in
-    Stdio.eprintf "cc pool-parallel grid: %b (not part of the golden)\n%!" pool;
-    let floor = Ir.C_syntax.default_grid_min_updates in
-    let want32, _, _, _, _ = run ~name:"glf_ref32" ~n:32 ~bm:16 ~bk:32 ~layout:None in
-    let got32, census32, src32, sched32, grid32 =
-      run ~name:"glf_small" ~n:32 ~bm:16 ~bk:32 ~layout:grid
-    in
-    p
-      (named "32^3 at 16x32, default floor: both Grid launches render serial")
-      (not (has_parallel_construct src32));
-    p_all2
-      (named "32^3 at 16x32, default floor: values match the unscheduled kernel bitwise")
-      got32 want32 ~f:Float.equal;
-    p_all (named "32^3 at 16x32, default floor: every Tile_mma renders the register tiling")
-      census32 ~f:(fun r -> Poly.equal r Ir.C_syntax.Mma_register_tiled);
-    (* Non-empty is part of the claim: a census that recorded nothing would pass a bare for-all. *)
-    let census_all (g : Ir.C_syntax.grid_summary) ~f =
-      g.pool && (not (List.is_empty g.loops)) && List.for_all g.loops ~f:(fun e -> f e.site)
-    in
-    gated ~when_:pool ~on:backend_name
-      (named
-         "32^3 at 16x32, default floor: the Grid census records every launch serial for the floor")
-      (census_all grid32 ~f:(function
-        | Ir.C_syntax.Grid_serial (Grid_below_min_updates { updates; floor = f }) ->
-            f = floor && updates < floor
-        | _ -> false));
-    let got32_off, _, src32_off, _, grid32_off =
-      with_floor "0" (fun () -> run ~name:"glf_small_nofloor" ~n:32 ~bm:16 ~bk:32 ~layout:grid)
-    in
-    gated ~when_:pool ~on:backend_name
-      (named "32^3 at 16x32, floor disabled: the launches render pool-parallel")
-      (has_parallel_construct src32_off);
-    gated ~when_:pool ~on:backend_name
-      (named "32^3 at 16x32, floor disabled: the Grid census records every launch on the pool")
-      (census_all grid32_off ~f:(function Ir.C_syntax.Grid_pool _ -> true | _ -> false));
-    p_all2
-      (named "32^3 at 16x32, floor disabled: values match the unscheduled kernel bitwise")
-      got32_off want32 ~f:Float.equal;
-    let want128, _, _, _, _ = run ~name:"glf_ref128" ~n:128 ~bm:16 ~bk:32 ~layout:None in
-    let got128, _, src128, _, _ = run ~name:"glf_large" ~n:128 ~bm:16 ~bk:32 ~layout:grid in
-    gated ~when_:pool ~on:backend_name
-      (named "128^3 at 16x32, default floor: the launches render pool-parallel")
-      (has_parallel_construct src128);
-    p_all2
-      (named "128^3 at 16x32, default floor: values match the unscheduled kernel bitwise")
-      got128 want128 ~f:Float.equal;
-    let launches = Option.value_map sched32 ~default:[] ~f:grid_launches in
-    p_all (named "32^3 at 16x32: every Grid launch estimates below the default floor") launches
-      ~f:(fun l -> Ir.C_syntax.grid_update_count ~cap:floor l < floor);
-    p_all
-      (named
-         "32^3 at 16x32: with MACs charged at par, the Tile_mma launch reaches the default floor")
-      (List.filter launches ~f:(fun l -> launch_macs l > 0))
-      ~f:(fun l -> launch_macs l >= floor);
-    p order_claim (List.equal String.equal (List.rev !emitted) claim_order)
+  (* Without a native pool (cc_parallel_grid resolved to none) no Grid renders parallel at all, so
+     the legs that expect a parallel construct are skipped; which branch ran goes to stderr. *)
+  let pool =
+    lazy
+      (let pool = Context.Cc_backend.pool_parallel_grid () in
+       Stdio.eprintf "cc pool-parallel grid: %b (not part of the golden)\n%!" pool;
+       pool)
+  in
+  let floor = Ir.C_syntax.default_grid_min_updates in
+  let ref32 = lazy (run ~name:"glf_ref32" ~n:32 ~bm:16 ~bk:32 ~layout:None) in
+  let want32 () =
+    let want, _, _, _, _ = Lazy.force ref32 in
+    want
+  in
+  let small = lazy (run ~name:"glf_small" ~n:32 ~bm:16 ~bk:32 ~layout:grid) in
+  in_leg ~leg "32^3 at 16x32, default floor: both Grid launches render serial" (fun label ->
+      let _, _, src32, _, _ = Lazy.force small in
+      p label (not (has_parallel_construct src32)));
+  in_leg ~leg "32^3 at 16x32, default floor: values match the unscheduled kernel bitwise"
+    (fun label ->
+      let got32, _, _, _, _ = Lazy.force small in
+      p_all2 label got32 (want32 ()) ~f:Float.equal);
+  in_leg ~leg "32^3 at 16x32, default floor: every Tile_mma renders the register tiling"
+    (fun label ->
+      let _, census32, _, _, _ = Lazy.force small in
+      p_all label census32 ~f:(fun r -> Poly.equal r Ir.C_syntax.Mma_register_tiled));
+  (* Non-empty is part of the claim: a census that recorded nothing would pass a bare for-all. *)
+  let census_all (g : Ir.C_syntax.grid_summary) ~f =
+    g.pool && (not (List.is_empty g.loops)) && List.for_all g.loops ~f:(fun e -> f e.site)
+  in
+  in_leg ~leg
+    "32^3 at 16x32, default floor: the Grid census records every launch serial for the floor"
+    (fun label ->
+      let _, _, _, _, grid32 = Lazy.force small in
+      gated ~when_:(Lazy.force pool) ~on:backend_name label
+        (census_all grid32 ~f:(function
+          | Ir.C_syntax.Grid_serial (Grid_below_min_updates { updates; floor = f }) ->
+              f = floor && updates < floor
+          | _ -> false)));
+  let small_off =
+    lazy (with_floor "0" (fun () -> run ~name:"glf_small_nofloor" ~n:32 ~bm:16 ~bk:32 ~layout:grid))
+  in
+  in_leg ~leg "32^3 at 16x32, floor disabled: the launches render pool-parallel" (fun label ->
+      let _, _, src32_off, _, _ = Lazy.force small_off in
+      gated ~when_:(Lazy.force pool) ~on:backend_name label (has_parallel_construct src32_off));
+  in_leg ~leg "32^3 at 16x32, floor disabled: the Grid census records every launch on the pool"
+    (fun label ->
+      let _, _, _, _, grid32_off = Lazy.force small_off in
+      gated ~when_:(Lazy.force pool) ~on:backend_name label
+        (census_all grid32_off ~f:(function Ir.C_syntax.Grid_pool _ -> true | _ -> false)));
+  in_leg ~leg "32^3 at 16x32, floor disabled: values match the unscheduled kernel bitwise"
+    (fun label ->
+      let got32_off, _, _, _, _ = Lazy.force small_off in
+      p_all2 label got32_off (want32 ()) ~f:Float.equal);
+  let ref128 = lazy (run ~name:"glf_ref128" ~n:128 ~bm:16 ~bk:32 ~layout:None) in
+  let large = lazy (run ~name:"glf_large" ~n:128 ~bm:16 ~bk:32 ~layout:grid) in
+  in_leg ~leg "128^3 at 16x32, default floor: the launches render pool-parallel" (fun label ->
+      let _, _, src128, _, _ = Lazy.force large in
+      gated ~when_:(Lazy.force pool) ~on:backend_name label (has_parallel_construct src128));
+  in_leg ~leg "128^3 at 16x32, default floor: values match the unscheduled kernel bitwise"
+    (fun label ->
+      let want128, _, _, _, _ = Lazy.force ref128 in
+      let got128, _, _, _, _ = Lazy.force large in
+      p_all2 label got128 want128 ~f:Float.equal);
+  let launches () =
+    let _, _, _, sched32, _ = Lazy.force small in
+    Option.value_map sched32 ~default:[] ~f:grid_launches
+  in
+  in_leg ~leg "32^3 at 16x32: every Grid launch estimates below the default floor" (fun label ->
+      p_all label (launches ()) ~f:(fun l -> Ir.C_syntax.grid_update_count ~cap:floor l < floor));
+  in_leg ~leg
+    "32^3 at 16x32: with MACs charged at par, the Tile_mma launch reaches the default floor"
+    (fun label ->
+      p_all label
+        (List.filter (launches ()) ~f:(fun l -> launch_macs l > 0))
+        ~f:(fun l -> launch_macs l >= floor))

@@ -79,72 +79,78 @@ let write_artifact_in dir name =
   Stdlib.Sys.chdir home;
   (lock, Stdlib.Filename.concat dir path)
 
-let fork_claims =
-  [
-    "fork: the forked child wrote its artifacts";
-    "fork: the forking holder exited";
-    "fork: with the forking holder gone, its child still holds the lock";
-    "fork: the holder query names the forked child";
-    "fork: once the child exits, the lock is free";
-  ]
+(* Windows has no fork: there each claim is announced as skipped, keeping the golden uniform; the
+   claims are written once, in a leg open where [fork] exists (gh-ocannl-1703). *)
+let fork_leg = Verdict.leg ~aggregation:`Environment ~when_:(not Stdlib.Sys.win32) ~on:"windows" ()
 
 let () =
   Verdict.case "fork" @@ fun () ->
-  if Stdlib.Sys.win32 then
-    (* Windows has no fork: each claim is announced as skipped, keeping the golden uniform. *)
-    List.iter fork_claims ~f:(Verdict.skipped ~aggregation:`Environment ~backend:"windows")
-  else
-    let dir = fresh_dir "fork" in
-    let lock = Stdlib.Filename.concat dir (Printf.sprintf "log_files/%s.ocannl-lock" prefix) in
-    let ready_r, ready_w = Unix.pipe () and release_r, release_w = Unix.pipe () in
-    Stdlib.flush_all ();
-    match Unix.fork () with
-    | 0 -> (
-        (* The forking holder: takes the lock, forks, and exits at once. *)
-        Unix.close ready_r;
-        Unix.close release_w;
-        Stdlib.Sys.chdir dir;
-        ignore (Utils.diagn_log_file "holder" : string);
-        match Unix.fork () with
-        | 0 ->
-            (* Its child: inherits the table naming the parent's lock, writes artifacts, says so,
-               and holds on until released (or until the test process is gone). *)
-            ignore (Utils.diagn_log_file "child" : string);
-            let pid = Printf.sprintf "%d\n" (Utils.os_process_id ()) in
-            ignore (Unix.write_substring ready_w pid 0 (String.length pid) : int);
-            (try ignore (Unix.read release_r (Bytes.create 1) 0 1 : int)
-             with Unix.Unix_error _ -> ());
-            Unix._exit 0
-        | _ -> Unix._exit 0)
-    | holder ->
-        Unix.close ready_w;
-        Unix.close release_r;
-        let child_pid =
-          let buf = Bytes.create 32 in
-          let n = Unix.read ready_r buf 0 32 in
-          Int.of_string_opt (String.strip (Bytes.To_string.sub buf ~pos:0 ~len:n))
-        in
-        pf "fork: the forked child wrote its artifacts" (Option.is_some child_pid);
-        pf "fork: the forking holder exited" (wait_status holder = 0);
-        pf "fork: with the forking holder gone, its child still holds the lock" (held lock);
-        (* This process holds no lock on that file, so [F_GETLK] reports the child's. *)
-        let queried =
-          let fd = Unix.openfile lock [ Unix.O_RDONLY ] 0 in
-          Exn.protect ~f:(fun () -> Utils.lock_holder_pid fd) ~finally:(fun () -> Unix.close fd)
-        in
-        pf "fork: the holder query names the forked child"
-          (Option.equal Int.equal (Some queried) child_pid);
-        Unix.close release_w;
-        (* The child exits on EOF; the probe waits until its lock is gone, a bounded number of
-           times. *)
-        let rec settle n =
-          if free lock then true
-          else if n = 0 then false
-          else (
-            Unix.sleepf 0.05;
-            settle (n - 1))
-        in
-        pf "fork: once the child exits, the lock is free" (settle 200)
+  (* The fork, and the forked child's report of its pid, first forced by the first claim. *)
+  let forked =
+    lazy
+      (let dir = fresh_dir "fork" in
+       let lock = Stdlib.Filename.concat dir (Printf.sprintf "log_files/%s.ocannl-lock" prefix) in
+       let ready_r, ready_w = Unix.pipe () and release_r, release_w = Unix.pipe () in
+       Stdlib.flush_all ();
+       match Unix.fork () with
+       | 0 -> (
+           (* The forking holder: takes the lock, forks, and exits at once. *)
+           Unix.close ready_r;
+           Unix.close release_w;
+           Stdlib.Sys.chdir dir;
+           ignore (Utils.diagn_log_file "holder" : string);
+           match Unix.fork () with
+           | 0 ->
+               (* Its child: inherits the table naming the parent's lock, writes artifacts, says so,
+                  and holds on until released (or until the test process is gone). *)
+               ignore (Utils.diagn_log_file "child" : string);
+               let pid = Printf.sprintf "%d\n" (Utils.os_process_id ()) in
+               ignore (Unix.write_substring ready_w pid 0 (String.length pid) : int);
+               (try ignore (Unix.read release_r (Bytes.create 1) 0 1 : int)
+                with Unix.Unix_error _ -> ());
+               Unix._exit 0
+           | _ -> Unix._exit 0)
+       | holder ->
+           Unix.close ready_w;
+           Unix.close release_r;
+           let child_pid =
+             let buf = Bytes.create 32 in
+             let n = Unix.read ready_r buf 0 32 in
+             Int.of_string_opt (String.strip (Bytes.To_string.sub buf ~pos:0 ~len:n))
+           in
+           (lock, holder, release_w, child_pid))
+  in
+  in_leg ~leg:fork_leg "fork: the forked child wrote its artifacts" (fun label ->
+      let _, _, _, child_pid = Lazy.force forked in
+      p label (Option.is_some child_pid));
+  in_leg ~leg:fork_leg "fork: the forking holder exited" (fun label ->
+      let _, holder, _, _ = Lazy.force forked in
+      p label (wait_status holder = 0));
+  in_leg ~leg:fork_leg "fork: with the forking holder gone, its child still holds the lock"
+    (fun label ->
+      let lock, _, _, _ = Lazy.force forked in
+      p label (held lock));
+  in_leg ~leg:fork_leg "fork: the holder query names the forked child" (fun label ->
+      let lock, _, _, child_pid = Lazy.force forked in
+      (* This process holds no lock on that file, so [F_GETLK] reports the child's. *)
+      let queried =
+        let fd = Unix.openfile lock [ Unix.O_RDONLY ] 0 in
+        Exn.protect ~f:(fun () -> Utils.lock_holder_pid fd) ~finally:(fun () -> Unix.close fd)
+      in
+      p label (Option.equal Int.equal (Some queried) child_pid));
+  in_leg ~leg:fork_leg "fork: once the child exits, the lock is free" (fun label ->
+      let lock, _, release_w, _ = Lazy.force forked in
+      Unix.close release_w;
+      (* The child exits on EOF; the probe waits until its lock is gone, a bounded number of
+         times. *)
+      let rec settle n =
+        if free lock then true
+        else if n = 0 then false
+        else (
+          Unix.sleepf 0.05;
+          settle (n - 1))
+      in
+      p label (settle 200))
 
 let () =
   Verdict.case "chdir" @@ fun () ->

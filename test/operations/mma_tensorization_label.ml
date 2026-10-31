@@ -118,37 +118,48 @@ let () =
     && mma.Cs.statements = bracketed.Cs.statements
     && mma.Cs.scalar_fallbacks = bracketed.Cs.scalar_fallbacks)
 
+(* Off a CPU backend these claims are skipped by name; they are written once, in a leg open on a CPU
+   backend (gh-ocannl-1703). *)
+let cpu_leg = Verdict.leg ~when_:on_cpu ~on:backend_name ()
+
 let () =
-  if not on_cpu then (
-    Verdict.skipped ~backend:backend_name "an honoured Tensorize is labeled tensorized";
-    Verdict.skipped ~backend:backend_name "a declined Tensorize is labeled scalar-fallback";
-    Verdict.skipped ~backend:backend_name
-      "a declined Tensorize does not read as tensorized despite the schedule asking")
-  else begin
-    let honoured = matmul ~tag:"mtl_ok" in
-    let mma_ok, _ =
-      compile_twice ~name:"mtl_ok"
-        ~transform:(fun opt -> Sched.apply (tensorize_schedule ~out:honoured.Tensor.value opt) opt)
-        (named "mtl_ok" (Train.forward honoured))
-    in
-    p "an honoured Tensorize is labeled tensorized"
-      (Cs.equal_tensorization mma_ok.Cs.tensorization Cs.Tensorized
-      && mma_ok.Cs.statements > 0 && mma_ok.Cs.scalar_fallbacks = 0);
-    let declined = matmul_tb ~tag:"mtl_tb" in
-    let mma_tb, _ =
-      compile_twice ~name:"mtl_tb"
-        ~transform:(fun opt -> Sched.apply (tensorize_schedule ~out:declined.Tensor.value opt) opt)
-        (named "mtl_tb" (Train.forward declined))
-    in
-    p "a declined Tensorize is labeled scalar-fallback"
-      (Cs.equal_tensorization mma_tb.Cs.tensorization Cs.Scalar_fallback
-      && mma_tb.Cs.statements > 0
-      && mma_tb.Cs.scalar_fallbacks = mma_tb.Cs.statements);
-    (* The defect in one line: the same schedule move, the same variant name, and the emission went
-       two different ways. Only the label separates the timings. *)
-    p "a declined Tensorize does not read as tensorized despite the schedule asking"
-      (not (Cs.equal_tensorization mma_tb.Cs.tensorization mma_ok.Cs.tensorization))
-  end
+  let mma_ok =
+    lazy
+      (let honoured = matmul ~tag:"mtl_ok" in
+       fst
+         (compile_twice ~name:"mtl_ok"
+            ~transform:(fun opt ->
+              Sched.apply (tensorize_schedule ~out:honoured.Tensor.value opt) opt)
+            (named "mtl_ok" (Train.forward honoured))))
+  in
+  in_leg ~leg:cpu_leg "an honoured Tensorize is labeled tensorized" (fun label ->
+      let mma_ok = Lazy.force mma_ok in
+      p label
+        (Cs.equal_tensorization mma_ok.Cs.tensorization Cs.Tensorized
+        && mma_ok.Cs.statements > 0 && mma_ok.Cs.scalar_fallbacks = 0));
+  let mma_tb =
+    lazy
+      (let declined = matmul_tb ~tag:"mtl_tb" in
+       fst
+         (compile_twice ~name:"mtl_tb"
+            ~transform:(fun opt ->
+              Sched.apply (tensorize_schedule ~out:declined.Tensor.value opt) opt)
+            (named "mtl_tb" (Train.forward declined))))
+  in
+  in_leg ~leg:cpu_leg "a declined Tensorize is labeled scalar-fallback" (fun label ->
+      let mma_tb = Lazy.force mma_tb in
+      p label
+        (Cs.equal_tensorization mma_tb.Cs.tensorization Cs.Scalar_fallback
+        && mma_tb.Cs.statements > 0
+        && mma_tb.Cs.scalar_fallbacks = mma_tb.Cs.statements));
+  (* The defect in one line: the same schedule move, the same variant name, and the emission went
+     two different ways. Only the label separates the timings. *)
+  in_leg ~leg:cpu_leg "a declined Tensorize does not read as tensorized despite the schedule asking"
+    (fun label ->
+      p label
+        (not
+           (Cs.equal_tensorization (Lazy.force mma_tb).Cs.tensorization
+              (Lazy.force mma_ok).Cs.tensorization)))
 
 (* === The label is a function of the counts, on every backend === *)
 

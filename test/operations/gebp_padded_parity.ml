@@ -59,6 +59,11 @@ open Verdict.Claims
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 let on_cpu = Sched.backend_is_cpu backend_name
 
+(* The packed composition is the C backends' register-tiled GEBP ([Tensorize] at a unit lane width);
+   a GPU backend has nothing of it to execute. Its claims are made in this leg, skipped by name
+   elsewhere in the order the same code reaches them (gh-ocannl-1703). *)
+let cpu_leg = Verdict.leg ~when_:on_cpu ~on:backend_name ()
+
 let named name (comp : Asgns.comp) : Asgns.comp =
   { comp with asgns = Asgns.Block_comment (name, comp.asgns) }
 
@@ -191,18 +196,6 @@ let agrees_label l =
 
 let tiled_label what = Printf.sprintf "every %s Tile_mma renders the register tiling" what
 
-(* [schedule_bench]'s [pm_hoist]: the hoisted-B~ Grid leg reading A in place. Padded, the builder
-   refuses it, and the refusal is the compiler's own — the composition with A's [Stage] dropped is
-   refused at [Tensorize]; dividing, it builds and agrees. *)
-let in_place_labels s =
-  if padded s then
-    [
-      "with A read in place, the builder refuses to pad";
-      "with A read in place, Tensorize itself refuses the padded composition";
-    ]
-  else
-    [ "the A-in-place packed leg matches the serial packed leg bitwise"; tiled_label "A-in-place" ]
-
 (* gh-ocannl-1563: where the serial leg's accumulator lives, row block by row block. Each [Tile_mma]
    of the scheduled code, in program order, as what it accumulates in (the output itself, or the
    contraction's fragment) and how many times it executes per k block: the product of its enclosing
@@ -281,13 +274,6 @@ let b_once_label = "every in-kernel B~ pack copies each B~ slot exactly once"
 let b_per_row_block_label = "the per-row-block Grid leg re-packs B~ once per row block"
 let b_guard_label = "under the k-block loop, only the edge k block's B~ packing is guarded"
 
-let site_labels s =
-  [ "the builder reads the site's m x n x k off the nest"; "the reference is not all zeros" ]
-  @ [ fst (serial_sites_expected s); b_once_label; b_per_row_block_label; b_guard_label ]
-  @ List.map legs ~f:agrees_label
-  @ List.map legs ~f:(fun l -> tiled_label l.what)
-  @ in_place_labels s
-
 (* The k tail's contribution to output cell (row, col): the sum over the reduction indices past the
    last full k block. Host arithmetic over the bench's own operand values. *)
 let k_tail_contribution s ~row ~col =
@@ -297,46 +283,63 @@ let k_tail_contribution s ~row ~col =
     (List.range first s.k)
     ~f:(fun kk -> Bench_gebp.a_value row kk *. Bench_gebp.b_value kk col)
 
+(* One site at one storage precision, its claims made in [cpu_leg]; everything they rest on is
+   computed lazily, only where the leg is open. *)
 let check_site ~idx ~prec s =
+  let leg = cpu_leg in
   let tag = Ir.Ops.prec_string prec in
   (* One routine name per case: [Context.compile ?name] names the build artifacts, and a name shared
      by every case would leave only the last case's code behind for diagnosing an earlier one. *)
   let name leg = Printf.sprintf "gpp_%d_%s_%s" idx tag leg in
   let lbl what = Printf.sprintf "%s, %s storage: %s" s.label tag what in
-  let cprec = compute_prec prec in
-  let tile_prec = if Ir.Ops.equal_prec cprec prec then None else Some cprec in
-  let ma, mb = operands ~prec s in
-  let want, _, _, _ = run ~prec ~name:(name "ref") ~ma ~mb ~schedule:None in
-  let runs =
-    List.map legs ~f:(fun l ->
-        ( l,
-          run ~prec ~name:(name l.leg) ~ma ~mb
-            ~schedule:
-              (Some
-                 (packed ~b_pack:l.b_pack ~layout:l.layout ~hoist_b:l.hoist_b ~stage_a:true
-                    ~tile_prec ~bm:s.bm ~bk:s.bk ~ma ~mb)) ))
+  let base =
+    lazy
+      (let cprec = compute_prec prec in
+       let tile_prec = if Ir.Ops.equal_prec cprec prec then None else Some cprec in
+       let ma, mb = operands ~prec s in
+       let want, _, _, _ = run ~prec ~name:(name "ref") ~ma ~mb ~schedule:None in
+       let runs =
+         List.map legs ~f:(fun l ->
+             ( l,
+               run ~prec ~name:(name l.leg) ~ma ~mb
+                 ~schedule:
+                   (Some
+                      (packed ~b_pack:l.b_pack ~layout:l.layout ~hoist_b:l.hoist_b ~stage_a:true
+                         ~tile_prec ~bm:s.bm ~bk:s.bk ~ma ~mb)) ))
+       in
+       (tile_prec, ma, mb, want, runs))
   in
-  let ser, _, ser_site, ser_scheduled =
-    List.Assoc.find_exn runs ~equal:phys_equal (List.hd_exn legs)
+  let runs () =
+    let _, _, _, _, runs = Lazy.force base in
+    runs
   in
-  p
-    (lbl "the builder reads the site's m x n x k off the nest")
-    (match ser_site with
-    | Some { Bench_gebp.ni; nj; nk; _ } -> ni = s.m && nj = s.n && nk = s.k
-    | None -> false);
-  p (lbl "the reference is not all zeros") (Array.exists want ~f:(fun x -> Float.(x <> 0.)));
+  let serial () = List.Assoc.find_exn (runs ()) ~equal:phys_equal (List.hd_exn legs) in
+  in_leg ~leg (lbl "the builder reads the site's m x n x k off the nest") (fun label ->
+      let _, _, ser_site, _ = serial () in
+      p label
+        (match ser_site with
+        | Some { Bench_gebp.ni; nj; nk; _ } -> ni = s.m && nj = s.n && nk = s.k
+        | None -> false));
+  in_leg ~leg (lbl "the reference is not all zeros") (fun label ->
+      let _, _, _, want, _ = Lazy.force base in
+      p label (Array.exists want ~f:(fun x -> Float.(x <> 0.))));
   (let what, expected = serial_sites_expected s in
-   let got = Option.value_map ser_scheduled ~default:[] ~f:(fun (o, c) -> tile_sites s ~c o) in
-   let render sites =
-     String.concat ~sep:"; " (List.map sites ~f:(fun (kind, n) -> Printf.sprintf "%s x%d" kind n))
-   in
-   let holds = List.equal (fun (a, x) (b, y) -> String.equal a b && x = y) got expected in
-   if not holds then
-     Stdio.eprintf "%s: Tile_mma sites [%s], expected [%s]\n%!" (lbl what) (render got)
-       (render expected);
-   p (lbl what) holds);
+   in_leg ~leg (lbl what) (fun label ->
+       let _, _, _, ser_scheduled = serial () in
+       let got = Option.value_map ser_scheduled ~default:[] ~f:(fun (o, c) -> tile_sites s ~c o) in
+       let render sites =
+         String.concat ~sep:"; "
+           (List.map sites ~f:(fun (kind, n) -> Printf.sprintf "%s x%d" kind n))
+       in
+       let holds = List.equal (fun (a, x) (b, y) -> String.equal a b && x = y) got expected in
+       if not holds then
+         Stdio.eprintf "%s: Tile_mma sites [%s], expected [%s]\n%!" label (render got)
+           (render expected);
+       p label holds));
   (let stores leg =
-     let _, (_, _, _, scheduled) = List.find_exn runs ~f:(fun (l, _) -> String.equal l.leg leg) in
+     let _, (_, _, _, scheduled) =
+       List.find_exn (runs ()) ~f:(fun (l, _) -> String.equal l.leg leg)
+     in
      Option.bind scheduled ~f:(fun (o, _) -> b_pack_stores o)
    in
    let report what leg got =
@@ -344,74 +347,99 @@ let check_site ~idx ~prec s =
        (Option.value_map got ~default:"none" ~f:(fun (t, g) -> Printf.sprintf "(%d, %d)" t g))
    in
    let once = k_padded_extent s * s.n in
-   p_all (lbl b_once_label) in_kernel_b_legs ~f:(fun leg ->
-       let got = stores leg in
-       let holds = Option.exists got ~f:(fun (total, _) -> total = once) in
-       if not holds then report b_once_label leg got;
-       holds);
-   (let got = stores "gridr" in
-    let holds = Option.exists got ~f:(fun (total, _) -> total = (s.m + s.bm - 1) / s.bm * once) in
-    if not holds then report b_per_row_block_label "gridr" got;
-    p (lbl b_per_row_block_label) holds);
+   in_leg ~leg (lbl b_once_label) (fun label ->
+       p_all label in_kernel_b_legs ~f:(fun leg ->
+           let got = stores leg in
+           let holds = Option.exists got ~f:(fun (total, _) -> total = once) in
+           if not holds then report b_once_label leg got;
+           holds));
+   in_leg ~leg (lbl b_per_row_block_label) (fun label ->
+       let got = stores "gridr" in
+       let holds =
+         Option.exists got ~f:(fun (total, _) -> total = (s.m + s.bm - 1) / s.bm * once)
+       in
+       if not holds then report b_per_row_block_label "gridr" got;
+       p label holds);
    (* With k padded, the edge k block is the one [bk x n] panel whose guard can fail; a dividing k
       guards nothing. *)
    let edge = if s.k % s.bk <> 0 then s.bk * s.n else 0 in
-   p_all (lbl b_guard_label) k_blocked_b_legs ~f:(fun leg ->
-       let got = stores leg in
-       let holds = Option.exists got ~f:(fun (_, guarded) -> guarded = edge) in
-       if not holds then report b_guard_label leg got;
-       holds));
-  List.iter runs ~f:(fun (l, (got, _, _, _)) ->
-      p_all2
+   in_leg ~leg (lbl b_guard_label) (fun label ->
+       p_all label k_blocked_b_legs ~f:(fun leg ->
+           let got = stores leg in
+           let holds = Option.exists got ~f:(fun (_, guarded) -> guarded = edge) in
+           if not holds then report b_guard_label leg got;
+           holds)));
+  List.iter legs ~f:(fun l ->
+      in_leg ~leg
         (lbl (agrees_label l))
-        got
-        (if String.equal l.leg "serial" then want else ser)
-        ~f:Float.equal);
-  List.iter runs ~f:(fun (l, (_, census, _, _)) ->
-      p
+        (fun label ->
+          let _, _, _, want, runs = Lazy.force base in
+          let got, _, _, _ = List.Assoc.find_exn runs ~equal:phys_equal l in
+          let ser, _, _, _ = serial () in
+          p_all2 label got (if String.equal l.leg "serial" then want else ser) ~f:Float.equal));
+  List.iter legs ~f:(fun l ->
+      in_leg ~leg
         (lbl (tiled_label l.what))
-        (Ll_test.all_rendered ~what:(lbl l.what) Ir.C_syntax.Mma_register_tiled census));
+        (fun label ->
+          let _, census, _, _ = List.Assoc.find_exn (runs ()) ~equal:phys_equal l in
+          p label (Ll_test.all_rendered ~what:(lbl l.what) Ir.C_syntax.Mma_register_tiled census)));
   let in_place ~stage_a =
+    let tile_prec, ma, mb, _, _ = Lazy.force base in
     packed ~b_pack:None ~layout:Bench_gebp.Grid_outermost ~hoist_b:true ~stage_a ~tile_prec ~bm:s.bm
       ~bk:s.bk ~ma ~mb
   in
   let raised schedule =
+    let _, ma, mb, _, _ = Lazy.force base in
     match run ~prec ~name:(name "inplace") ~ma ~mb ~schedule:(Some schedule) with
     | _ -> None
     (* The raw message: [Exn.to_string] escapes its non-ASCII bytes. *)
     | exception Invalid_argument msg -> Some msg
     | exception e -> Some (Exn.to_string e)
   in
+  (* [schedule_bench]'s [pm_hoist]: the hoisted-B~ Grid leg reading A in place. Padded, the builder
+     refuses it, and the refusal is the compiler's own — the composition with A's [Stage] dropped is
+     refused at [Tensorize]; dividing, it builds and agrees. *)
   if padded s then begin
-    let why = Option.value_exn (Bench_gebp.in_place_a_refusal ~bm:s.bm ~bk:s.bk ~ni:s.m ~nk:s.k) in
-    p
-      (lbl "with A read in place, the builder refuses to pad")
-      (Option.exists
-         (raised (in_place ~stage_a:false))
-         ~f:(fun msg -> String.is_substring msg ~substring:why));
-    (* The staged composition with A's [Stage] dropped: what the builder would emit without its
-       refusal. *)
-    let unstaged_a ~c opt =
-      List.filter (in_place ~stage_a:true ~c opt) ~f:(function
-        | Sched.Stage { source; _ } -> not (Ir.Tnode.equal source ma.Tensor.value)
-        | _ -> true)
-    in
-    p
-      (lbl "with A read in place, Tensorize itself refuses the padded composition")
-      (Option.exists (raised unstaged_a) ~f:(fun msg ->
-           String.is_substring msg ~substring:"Schedule.Tensorize"
-           && String.is_substring msg ~substring:"zero-fringe staged tile"))
+    in_leg ~leg (lbl "with A read in place, the builder refuses to pad") (fun label ->
+        let why =
+          Option.value_exn (Bench_gebp.in_place_a_refusal ~bm:s.bm ~bk:s.bk ~ni:s.m ~nk:s.k)
+        in
+        p label
+          (Option.exists
+             (raised (in_place ~stage_a:false))
+             ~f:(fun msg -> String.is_substring msg ~substring:why)));
+    in_leg ~leg (lbl "with A read in place, Tensorize itself refuses the padded composition")
+      (fun label ->
+        let _, ma, _, _, _ = Lazy.force base in
+        (* The staged composition with A's [Stage] dropped: what the builder would emit without its
+           refusal. *)
+        let unstaged_a ~c opt =
+          List.filter (in_place ~stage_a:true ~c opt) ~f:(function
+            | Sched.Stage { source; _ } -> not (Ir.Tnode.equal source ma.Tensor.value)
+            | _ -> true)
+        in
+        p label
+          (Option.exists (raised unstaged_a) ~f:(fun msg ->
+               String.is_substring msg ~substring:"Schedule.Tensorize"
+               && String.is_substring msg ~substring:"zero-fringe staged tile")))
   end
   else begin
-    let got, census, _, _ =
-      run ~prec ~name:(name "inplace") ~ma ~mb ~schedule:(Some (in_place ~stage_a:false))
+    let in_place_run =
+      lazy
+        (let _, ma, mb, _, _ = Lazy.force base in
+         run ~prec ~name:(name "inplace") ~ma ~mb ~schedule:(Some (in_place ~stage_a:false)))
     in
-    p_all2
-      (lbl "the A-in-place packed leg matches the serial packed leg bitwise")
-      got ser ~f:Float.equal;
-    p
+    in_leg ~leg (lbl "the A-in-place packed leg matches the serial packed leg bitwise")
+      (fun label ->
+        let got, _, _, _ = Lazy.force in_place_run in
+        let ser, _, _, _ = serial () in
+        p_all2 label got ser ~f:Float.equal);
+    in_leg ~leg
       (lbl (tiled_label "A-in-place"))
-      (Ll_test.all_rendered ~what:(lbl "A-in-place") Ir.C_syntax.Mma_register_tiled census)
+      (fun label ->
+        let _, census, _, _ = Lazy.force in_place_run in
+        p label
+          (Ll_test.all_rendered ~what:(lbl "A-in-place") Ir.C_syntax.Mma_register_tiled census))
   end
 
 (* What the comparisons above can see at the padded edges, from the operand values alone: a padded
@@ -455,17 +483,9 @@ let () =
   List.iteri sites ~f:(fun idx s ->
       edge_content s;
       List.iter [ Ir.Ops.single; Ir.Ops.bfloat16 ] ~f:(fun prec ->
-          let labels =
-            List.map (site_labels s)
-              ~f:(Printf.sprintf "%s, %s storage: %s" s.label (Ir.Ops.prec_string prec))
-          in
-          (* The packed composition is the C backends' register-tiled GEBP ([Tensorize] at a unit
-             lane width); a GPU backend has nothing of it to execute. *)
-          if on_cpu then
-            Verdict.case
-              (Printf.sprintf "%s, %s storage" s.label (Ir.Ops.prec_string prec))
-              (fun () -> check_site ~idx ~prec s)
-          else List.iter labels ~f:(fun l -> Verdict.skipped ~backend:backend_name l)))
+          Verdict.case
+            (Printf.sprintf "%s, %s storage" s.label (Ir.Ops.prec_string prec))
+            (fun () -> check_site ~idx ~prec s)))
 
 (* The before-pin: the builder's composition with its pads removed, at a non-dividing extent. The
    [Split] then wraps the inner loop's body in its remainder guard, and the [Swap] that sinks the k
@@ -473,24 +493,25 @@ let () =
    issue's measurement ran into, and the reason the pads come first. *)
 let () =
   let label = "without its pads, the composition is refused at a Swap across the remainder guard" in
-  if on_cpu then
-    Verdict.case label (fun () ->
-        let s = List.hd_exn sites in
-        let ma, mb = operands ~prec:Ir.Ops.single s in
-        let unpadded ~c opt =
-          List.filter
-            (packed ~b_pack:None ~layout:Bench_gebp.Serial ~hoist_b:false ~stage_a:true
-               ~tile_prec:None ~bm:s.bm ~bk:s.bk ~ma ~mb ~c opt) ~f:(function
-            | Sched.Pad _ -> false
-            | _ -> true)
-        in
-        let refused =
-          match run ~prec:Ir.Ops.single ~name:"gpp_unpadded" ~ma ~mb ~schedule:(Some unpadded) with
-          | _ -> None
-          | exception e -> Some (Exn.to_string e)
-        in
-        p label
-          (Option.exists refused ~f:(fun msg ->
-               String.is_substring msg ~substring:"Schedule.Swap"
-               && String.is_substring msg ~substring:"not perfectly nested")))
-  else Verdict.skipped ~backend:backend_name label
+  Verdict.case label (fun () ->
+      in_leg ~leg:cpu_leg label (fun label ->
+          let s = List.hd_exn sites in
+          let ma, mb = operands ~prec:Ir.Ops.single s in
+          let unpadded ~c opt =
+            List.filter
+              (packed ~b_pack:None ~layout:Bench_gebp.Serial ~hoist_b:false ~stage_a:true
+                 ~tile_prec:None ~bm:s.bm ~bk:s.bk ~ma ~mb ~c opt) ~f:(function
+              | Sched.Pad _ -> false
+              | _ -> true)
+          in
+          let refused =
+            match
+              run ~prec:Ir.Ops.single ~name:"gpp_unpadded" ~ma ~mb ~schedule:(Some unpadded)
+            with
+            | _ -> None
+            | exception e -> Some (Exn.to_string e)
+          in
+          p label
+            (Option.exists refused ~f:(fun msg ->
+                 String.is_substring msg ~substring:"Schedule.Swap"
+                 && String.is_substring msg ~substring:"not perfectly nested"))))

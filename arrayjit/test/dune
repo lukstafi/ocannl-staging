@@ -182,7 +182,9 @@
 (test
  (name test_hip_compile_failure_options)
  (package arrayjit)
- (modules test_hip_compile_failure_options)
+ (modules
+  test_hip_compile_failure_options
+  hip_compile_failure_options_claims)
  (deps
   ocannl_config
   ocannl_ambient

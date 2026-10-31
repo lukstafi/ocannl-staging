@@ -114,20 +114,20 @@ let device_arms () =
      the device (7 * 2 + 1), so the backend's teardown ran after it rather than under it. *)
   p "an at_exit handler registered before the device opened still reads it at exit"
     (String.is_substring on_out ~substring:"read at exit: 15\n");
-  let on_claim = "the exit teardown leaves no leaked-signal report"
-  and off_claim = "without the teardown, the runtime reports leaked signals" in
-  if not (String.equal (backend_of on_out) "hip" && String.equal (backend_of off_out) "hip") then (
-    let backend = backend_of on_out in
-    skipped ~backend on_claim;
-    skipped ~backend off_claim)
-  else if off_leaks = 0 then (
-    skipped ~aggregation:`Environment ~backend:"a ROCr build that does not report leaked signals"
-      on_claim;
-    skipped ~aggregation:`Environment ~backend:"a ROCr build that does not report leaked signals"
-      off_claim)
-  else (
-    p on_claim (on_leaks = 0);
-    p off_claim (off_leaks > 0));
+  (* On hip with a ROCr build that reports leaks, both claims are made; elsewhere both are skipped
+     by name, in the order they are made (gh-ocannl-1703). *)
+  let leg =
+    Verdict.sub_leg
+      (Verdict.leg
+         ~when_:(String.equal (backend_of on_out) "hip" && String.equal (backend_of off_out) "hip")
+         ~on:(backend_of on_out) ())
+      ~when_:(lazy (off_leaks > 0))
+      ~aggregation:`Environment ~on:"a ROCr build that does not report leaked signals"
+  in
+  in_leg ~leg "the exit teardown leaves no leaked-signal report" (fun label ->
+      p label (on_leaks = 0));
+  in_leg ~leg "without the teardown, the runtime reports leaked signals" (fun label ->
+      p label (off_leaks > 0));
   off_leaks > 0
 
 (* gh-ocannl-1445: a routine whose segments were graph-captured, still cached and unreleased at

@@ -54,6 +54,10 @@ let skipped = Verdict.skipped ~backend:backend_name
 let on_cpu = Sched.backend_is_cpu backend_name
 let on_gpu = Sched.backend_is_gpu backend_name
 
+(* The GPU leg's claims are written once, in a leg open on a GPU backend and skipped by name
+   elsewhere, keeping the printed transcript identical across backends (gh-ocannl-1703). *)
+let gpu_leg = Verdict.leg ~when_:on_gpu ~on:backend_name ()
+
 module Generated = Test_utils.Generated
 
 let () = Generated.init ~backend_name
@@ -169,89 +173,92 @@ let () =
    masked contraction places the fragment in threadgroup memory and brackets the reduction loop with
    barriers; the store-back writes only the valid 33 x 65 region. === *)
 let () =
-  if on_gpu then (
-    let ma = TDSL.ndarray mav ~label:[ "gma" ] ~input_dims:[ k_ext ] ~output_dims:[ m_ext ] () in
-    let mb = TDSL.ndarray mbv ~label:[ "gmb" ] ~input_dims:[ n_ext ] ~output_dims:[ k_ext ] () in
-    let%op gc0 = ma * mb in
-    let want = run_serial ~name:"pad_gpu_serial" gc0 in
-    let%op gc1 = ma * mb in
-    let staged_schedule (opt : LL.optimized) : Sched.schedule =
-      let i, j, k =
-        match triple (Ll_test.nest_paths opt.LL.llc) with
-        | [ i; j; k ] -> (i, j, k)
-        | _ -> assert false
-      in
-      let ez, zsyms = Sched.expand_zero ~tn:gc1.Tensor.value in
-      let zi, zj = match zsyms with [ zi; zj ] -> (zi, zj) | _ -> assert false in
-      (* Zeroing: Grid rows aligned with the accumulation's grid blocks (ceil(33/16) = 3 on both
-         sides); the column loop splits into Serial x Workgroup(32) to satisfy barrier-strength
-         extent uniformity with the lane loops. *)
-      let sp_zi, _, _ = Sched.split ~axis:zi ~factor:bm ~outer:LL.Grid ~inner:LL.Serial in
-      let sp_zj, _, _ =
-        Sched.split ~axis:zj ~factor:simd_width ~outer:LL.Serial ~inner:LL.Workgroup
-      in
-      let sp_i, _, i_i = Sched.split ~axis:i ~factor:bm ~outer:LL.Grid ~inner:LL.Serial in
-      let sp_k, k_o, k_i = Sched.split ~axis:k ~factor:bk ~outer:LL.Serial ~inner:LL.Serial in
-      let tz, _lane = Sched.tensorize ~i:i_i ~j ~k:k_i ~simd_width () in
-      [
-        Sched.Pad { axis = i; to_multiple_of = bm };
-        Sched.Pad { axis = j; to_multiple_of = 8 };
-        Sched.Pad { axis = k; to_multiple_of = bk };
-        ez;
-        sp_zi;
-        sp_zj;
-        sp_i;
-        sp_k;
-        Sched.Swap { outer = j; inner = k_o };
-        Sched.Swap { outer = i_i; inner = k_o };
-        Sched.Stage
-          {
-            source = ma.Tensor.value;
-            tile_loops = [ i_i; k_i ];
-            shared = true;
-            cooperative = Some simd_width;
-            hoisted = false;
-            swizzle = None;
-            pad_stride = None;
-            pipeline_depth = 1;
-            tile_prec = None;
-          };
-        Sched.Stage
-          {
-            source = mb.Tensor.value;
-            tile_loops = [ k_i; j ];
-            shared = true;
-            cooperative = Some simd_width;
-            hoisted = false;
-            swizzle = None;
-            pad_stride = None;
-            pipeline_depth = 1;
-            tile_prec = None;
-          };
-        tz;
-      ]
-    in
-    let transform opt = Sched.apply (staged_schedule opt) opt in
-    let ctx, routine =
-      Context.compile
-        ~lowered_transform:(fun o -> [ transform o ])
-        (Context.auto ())
-        (named "pad_gpu_mma" (Train.forward gc1))
-        Ir.Indexing.Empty
-    in
-    let ctx = Context.run ctx routine in
-    let got = Context.get_values ctx gc1.Tensor.value in
-    p_close "padded staged+tensorized matmul parity (GPU)" got want ~tol:approx_tol;
-    (* The schedule's tensorization pass pads n to 8 (72 here). Whether that shape reaches a real
-       intrinsic is a tile-capability question; the routine census is the authoritative outcome. *)
-    p "padded GPU intrinsics follow the advertised tile divisibility"
-      (Ir.C_syntax.equal_tensorization routine.mma.Ir.C_syntax.tensorization
-         (if padded_gpu_shape_accepts_mma then Ir.C_syntax.Tensorized
-          else Ir.C_syntax.Scalar_fallback)))
-  else (
-    (* Keep the printed transcript identical across backends. *)
-    skipped "padded staged+tensorized matmul parity (GPU)";
-    skipped "padded GPU intrinsics follow the advertised tile divisibility")
+  let run =
+    lazy
+      (let ma = TDSL.ndarray mav ~label:[ "gma" ] ~input_dims:[ k_ext ] ~output_dims:[ m_ext ] () in
+       let mb = TDSL.ndarray mbv ~label:[ "gmb" ] ~input_dims:[ n_ext ] ~output_dims:[ k_ext ] () in
+       let%op gc0 = ma * mb in
+       let want = run_serial ~name:"pad_gpu_serial" gc0 in
+       let%op gc1 = ma * mb in
+       let staged_schedule (opt : LL.optimized) : Sched.schedule =
+         let i, j, k =
+           match triple (Ll_test.nest_paths opt.LL.llc) with
+           | [ i; j; k ] -> (i, j, k)
+           | _ -> assert false
+         in
+         let ez, zsyms = Sched.expand_zero ~tn:gc1.Tensor.value in
+         let zi, zj = match zsyms with [ zi; zj ] -> (zi, zj) | _ -> assert false in
+         (* Zeroing: Grid rows aligned with the accumulation's grid blocks (ceil(33/16) = 3 on both
+            sides); the column loop splits into Serial x Workgroup(32) to satisfy barrier-strength
+            extent uniformity with the lane loops. *)
+         let sp_zi, _, _ = Sched.split ~axis:zi ~factor:bm ~outer:LL.Grid ~inner:LL.Serial in
+         let sp_zj, _, _ =
+           Sched.split ~axis:zj ~factor:simd_width ~outer:LL.Serial ~inner:LL.Workgroup
+         in
+         let sp_i, _, i_i = Sched.split ~axis:i ~factor:bm ~outer:LL.Grid ~inner:LL.Serial in
+         let sp_k, k_o, k_i = Sched.split ~axis:k ~factor:bk ~outer:LL.Serial ~inner:LL.Serial in
+         let tz, _lane = Sched.tensorize ~i:i_i ~j ~k:k_i ~simd_width () in
+         [
+           Sched.Pad { axis = i; to_multiple_of = bm };
+           Sched.Pad { axis = j; to_multiple_of = 8 };
+           Sched.Pad { axis = k; to_multiple_of = bk };
+           ez;
+           sp_zi;
+           sp_zj;
+           sp_i;
+           sp_k;
+           Sched.Swap { outer = j; inner = k_o };
+           Sched.Swap { outer = i_i; inner = k_o };
+           Sched.Stage
+             {
+               source = ma.Tensor.value;
+               tile_loops = [ i_i; k_i ];
+               shared = true;
+               cooperative = Some simd_width;
+               hoisted = false;
+               swizzle = None;
+               pad_stride = None;
+               pipeline_depth = 1;
+               tile_prec = None;
+             };
+           Sched.Stage
+             {
+               source = mb.Tensor.value;
+               tile_loops = [ k_i; j ];
+               shared = true;
+               cooperative = Some simd_width;
+               hoisted = false;
+               swizzle = None;
+               pad_stride = None;
+               pipeline_depth = 1;
+               tile_prec = None;
+             };
+           tz;
+         ]
+       in
+       let transform opt = Sched.apply (staged_schedule opt) opt in
+       let ctx, routine =
+         Context.compile
+           ~lowered_transform:(fun o -> [ transform o ])
+           (Context.auto ())
+           (named "pad_gpu_mma" (Train.forward gc1))
+           Ir.Indexing.Empty
+       in
+       let ctx = Context.run ctx routine in
+       let got = Context.get_values ctx gc1.Tensor.value in
+       (got, want, routine))
+  in
+  in_leg ~leg:gpu_leg "padded staged+tensorized matmul parity (GPU)" (fun label ->
+      let got, want, _ = Lazy.force run in
+      p_close label got want ~tol:approx_tol);
+  (* The schedule's tensorization pass pads n to 8 (72 here). Whether that shape reaches a real
+     intrinsic is a tile-capability question; the routine census is the authoritative outcome. *)
+  in_leg ~leg:gpu_leg "padded GPU intrinsics follow the advertised tile divisibility" (fun label ->
+      let _, _, routine = Lazy.force run in
+      p label
+        (Ir.C_syntax.equal_tensorization routine.mma.Ir.C_syntax.tensorization
+           (if padded_gpu_shape_accepts_mma then Ir.C_syntax.Tensorized
+            else Ir.C_syntax.Scalar_fallback)))
 
 (* === Autotune pad-composition seeding (issue task 3): the divisibility pre-filters are gone for
    fully staged tensorized pipelines — the awkward site seeds staged candidates on both the GPU MMA

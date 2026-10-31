@@ -54,28 +54,34 @@ let () =
   let ctx0 = Context.auto () in
   let backend = Context.backend_name ctx0 in
   Stdio.eprintf "backend: %s (not part of the golden)\n%!" backend;
-  let cached_claim = "two runs at one binding instantiate exactly one graph"
-  and released_claim = "releasing the routine's context destroys its graphs" in
-  let claims = [ cached_claim; released_claim ] in
   let capture_on = Utils.get_global_flag ~default:true ~arg_name:"gpu_graph_capture" in
-  match live_graph_execs ctx0 with
-  | None -> List.iter claims ~f:(fun claim -> Verdict.skipped ~backend claim)
-  | Some _ when (not capture_on) || Utils.debug_log_from_routines () ->
-      List.iter claims ~f:(fun claim ->
-          Verdict.skipped ~aggregation:`Environment
-            ~backend:"graph capture off (gpu_graph_capture=false or routine logging)" claim)
-  | Some before ->
-      let ctx, routine = Context.compile ctx0 comp Ir.Indexing.Empty in
-      let ctx = Context.run ctx routine in
-      let ctx = Context.run ctx routine in
-      Context.sync ctx;
-      let after_runs = Option.value (live_graph_execs ctx) ~default:(-1) in
-      Context.release ctx;
-      let after_release = Option.value (live_graph_execs ctx0) ~default:(-1) in
-      Stdio.eprintf
-        "live_graph_execs: %d before the compile, %d after two runs, %d after the release (not \
-         part of the golden)\n\
-         %!"
-        before after_runs after_release;
-      p cached_claim (after_runs - before = 1);
-      p released_claim (after_release = before)
+  let before = live_graph_execs ctx0 in
+  let leg =
+    Verdict.sub_leg
+      (Verdict.leg ~when_:(Option.is_some before) ~on:backend ())
+      ~when_:(lazy (capture_on && not (Utils.debug_log_from_routines ())))
+      ~aggregation:`Environment ~on:"graph capture off (gpu_graph_capture=false or routine logging)"
+  in
+  let counts =
+    lazy
+      (let before = Option.value_exn before in
+       let ctx, routine = Context.compile ctx0 comp Ir.Indexing.Empty in
+       let ctx = Context.run ctx routine in
+       let ctx = Context.run ctx routine in
+       Context.sync ctx;
+       let after_runs = Option.value (live_graph_execs ctx) ~default:(-1) in
+       Context.release ctx;
+       let after_release = Option.value (live_graph_execs ctx0) ~default:(-1) in
+       Stdio.eprintf
+         "live_graph_execs: %d before the compile, %d after two runs, %d after the release (not \
+          part of the golden)\n\
+          %!"
+         before after_runs after_release;
+       (before, after_runs, after_release))
+  in
+  in_leg ~leg "two runs at one binding instantiate exactly one graph" (fun label ->
+      let before, after_runs, _ = Lazy.force counts in
+      p label (after_runs - before = 1));
+  in_leg ~leg "releasing the routine's context destroys its graphs" (fun label ->
+      let before, _, after_release = Lazy.force counts in
+      p label (after_release = before))

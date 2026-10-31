@@ -221,7 +221,7 @@ test/operations/gpu_packed_prec.ml [run by @test/operations/runtest-gpu_packed_p
     sprintf "const %s*>(&"
 test/operations/gpu_serial_lanes.ml [run by @test/operations/runtest-gpu_serial_lanes; also pins text this scan cannot name: computed fragment, untraced callback]
     "for ("
-test/operations/grid_launch_floor.ml [run by @test/operations/runtest-grid_launch_floor; also pins text this scan cannot name: opaque aggregate component, mutation or unseen buffer write]
+test/operations/grid_launch_floor.ml [run by @test/operations/runtest-grid_launch_floor; also pins text this scan cannot name: untraced callback, opaque aggregate component, mutation or unseen buffer write]
     "#pragma omp parallel for"
     "dispatch_apply"
 test/operations/half_float_power.ml [run by @test/operations/runtest-half_float_power]
@@ -362,7 +362,7 @@ test/operations/schedule_ldmatrix_matmul.ml [run by @test/operations/runtest-sch
     ... ^ " e5m2 ldmatrix a"
     ... ^ " e5m2 ldmatrix b"
     ... ^ " ldmatrix a,b"
-test/operations/schedule_mma_matmul.ml [run by @test/operations/runtest-schedule_mma_matmul; also pins text this scan cannot name: computed fragment, untraced callback, opaque aggregate component, unsupplied application, mutation or unseen buffer write]
+test/operations/schedule_mma_matmul.ml [run by @test/operations/runtest-schedule_mma_matmul; also pins text this scan cannot name: computed fragment, untraced callback, forwarded parameter, opaque aggregate component, unsupplied application, mutation or unseen buffer write, rebound parameter]
     "#elif "
     "/* mma.sync fragment reduction body begins */"
     "/* mma.sync fragment reduction body ends */"
@@ -566,7 +566,7 @@ test/operations/tile_mma_declines.ml [run by @test/operations/runtest-tile_mma_d
     "#pragma omp parallel for"
     "dispatch_apply"
     "tile_"
-test/operations/tile_mma_geometry.ml [run by @test/operations/runtest-tile_mma_geometry; also pins text this scan cannot name: computed fragment, untraced callback, opaque aggregate component, rebound parameter]
+test/operations/tile_mma_geometry.ml [run by @test/operations/runtest-tile_mma_geometry; also pins text this scan cannot name: computed fragment, untraced callback, opaque aggregate component, unsupplied application, rebound parameter]
     "geometry from the schedule"
     "ocannl_pv__ = {" ^ ...
     "tmma_acc__"

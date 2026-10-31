@@ -53,7 +53,10 @@ open Verdict.Claims
 
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 let on_cpu = Sched.backend_is_cpu backend_name
-let skipped = Verdict.skipped ~backend:backend_name
+
+(* The splat legs' claims, open on a CPU backend and skipped by name elsewhere, each written once
+   (gh-ocannl-1703). *)
+let cpu_leg = Verdict.leg ~when_:on_cpu ~on:backend_name ()
 
 module Generated = Test_utils.Generated
 
@@ -134,119 +137,128 @@ let mk = 4
 let mj = 16
 
 let () =
-  if on_cpu then (
-    (* Row 0 of A is all negative zero, the remaining rows ordinary values; B is strictly positive,
-       so row 0's products are [-0.0] rather than [+0.0]. Everything is a multiple of 1/8, hence
-       exact in f32: the parity claims are about zero signs, not rounding. *)
-    let av =
-      Array.init (mi * mk) ~f:(fun x ->
-          if x < mk then -0.0
-          else Ll_test.cycle_flat ~dims:[| mi; mk |] ~modulus:7 ~offset:1. ~stride:0.5 x)
-    in
-    let bv =
-      Array.init (mk * mj)
-        ~f:(Ll_test.cycle_flat ~dims:[| mk; mj |] ~modulus:13 ~offset:1. ~stride:0.25)
-    in
-    (* The accumulator's preloaded value: the C-tile is loaded from [d] at block entry, and a [-0.0]
-       accumulator is what makes a [-0.0] product visible ([(+0.0) + (-0.0) = +0.0] would otherwise
-       absorb the sign). *)
-    let dv = Array.create ~len:(mi * mj) (-0.0) in
-    let ma = TDSL.ndarray av ~label:[ "nz_a" ] ~input_dims:[ mk ] ~output_dims:[ mi ] () in
-    let mb = TDSL.ndarray bv ~label:[ "nz_b" ] ~input_dims:[ mj ] ~output_dims:[ mk ] () in
-    let accumulator tag =
-      TDSL.ndarray dv ~label:[ tag ] ~input_dims:[ mj ] ~output_dims:[ mi ] ()
-    in
-    let d_twin = accumulator "nz_d_twin" in
-    let ctx_twin =
-      run ~name:"nz_serial" ~transform:(fun opt -> opt) [%cd d_twin =+ ma * mb ~logic:"@"]
-    in
-    let want = discriminating "nz_serial" (Context.get_values ctx_twin d_twin.Tensor.value) in
-    let d_mma = accumulator "nz_d_mma" in
-    let transform (opt : LL.optimized) =
-      let i, j, k =
-        match List.find_exn (Ll_test.nest_paths opt.LL.llc) ~f:(fun q -> List.length q = 3) with
-        | [ i; j; k ] -> (i, j, k)
-        | _ -> assert false
-      in
-      let tz, _lane = Sched.tensorize ~i ~j ~k ~simd_width:mj () in
-      Sched.apply [ tz ] opt
-    in
-    let ctx_mma, census =
-      run_census ~ctx:ctx_twin ~name:"nz_mma" ~transform [%cd d_mma =+ ma * mb ~logic:"@"]
-    in
-    let got = Context.get_values ctx_mma d_mma.Tensor.value in
-    p_all2 "register-tiled Tile_mma preserves negative zero (bitwise vs the serial twin)" got want
-      ~f:bitwise;
-    let src = Generated.read "nz_mma" in
-    let has s = String.is_substring src ~substring:s in
-    (* That the statement rendered the register tiling is the census's to say (gh-ocannl-1316); its
-       geometry and the splat's spelling are the text's own subject. *)
-    p "register tiling renders a bit-preserving A splat"
-      (Ll_test.all_rendered ~what:"nz_mma" Ir.C_syntax.Mma_register_tiled census
-      && has "full blocks 4x16 of 4x16"
-      (* An initializer of repeated copies of one bound scalar — no arithmetic, so no bit pattern is
-         altered. Both arithmetic spellings are pinned out by name: [(vtyp){0} + x] normalizes a
-         negative zero, and [x - (vtyp){0}] quiets a signaling NaN. *)
-      && has "tmma_as_0__, tmma_as_0__"
-      && (not (has "){0} + "))
-      && not (has " - (ocannl_vec")))
-  else (
-    skipped "register-tiled Tile_mma preserves negative zero (bitwise vs the serial twin)";
-    skipped "register tiling renders a bit-preserving A splat")
+  let mma =
+    lazy
+      ((* Row 0 of A is all negative zero, the remaining rows ordinary values; B is strictly
+          positive, so row 0's products are [-0.0] rather than [+0.0]. Everything is a multiple of
+          1/8, hence exact in f32: the parity claims are about zero signs, not rounding. *)
+       let av =
+         Array.init (mi * mk) ~f:(fun x ->
+             if x < mk then -0.0
+             else Ll_test.cycle_flat ~dims:[| mi; mk |] ~modulus:7 ~offset:1. ~stride:0.5 x)
+       in
+       let bv =
+         Array.init (mk * mj)
+           ~f:(Ll_test.cycle_flat ~dims:[| mk; mj |] ~modulus:13 ~offset:1. ~stride:0.25)
+       in
+       (* The accumulator's preloaded value: the C-tile is loaded from [d] at block entry, and a
+          [-0.0] accumulator is what makes a [-0.0] product visible ([(+0.0) + (-0.0) = +0.0] would
+          otherwise absorb the sign). *)
+       let dv = Array.create ~len:(mi * mj) (-0.0) in
+       let ma = TDSL.ndarray av ~label:[ "nz_a" ] ~input_dims:[ mk ] ~output_dims:[ mi ] () in
+       let mb = TDSL.ndarray bv ~label:[ "nz_b" ] ~input_dims:[ mj ] ~output_dims:[ mk ] () in
+       let accumulator tag =
+         TDSL.ndarray dv ~label:[ tag ] ~input_dims:[ mj ] ~output_dims:[ mi ] ()
+       in
+       let d_twin = accumulator "nz_d_twin" in
+       let ctx_twin =
+         run ~name:"nz_serial" ~transform:(fun opt -> opt) [%cd d_twin =+ ma * mb ~logic:"@"]
+       in
+       let want = discriminating "nz_serial" (Context.get_values ctx_twin d_twin.Tensor.value) in
+       let d_mma = accumulator "nz_d_mma" in
+       let transform (opt : LL.optimized) =
+         let i, j, k =
+           match List.find_exn (Ll_test.nest_paths opt.LL.llc) ~f:(fun q -> List.length q = 3) with
+           | [ i; j; k ] -> (i, j, k)
+           | _ -> assert false
+         in
+         let tz, _lane = Sched.tensorize ~i ~j ~k ~simd_width:mj () in
+         Sched.apply [ tz ] opt
+       in
+       let ctx_mma, census =
+         run_census ~ctx:ctx_twin ~name:"nz_mma" ~transform [%cd d_mma =+ ma * mb ~logic:"@"]
+       in
+       (Context.get_values ctx_mma d_mma.Tensor.value, want, census))
+  in
+  in_leg ~leg:cpu_leg "register-tiled Tile_mma preserves negative zero (bitwise vs the serial twin)"
+    (fun label ->
+      let got, want, _ = Lazy.force mma in
+      p_all2 label got want ~f:bitwise);
+  in_leg ~leg:cpu_leg "register tiling renders a bit-preserving A splat" (fun label ->
+      let _, _, census = Lazy.force mma in
+      let src = Generated.read "nz_mma" in
+      let has s = String.is_substring src ~substring:s in
+      (* That the statement rendered the register tiling is the census's to say (gh-ocannl-1316);
+         its geometry and the splat's spelling are the text's own subject. *)
+      p label
+        (Ll_test.all_rendered ~what:"nz_mma" Ir.C_syntax.Mma_register_tiled census
+        && has "full blocks 4x16 of 4x16"
+        (* An initializer of repeated copies of one bound scalar — no arithmetic, so no bit pattern
+           is altered. Both arithmetic spellings are pinned out by name: [(vtyp){0} + x] normalizes
+           a negative zero, and [x - (vtyp){0}] quiets a signaling NaN. *)
+        && has "tmma_as_0__, tmma_as_0__"
+        && (not (has "){0} + "))
+        && not (has " - (ocannl_vec")))
 
 (* === Leg 2: the [Vectorized] rendering's lane-uniform FMA operand. === *)
 
 let () =
-  if on_cpu then (
-    let rows = 3 and cols = 64 in
-    let n = rows * cols in
-    (* [a] takes both signs, so the correct product is [-0.0] on the positive cells and [+0.0] on
-       the negative ones — the normalizing splat gets BOTH backwards, which a fix that merely
-       flipped a sign would not. [b] is negative zero except on a few cells: a zero addend keeps the
-       product's zero sign observable, and the nonzero cells keep the reference non-vacuous (and pin
-       that ordinary arithmetic is unchanged). *)
-    let av =
-      Array.init n ~f:(fun x ->
-          let mag = Float.of_int ((x % 7) + 1) *. 0.5 in
-          if x % 3 = 0 then -.mag else mag)
-    in
-    let bv =
-      Array.init n ~f:(fun x -> if x % 4 = 1 then Float.of_int ((x % 9) + 1) *. 0.25 else -0.0)
-    in
-    let a = TDSL.ndarray av ~label:[ "nzv_a" ] ~output_dims:[ rows; cols ] () in
-    let b = TDSL.ndarray bv ~label:[ "nzv_b" ] ~output_dims:[ rows; cols ] () in
-    (* The lane-uniform multiplier: [-0.0] per row, broadcast along the vectorized axis. A scalar
-       [-0.0] constant would not do — the [fp_finite_math] licence folds a multiply by a zero
-       constant away entirely — but a per-row array read mentions only the OUTER index, which is
-       exactly what "lane-uniform" means to the vectorizer, so it reaches the fused multiply-add
-       through the splat rather than through a binary operator's implicit (and exact) vector-scalar
-       broadcast. The multiply-add is an explicit [fma] in ONE assignment, reading the inlined row
-       broadcast: a product tensor added in a second assignment is fused only by the contraction
-       licence, and never across the inlining boundary between the two (gh-ocannl-998). *)
-    let s =
-      TDSL.ndarray (Array.create ~len:rows (-0.0)) ~label:[ "nzv_s" ] ~output_dims:[ rows ] ()
-    in
-    let%op c0 = fma (s ++ "i=>ij") a b in
-    let ctx_twin = run ~name:"nzv_twin" ~transform:(fun opt -> opt) (Train.forward c0) in
-    let want = discriminating "nzv_twin" (Context.get_values ctx_twin c0.Tensor.value) in
-    (* Both zero signs must actually occur, or half the discrimination above is imaginary. *)
-    p "vectorized reference carries zeros of both signs"
-      (Array.exists want ~f:is_neg_zero
-      && Array.exists want ~f:(fun x -> Float.equal x 0. && not (Float.ieee_negative x)));
-    let%op c1 = fma (s ++ "i=>ij") a b in
-    let transform (opt : LL.optimized) =
-      let j = Option.value_exn ~here:[%here] (innermost_loop opt.LL.llc) in
-      Sched.apply [ Sched.Retype { axis = j; ty = LL.Vectorized } ] opt
-    in
-    let ctx_vec = run ~ctx:ctx_twin ~name:"nzv_vec" ~transform (Train.forward c1) in
-    let got = Context.get_values ctx_vec c1.Tensor.value in
-    p_all2 "vectorized FMA preserves a negative-zero uniform operand (bitwise vs the serial twin)"
-      got want ~f:bitwise;
-    let src = Generated.read "nzv_vec" in
-    let has s = String.is_substring src ~substring:s in
-    p "vectorized rendering renders a bit-preserving splat"
-      (has "vector_size" && has "vunif" && (not (has "){0} + ")) && not (has " - (ocannl_vec")))
-  else (
-    skipped "vectorized reference carries zeros of both signs";
-    skipped "vectorized FMA preserves a negative-zero uniform operand (bitwise vs the serial twin)";
-    skipped "vectorized rendering renders a bit-preserving splat")
+  let twin =
+    lazy
+      (let rows = 3 and cols = 64 in
+       let n = rows * cols in
+       (* [a] takes both signs, so the correct product is [-0.0] on the positive cells and [+0.0] on
+          the negative ones — the normalizing splat gets BOTH backwards, which a fix that merely
+          flipped a sign would not. [b] is negative zero except on a few cells: a zero addend keeps
+          the product's zero sign observable, and the nonzero cells keep the reference non-vacuous
+          (and pin that ordinary arithmetic is unchanged). *)
+       let av =
+         Array.init n ~f:(fun x ->
+             let mag = Float.of_int ((x % 7) + 1) *. 0.5 in
+             if x % 3 = 0 then -.mag else mag)
+       in
+       let bv =
+         Array.init n ~f:(fun x -> if x % 4 = 1 then Float.of_int ((x % 9) + 1) *. 0.25 else -0.0)
+       in
+       let a = TDSL.ndarray av ~label:[ "nzv_a" ] ~output_dims:[ rows; cols ] () in
+       let b = TDSL.ndarray bv ~label:[ "nzv_b" ] ~output_dims:[ rows; cols ] () in
+       (* The lane-uniform multiplier: [-0.0] per row, broadcast along the vectorized axis. A scalar
+          [-0.0] constant would not do — the [fp_finite_math] licence folds a multiply by a zero
+          constant away entirely — but a per-row array read mentions only the OUTER index, which is
+          exactly what "lane-uniform" means to the vectorizer, so it reaches the fused multiply-add
+          through the splat rather than through a binary operator's implicit (and exact)
+          vector-scalar broadcast. The multiply-add is an explicit [fma] in ONE assignment, reading
+          the inlined row broadcast: a product tensor added in a second assignment is fused only by
+          the contraction licence, and never across the inlining boundary between the two
+          (gh-ocannl-998). *)
+       let s =
+         TDSL.ndarray (Array.create ~len:rows (-0.0)) ~label:[ "nzv_s" ] ~output_dims:[ rows ] ()
+       in
+       let%op c0 = fma (s ++ "i=>ij") a b in
+       let ctx_twin = run ~name:"nzv_twin" ~transform:(fun opt -> opt) (Train.forward c0) in
+       let want = discriminating "nzv_twin" (Context.get_values ctx_twin c0.Tensor.value) in
+       (s, a, b, ctx_twin, want))
+  in
+  (* Both zero signs must actually occur, or half the discrimination above is imaginary. *)
+  in_leg ~leg:cpu_leg "vectorized reference carries zeros of both signs" (fun label ->
+      let _, _, _, _, want = Lazy.force twin in
+      p label
+        (Array.exists want ~f:is_neg_zero
+        && Array.exists want ~f:(fun x -> Float.equal x 0. && not (Float.ieee_negative x))));
+  in_leg ~leg:cpu_leg
+    "vectorized FMA preserves a negative-zero uniform operand (bitwise vs the serial twin)"
+    (fun label ->
+      let s, a, b, ctx_twin, want = Lazy.force twin in
+      let%op c1 = fma (s ++ "i=>ij") a b in
+      let transform (opt : LL.optimized) =
+        let j = Option.value_exn ~here:[%here] (innermost_loop opt.LL.llc) in
+        Sched.apply [ Sched.Retype { axis = j; ty = LL.Vectorized } ] opt
+      in
+      let ctx_vec = run ~ctx:ctx_twin ~name:"nzv_vec" ~transform (Train.forward c1) in
+      let got = Context.get_values ctx_vec c1.Tensor.value in
+      p_all2 label got want ~f:bitwise);
+  in_leg ~leg:cpu_leg "vectorized rendering renders a bit-preserving splat" (fun label ->
+      let src = Generated.read "nzv_vec" in
+      let has s = String.is_substring src ~substring:s in
+      p label
+        (has "vector_size" && has "vunif" && (not (has "){0} + ")) && not (has " - (ocannl_vec")))

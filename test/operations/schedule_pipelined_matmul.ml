@@ -64,12 +64,15 @@ let nonzero name (a : float array) =
 
 let approx a b = Float.(abs (a - b) < 1e-2)
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
-let skipped = Verdict.skipped ~backend:backend_name
 
 (* Intentional dialect identity: these branches count the exact MSL versus CUDA/HIP array and
    barrier tokens. Async-copy availability is queried separately through codegen capabilities. *)
 let on_metal = String.is_substring backend_name ~substring:"metal"
 let on_gpu = Sched.backend_is_gpu backend_name
+
+(* The claims only a GPU can evaluate: open there, and skipped by name elsewhere, each written once
+   (gh-ocannl-1703). *)
+let gpu_leg = Verdict.leg ~when_:on_gpu ~on:backend_name ()
 
 module Generated = Test_utils.Generated
 
@@ -250,26 +253,50 @@ let () =
     let post = if key = 0 then Some reinsert_barriers else None in
     compile_depth ?post ~key ~pipeline_depth:(max key 1) ~out:mc.Tensor.value comp
   in
-  (if on_gpu then (
-     let results =
-       List.map legs ~f:(fun ((key, mc, _) as leg) ->
-           let ctx, routine = compile_leg leg in
-           let ctx = Context.run ctx routine in
-           (key, Context.get_values ctx mc.Tensor.value))
-     in
-     let got_ref = List.Assoc.find_exn results 0 ~equal:Int.equal in
-     let got_d1 = List.Assoc.find_exn results 1 ~equal:Int.equal in
-     let got_d2 = List.Assoc.find_exn results 2 ~equal:Int.equal in
-     p_all "staged depths approximate the serial twin (GPU) or clean rejection (CPU)" results
-       ~f:(fun (_, got) -> Array.for_all2_exn got got_serial ~f:approx);
-     (* The invariant: pipelining is a pure prefetch-timing transform. *)
-     p_all2 "depth 2 matches depth 1 BITWISE" got_d2 got_d1 ~f:Float.equal;
-     (* The gh-567 invariant: grouping and eliding barriers is a pure synchronization transform. *)
-     p_all2 "depth 1 matches the un-elided barrier structure BITWISE" got_d1 got_ref ~f:Float.equal;
-     let count_sub src sub =
-       String.substr_index_all src ~may_overlap:false ~pattern:sub |> List.length
-     in
-     (let src1 = Generated.read "pipe_mm_d1" in
+  let results =
+    if on_gpu then
+      Some
+        (List.map legs ~f:(fun ((key, mc, _) as leg) ->
+             let ctx, routine = compile_leg leg in
+             let ctx = Context.run ctx routine in
+             (key, Context.get_values ctx mc.Tensor.value)))
+    else None
+  in
+  (let label = "staged depths approximate the serial twin (GPU) or clean rejection (CPU)" in
+   match results with
+   | Some results ->
+       p_all label results ~f:(fun (_, got) -> Array.for_all2_exn got got_serial ~f:approx)
+   | None ->
+       (* The C backends reject the shared staging composition at compile (workgroup-shared
+          placement is not renderable there) — same clean rejection as the SMEM matmul test, at any
+          depth. *)
+       let rejects leg =
+         try
+           ignore (compile_leg leg : Context.t * Context.routine);
+           false
+         with Invalid_argument msg -> String.is_substring msg ~substring:"not supported"
+       in
+       p_all label legs ~f:rejects);
+  (* The executed depths, where the backend is a GPU; off it the claims below are skipped. *)
+  let got =
+    lazy
+      (let results = Option.value_exn results in
+       let find key = List.Assoc.find_exn results key ~equal:Int.equal in
+       (find 0, find 1, find 2))
+  in
+  (* The invariant: pipelining is a pure prefetch-timing transform. *)
+  in_leg ~leg:gpu_leg "depth 2 matches depth 1 BITWISE" (fun label ->
+      let _, got_d1, got_d2 = Lazy.force got in
+      p_all2 label got_d2 got_d1 ~f:Float.equal);
+  (* The gh-567 invariant: grouping and eliding barriers is a pure synchronization transform. *)
+  in_leg ~leg:gpu_leg "depth 1 matches the un-elided barrier structure BITWISE" (fun label ->
+      let got_ref, got_d1, _ = Lazy.force got in
+      p_all2 label got_d1 got_ref ~f:Float.equal);
+  let count_sub src sub =
+    String.substr_index_all src ~may_overlap:false ~pattern:sub |> List.length
+  in
+  in_leg ~leg:gpu_leg "depth 2 rotates the buffers the depth-1 kernel does not" (fun label ->
+      let src1 = Generated.read "pipe_mm_d1" in
       let src2 = Generated.read "pipe_mm_d2" in
       (* The depth-2 kernel rotates both tile buffers ([% 2] terms on reads and writes) and
          allocates each tile at twice the depth-1 size (16x16 -> [512] and 16x32 -> [1024] floats);
@@ -280,18 +307,19 @@ let () =
           && count_sub src ("[" ^ Int.to_string (512 * d) ^ "]") >= 1
         else true
       in
-      p "depth 2 rotates the buffers the depth-1 kernel does not"
+      p label
         (count_sub src2 "% 2" >= 4 && count_sub src1 "% 2" = 0 && decl_ok src1 1 && decl_ok src2 2));
-     (* gh-487 phase 2: where the backend has an async-copy arm, the depth-2 staging renders as
-        async copies — both prologues and both prefetches, 4 call sites — with one wait-then-barrier
-        opening each rotor iteration, while depth 1 stays fully synchronous: the pd1/pd2 pair keeps
-        comparing prefetch timing only. The arm's presence is probed through the capability it gates
-        identically (CUDA advertises [mma_pipeline_depths] exactly where [async_copy] is provided,
-        sm_80+), so a pre-Ampere CUDA device expects the portable form rather than failing (Codex P2
-        on PR #317). Backends without the arm (Metal — which advertises depths for the portable form
-        — and HIP) keep the synchronous rendering at both depths: a real check that the hook does
-        not leak, not a skip. *)
-     (let src1 = Generated.read "pipe_mm_d1" in
+  (* gh-487 phase 2: where the backend has an async-copy arm, the depth-2 staging renders as async
+     copies — both prologues and both prefetches, 4 call sites — with one wait-then-barrier opening
+     each rotor iteration, while depth 1 stays fully synchronous: the pd1/pd2 pair keeps comparing
+     prefetch timing only. The arm's presence is probed through the capability it gates identically
+     (CUDA advertises [mma_pipeline_depths] exactly where [async_copy] is provided, sm_80+), so a
+     pre-Ampere CUDA device expects the portable form rather than failing (Codex P2 on PR #317).
+     Backends without the arm (Metal — which advertises depths for the portable form — and HIP) keep
+     the synchronous rendering at both depths: a real check that the hook does not leak, not a
+     skip. *)
+  in_leg ~leg:gpu_leg "async copies appear exactly on the depth-2 async arm" (fun label ->
+      let src1 = Generated.read "pipe_mm_d1" in
       let src2 = Generated.read "pipe_mm_d2" in
       let asynchronous_staging =
         (Context.codegen_capabilities (Context.auto ())).asynchronous_staging_copy
@@ -300,36 +328,21 @@ let () =
         | Some m -> not (List.is_empty m.Ir.Backend_intf.mma_pipeline_depths)
         | None -> false
       in
-      p "async copies appear exactly on the depth-2 async arm"
+      p label
         (if asynchronous_staging then
            count_sub src2 "ocannl_cp_async4(&" = 4
            && count_sub src2 "ocannl_cp_async_wait_all();" = 1
            && count_sub src1 "ocannl_cp_async" = 0
          else count_sub src2 "ocannl_cp_async" = 0 && count_sub src1 "ocannl_cp_async" = 0));
-     (* The count in the EMITTED kernel, where the intrinsic's own brackets are visible too: the
-        reference and depth 1 differ by exactly the two barrier statements gh-567 dropped (the
-        k-block has one loop body in the source, so this counts statements, not executions). *)
-     let src1 = Generated.read "pipe_mm_d1" in
-     let src_ref = Generated.read "pipe_mm_d1_barriers" in
-     let barrier_kw = if on_metal then "threadgroup_barrier" else "__syncthreads" in
-     p "the emitted depth-1 kernel sheds exactly the two elided barriers"
-       (count_sub src_ref barrier_kw - count_sub src1 barrier_kw = 2))
-   else
-     (* The C backends reject the shared staging composition at compile (workgroup-shared placement
-        is not renderable there) — same clean rejection as the SMEM matmul test, at any depth. *)
-     let rejects leg =
-       try
-         ignore (compile_leg leg : Context.t * Context.routine);
-         false
-       with Invalid_argument msg -> String.is_substring msg ~substring:"not supported"
-     in
-     p_all "staged depths approximate the serial twin (GPU) or clean rejection (CPU)" legs
-       ~f:rejects;
-     skipped "depth 2 matches depth 1 BITWISE";
-     skipped "depth 1 matches the un-elided barrier structure BITWISE";
-     skipped "depth 2 rotates the buffers the depth-1 kernel does not";
-     skipped "async copies appear exactly on the depth-2 async arm";
-     skipped "the emitted depth-1 kernel sheds exactly the two elided barriers");
+  (* The count in the EMITTED kernel, where the intrinsic's own brackets are visible too: the
+     reference and depth 1 differ by exactly the two barrier statements gh-567 dropped (the k-block
+     has one loop body in the source, so this counts statements, not executions). *)
+  in_leg ~leg:gpu_leg "the emitted depth-1 kernel sheds exactly the two elided barriers"
+    (fun label ->
+      let src1 = Generated.read "pipe_mm_d1" in
+      let src_ref = Generated.read "pipe_mm_d1_barriers" in
+      let barrier_kw = if on_metal then "threadgroup_barrier" else "__syncthreads" in
+      p label (count_sub src_ref barrier_kw - count_sub src1 barrier_kw = 2));
 
   (* --- Structural pins on the applied schedules (all backends; captured by the transforms above).
      --- *)
@@ -573,29 +586,28 @@ let () =
             String.equal f feature && String.is_substring detail ~substring
         | _ -> false)
   in
-  if on_gpu then (
-    p "a read outside the rotor loop is a candidate's typed decline, not a fatal"
-      (declines_at_codegen ~feature:"pipelined tile read outside its rotor loop"
-         ~substring:"outside its rotor loop" rotorless_transform);
-    p "so is a pipelined tile whose rotor loop is not Serial"
-      (declines_at_codegen ~feature:"pipelined tile whose rotor loop is not Serial"
-         ~substring:"no longer Serial" unserial_rotor_transform);
-    let%op mcr2 = ma * mb in
-    expect_invalid "and the same schedule written by hand still raises at Context.compile"
-      ~substring:"outside its rotor loop" (fun () ->
-        ignore
-          (Context.compile
-             ~lowered_transform:(fun o -> [ (rotorless_transform ~out:mcr2.Tensor.value) o ])
-             (Context.auto ())
-             (named "pipe_mm_rotorless_user" (Train.forward mcr2))
-             Ir.Indexing.Empty
-            : Context.t * Context.routine)))
-  else (
-    (* The C backends reject the workgroup-shared composition before either check is reached, so the
-       renderer's preconditions are unreachable here. *)
-    skipped "a read outside the rotor loop is a candidate's typed decline, not a fatal";
-    skipped "so is a pipelined tile whose rotor loop is not Serial";
-    skipped "and the same schedule written by hand still raises at Context.compile");
+  (* The C backends reject the workgroup-shared composition before either check is reached, so the
+     renderer's preconditions are unreachable there: off a GPU these claims are skipped. *)
+  in_leg ~leg:gpu_leg "a read outside the rotor loop is a candidate's typed decline, not a fatal"
+    (fun label ->
+      p label
+        (declines_at_codegen ~feature:"pipelined tile read outside its rotor loop"
+           ~substring:"outside its rotor loop" rotorless_transform));
+  in_leg ~leg:gpu_leg "so is a pipelined tile whose rotor loop is not Serial" (fun label ->
+      p label
+        (declines_at_codegen ~feature:"pipelined tile whose rotor loop is not Serial"
+           ~substring:"no longer Serial" unserial_rotor_transform));
+  in_leg ~leg:gpu_leg "and the same schedule written by hand still raises at Context.compile"
+    (fun label ->
+      let%op mcr2 = ma * mb in
+      expect_invalid label ~substring:"outside its rotor loop" (fun () ->
+          ignore
+            (Context.compile
+               ~lowered_transform:(fun o -> [ (rotorless_transform ~out:mcr2.Tensor.value) o ])
+               (Context.auto ())
+               (named "pipe_mm_rotorless_user" (Train.forward mcr2))
+               Ir.Indexing.Empty
+              : Context.t * Context.routine)));
 
   (* --- Seeding pin (gh-ocannl-487): the depth twins follow the backend's advertised
      [mma_pipeline_depths] — one twin per staged seed per advertised depth, identical to its plain

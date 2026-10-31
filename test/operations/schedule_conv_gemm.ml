@@ -63,6 +63,10 @@ let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~d
 let skipped = Verdict.skipped ~backend:backend_name
 let on_cpu = Sched.backend_is_cpu backend_name
 
+(* Off a C backend the CPU-only legs' claims are skipped by name, in the order the same code makes
+   them: each claim is written once, in a leg (gh-ocannl-1703). *)
+let cpu_leg = Verdict.leg ~when_:on_cpu ~on:backend_name ()
+
 let advertises_mma_format a b d =
   Ir.Backend_intf.advertises_mma_format (Context.hardware_limits (Context.auto ())) ~a ~b ~d
 
@@ -338,53 +342,45 @@ let () =
     let swapped, _ = run_sched (tag ^ "_swap") (make_conv (tag ^ "_s")) ~tensorized:false in
     p_close (tag ^ ": reorder-only conv matches the natural form within tolerance") swapped want
       ~tol:(fun _ -> 1e-3);
-    if on_cpu then (
-      let full, census = run_sched (tag ^ "_gemm") (make_conv (tag ^ "_g")) ~tensorized:true in
-      p_all2
-        (tag ^ ": packed+tensorized conv matches the reorder-only twin bitwise")
-        full swapped ~f:Float.equal;
-      p_close (tag ^ ": packed+tensorized conv matches the natural form within tolerance") full want
-        ~tol:(fun _ -> 1e-3);
-      claim_tensorized
-        (tag ^ ": the packed+tensorized conv's routine is labeled tensorized")
-        (rendered_tensorized census);
-      Some census)
-    else (
-      skipped (tag ^ ": packed+tensorized conv matches the reorder-only twin bitwise");
-      skipped (tag ^ ": packed+tensorized conv matches the natural form within tolerance");
-      skipped (tag ^ ": the packed+tensorized conv's routine is labeled tensorized");
-      None)
+    let gemm = lazy (run_sched (tag ^ "_gemm") (make_conv (tag ^ "_g")) ~tensorized:true) in
+    in_legf ~leg:cpu_leg "%s: packed+tensorized conv matches the reorder-only twin bitwise" tag
+      (fun label ->
+        let full, _ = Lazy.force gemm in
+        p_all2 label full swapped ~f:Float.equal);
+    in_legf ~leg:cpu_leg "%s: packed+tensorized conv matches the natural form within tolerance" tag
+      (fun label ->
+        let full, _ = Lazy.force gemm in
+        p_close label full want ~tol:(fun _ -> 1e-3));
+    in_legf ~leg:cpu_leg "%s: the packed+tensorized conv's routine is labeled tensorized" tag
+      (fun label ->
+        let _, census = Lazy.force gemm in
+        claim_tensorized label (rendered_tensorized census));
+    lazy (snd (Lazy.force gemm))
   in
   let cvg_census = pipeline_leg "cvg" make_conv_s1v in
   (* The padded pipeline leg: the packing Stage's tile loads iterate the padded buffer (its edge
      guards compare against the padded dims, [Tn.dims]), so the halo values participate in the
      packed tile exactly as in the natural form — staging padded convs is sound. *)
-  ignore (pipeline_leg "cvp" make_conv_s1p : Ir.C_syntax.mma_summary option);
+  ignore (pipeline_leg "cvp" make_conv_s1p : Ir.C_syntax.mma_summary Lazy.t);
   (* A strided row used to pack a dilated tile ([Stage] packed by index range), which [Tensorize]'s
      unit-coefficient discipline rejected. The compacting Stage (gh-ocannl-502) packs the strided
      window densely — source reads keep the stride, tile store/read use coefficient 1 — so the
      packed+tensorized stride-2 pipeline now runs, matching its serial twins like the unit-stride
      legs — and the seeding wave proposes it (asserted above, executed below). *)
   let cvg2_census = pipeline_leg "cvg2" make_conv_s2v in
-  (match (cvg_census, cvg2_census) with
-  | Some cvg_census, Some cvg2_census ->
-      (* Every statement rendering the register tiling is the census's to say (gh-ocannl-1316); the
-         im2col tiles and the resident fragment are the source's own names. *)
-      let struct_pin routine census =
-        let src = Generated.read routine in
-        let has s = String.is_substring src ~substring:s in
-        Ll_test.all_rendered ~what:routine Ir.C_syntax.Mma_register_tiled
-          (Ll_test.renderings census)
-        && has "fragment_" && has "tile_"
-      in
-      p "conv pipeline structure: im2col packs, register tiling, resident fragment"
-        (struct_pin "cvg_gemm" cvg_census);
-      p "cvg2 pipeline structure: compacted im2col packs, register tiling fires on the strided row"
-        (struct_pin "cvg2_gemm" cvg2_census)
-  | _ ->
-      skipped "conv pipeline structure: im2col packs, register tiling, resident fragment";
-      skipped
-        "cvg2 pipeline structure: compacted im2col packs, register tiling fires on the strided row");
+  (* Every statement rendering the register tiling is the census's to say (gh-ocannl-1316); the
+     im2col tiles and the resident fragment are the source's own names. *)
+  let struct_pin routine census =
+    let src = Generated.read routine in
+    let has s = String.is_substring src ~substring:s in
+    Ll_test.all_rendered ~what:routine Ir.C_syntax.Mma_register_tiled (Ll_test.renderings census)
+    && has "fragment_" && has "tile_"
+  in
+  in_leg ~leg:cpu_leg "conv pipeline structure: im2col packs, register tiling, resident fragment"
+    (fun label -> p label (struct_pin "cvg_gemm" (Lazy.force cvg_census)));
+  in_leg ~leg:cpu_leg
+    "cvg2 pipeline structure: compacted im2col packs, register tiling fires on the strided row"
+    (fun label -> p label (struct_pin "cvg2_gemm" (Lazy.force cvg2_census)));
   (* v1 fence: hoisted (host-side) packing does not compact — a strided tile part is rejected loudly
      rather than silently packing a dilated tile. *)
   (let x, _kern, y = make_conv_s2v "cvg2_h" in
@@ -429,58 +425,66 @@ let () =
      the wave proposes on a stride-2 conv gets its own compile and is compared against the natural
      form. The conv-alone graph carries its own [Zero_out], so the proposals are the serial pipeline
      and its Grid twin (whose zero expansion adopts the same geometry). === *)
-  if on_cpu then (
-    let limits = narrowed_to_16 (Context.hardware_limits (Context.auto ())) in
-    let seeds = ref [] in
-    (let _, _, y = make_conv_s2v "cvs2_p" in
+  (let cvs2 =
+     lazy
+       (let limits = narrowed_to_16 (Context.hardware_limits (Context.auto ())) in
+        let seeds = ref [] in
+        (let _, _, y = make_conv_s2v "cvs2_p" in
+         let transform (opt : LL.optimized) =
+           seeds := Autotune.sketch_seed_params ~is_gpu:false ~is_cpu:true ~limits opt;
+           opt
+         in
+         ignore
+           (Context.compile
+              ~lowered_transform:(fun o -> [ transform o ])
+              (Context.auto ())
+              (named "cvs2_probe" (Train.forward y))
+              Ir.Indexing.Empty));
+        let want2 =
+          let _, _, y = make_conv_s2v "cvs2_r" in
+          run_plain "cvs2_ref" y
+        in
+        (!seeds, want2))
+   in
+   let run_seed want2 i p_ =
+     let tag = Printf.sprintf "cvs2_%d" i in
+     let _, _, y = make_conv_s2v tag in
      let transform (opt : LL.optimized) =
-       seeds := Autotune.sketch_seed_params ~is_gpu:false ~is_cpu:true ~limits opt;
-       opt
+       Sched.apply (Autotune.sketch_schedule ~accum_prec ~p:p_ opt) opt
      in
-     ignore
-       (Context.compile
-          ~lowered_transform:(fun o -> [ transform o ])
-          (Context.auto ())
-          (named "cvs2_probe" (Train.forward y))
-          Ir.Indexing.Empty));
-    let want2 =
-      let _, _, y = make_conv_s2v "cvs2_r" in
-      run_plain "cvs2_ref" y
-    in
-    let run_seed i p_ =
-      let tag = Printf.sprintf "cvs2_%d" i in
-      let _, _, y = make_conv_s2v tag in
-      let transform (opt : LL.optimized) =
-        Sched.apply (Autotune.sketch_schedule ~accum_prec ~p:p_ opt) opt
-      in
-      let ctx = Context.auto () in
-      let ctx, routine =
-        Context.compile
-          ~lowered_transform:(fun o -> [ transform o ])
-          ctx
-          (named tag (Train.forward y))
-          Ir.Indexing.Empty
-      in
-      let ctx = Context.run ctx routine in
-      let got = Context.get_values ctx y.Tensor.value in
-      ( (not (Array.is_empty got))
-        && Array.for_all2_exn got want2 ~f:(fun a b -> Float.(abs (a - b) < 1e-3)),
-        rendered_tensorized routine.Context.mma )
-    in
-    p_all "cvs2: the stride-2 conv seeds are the serial pipeline and its Grid twin" !seeds
-      ~f:(fun s ->
-        List.length !seeds = 2
-        && s.Autotune.sk_conv && (not s.Autotune.sk_gpu)
-        && List.count !seeds ~f:(fun t -> t.Autotune.sk_grid) = 1);
-    let results = List.mapi !seeds ~f:run_seed in
-    p_all "cvs2: every seeded stride-2 candidate matches the natural form within tolerance" results
-      ~f:fst;
-    claim_tensorized "cvs2: every seeded stride-2 candidate's routine is labeled tensorized"
-      (List.for_all results ~f:snd && not (List.is_empty results)))
-  else (
-    skipped "cvs2: the stride-2 conv seeds are the serial pipeline and its Grid twin";
-    skipped "cvs2: every seeded stride-2 candidate matches the natural form within tolerance";
-    skipped "cvs2: every seeded stride-2 candidate's routine is labeled tensorized");
+     let ctx = Context.auto () in
+     let ctx, routine =
+       Context.compile
+         ~lowered_transform:(fun o -> [ transform o ])
+         ctx
+         (named tag (Train.forward y))
+         Ir.Indexing.Empty
+     in
+     let ctx = Context.run ctx routine in
+     let got = Context.get_values ctx y.Tensor.value in
+     ( (not (Array.is_empty got))
+       && Array.for_all2_exn got want2 ~f:(fun a b -> Float.(abs (a - b) < 1e-3)),
+       rendered_tensorized routine.Context.mma )
+   in
+   in_leg ~leg:cpu_leg "cvs2: the stride-2 conv seeds are the serial pipeline and its Grid twin"
+     (fun label ->
+       let seeds, _ = Lazy.force cvs2 in
+       p_all label seeds ~f:(fun s ->
+           List.length seeds = 2
+           && s.Autotune.sk_conv && (not s.Autotune.sk_gpu)
+           && List.count seeds ~f:(fun t -> t.Autotune.sk_grid) = 1));
+   let results =
+     lazy
+       (let seeds, want2 = Lazy.force cvs2 in
+        List.mapi seeds ~f:(run_seed want2))
+   in
+   in_leg ~leg:cpu_leg
+     "cvs2: every seeded stride-2 candidate matches the natural form within tolerance" (fun label ->
+       p_all label (Lazy.force results) ~f:fst);
+   in_leg ~leg:cpu_leg "cvs2: every seeded stride-2 candidate's routine is labeled tensorized"
+     (fun label ->
+       let results = Lazy.force results in
+       claim_tensorized label (List.for_all results ~f:snd && not (List.is_empty results))));
 
   (* === Autotune seeding on conv+bias+relu: serial + Grid conv pipelines, each with its
      fused-epilogue twin (2-D convs fuse since the whole-window contraction, gh-ocannl-501). The
@@ -575,79 +579,83 @@ let () =
      tail into the conv nest (one real statement beside the [Zero_out]), and elementwise tails never
      reorder the reduction — fused values match the unfused pipeline BITWISE on the C backends.
      === *)
-  if on_cpu then (
-    let run_tail_sched name (x, kern, pr, y) ~fused =
-      let n_real = ref (-1) in
-      let transform (opt : LL.optimized) =
-        let paths = Ll_test.nest_paths opt.LL.llc in
-        let _b, _oh, ow, oc, ic, kh, kw =
-          match List.find_exn paths ~f:(fun q -> List.length q = 7) with
-          | [ b; oh; ow; oc; ic; kh; kw ] -> (b, oh, ow, oc, ic, kh, kw)
-          | _ -> assert false
-        in
-        let sink sym below = List.map below ~f:(fun inner -> Sched.Swap { outer = sym; inner }) in
-        let reorder =
-          sink ow [ oc; ic; kh; kw ]
-          @ sink oc [ ic; kh; kw ]
-          @ sink ic [ kh; kw ]
-          @ sink ic [ oc; ow ]
-          @ sink oc [ ow ]
-        in
-        let stage source tile_loops =
-          Sched.Stage
-            {
-              source;
-              tile_loops;
-              shared = false;
-              cooperative = None;
-              hoisted = false;
-              swizzle = None;
-              pad_stride = None;
-              pipeline_depth = 1;
-              tile_prec = None;
-            }
-        in
-        let tz, _lane = Sched.tensorize ~i:ow ~j:oc ~k:ic ~simd_width:1 () in
-        let sched =
-          reorder
-          @ [ stage x.Tensor.value [ ow; ic ]; stage kern.Tensor.value [ ic; oc ]; tz ]
-          @
-          if fused then [ Sched.Fuse_epilogue { target = pr.Tensor.value; shared = false } ] else []
-        in
-        let opt = Sched.apply sched opt in
-        n_real :=
-          List.length
-            (List.filter (LL.flat_lines [ opt.LL.llc ]) ~f:(function
-              | LL.Noop | LL.Comment _ | LL.Zero_out _ -> false
-              | _ -> true));
-        opt
-      in
-      let ctx = Context.auto () in
-      let ctx, routine =
-        Context.compile
-          ~lowered_transform:(fun o -> [ transform o ])
-          ctx
-          (named name (Train.forward y))
-          Ir.Indexing.Empty
-      in
-      let ctx = Context.run ctx routine in
-      (Context.get_values ctx y.Tensor.value, !n_real, routine.Context.mma)
-    in
-    let unfused, n_unfused, census_u =
-      run_tail_sched "cvf_unfused" (make_tail "cvf_u") ~fused:false
-    in
-    let fused, n_fused, census_f = run_tail_sched "cvf_fused" (make_tail "cvf_f") ~fused:true in
-    p "cvf: fusion merges the tail into the conv nest" (n_unfused = 2 && n_fused = 1);
-    p_all2 "cvf: fused conv twin matches the unfused pipeline bitwise" fused unfused ~f:Float.equal;
-    p_close "cvf: fused conv twin matches the natural form within tolerance" fused want_t
-      ~tol:(fun _ -> 1e-3);
-    claim_tensorized "cvf: the unfused and the fused conv routines are both labeled tensorized"
-      (rendered_tensorized census_u && rendered_tensorized census_f))
-  else (
-    skipped "cvf: fusion merges the tail into the conv nest";
-    skipped "cvf: fused conv twin matches the unfused pipeline bitwise";
-    skipped "cvf: fused conv twin matches the natural form within tolerance";
-    skipped "cvf: the unfused and the fused conv routines are both labeled tensorized");
+  (let run_tail_sched name (x, kern, pr, y) ~fused =
+     let n_real = ref (-1) in
+     let transform (opt : LL.optimized) =
+       let paths = Ll_test.nest_paths opt.LL.llc in
+       let _b, _oh, ow, oc, ic, kh, kw =
+         match List.find_exn paths ~f:(fun q -> List.length q = 7) with
+         | [ b; oh; ow; oc; ic; kh; kw ] -> (b, oh, ow, oc, ic, kh, kw)
+         | _ -> assert false
+       in
+       let sink sym below = List.map below ~f:(fun inner -> Sched.Swap { outer = sym; inner }) in
+       let reorder =
+         sink ow [ oc; ic; kh; kw ]
+         @ sink oc [ ic; kh; kw ]
+         @ sink ic [ kh; kw ]
+         @ sink ic [ oc; ow ]
+         @ sink oc [ ow ]
+       in
+       let stage source tile_loops =
+         Sched.Stage
+           {
+             source;
+             tile_loops;
+             shared = false;
+             cooperative = None;
+             hoisted = false;
+             swizzle = None;
+             pad_stride = None;
+             pipeline_depth = 1;
+             tile_prec = None;
+           }
+       in
+       let tz, _lane = Sched.tensorize ~i:ow ~j:oc ~k:ic ~simd_width:1 () in
+       let sched =
+         reorder
+         @ [ stage x.Tensor.value [ ow; ic ]; stage kern.Tensor.value [ ic; oc ]; tz ]
+         @
+         if fused then [ Sched.Fuse_epilogue { target = pr.Tensor.value; shared = false } ] else []
+       in
+       let opt = Sched.apply sched opt in
+       n_real :=
+         List.length
+           (List.filter (LL.flat_lines [ opt.LL.llc ]) ~f:(function
+             | LL.Noop | LL.Comment _ | LL.Zero_out _ -> false
+             | _ -> true));
+       opt
+     in
+     let ctx = Context.auto () in
+     let ctx, routine =
+       Context.compile
+         ~lowered_transform:(fun o -> [ transform o ])
+         ctx
+         (named name (Train.forward y))
+         Ir.Indexing.Empty
+     in
+     let ctx = Context.run ctx routine in
+     (Context.get_values ctx y.Tensor.value, !n_real, routine.Context.mma)
+   in
+   let cvf =
+     lazy
+       (let unfused = run_tail_sched "cvf_unfused" (make_tail "cvf_u") ~fused:false in
+        let fused = run_tail_sched "cvf_fused" (make_tail "cvf_f") ~fused:true in
+        (unfused, fused))
+   in
+   in_leg ~leg:cpu_leg "cvf: fusion merges the tail into the conv nest" (fun label ->
+       let (_, n_unfused, _), (_, n_fused, _) = Lazy.force cvf in
+       p label (n_unfused = 2 && n_fused = 1));
+   in_leg ~leg:cpu_leg "cvf: fused conv twin matches the unfused pipeline bitwise" (fun label ->
+       let (unfused, _, _), (fused, _, _) = Lazy.force cvf in
+       p_all2 label fused unfused ~f:Float.equal);
+   in_leg ~leg:cpu_leg "cvf: fused conv twin matches the natural form within tolerance"
+     (fun label ->
+       let _, (fused, _, _) = Lazy.force cvf in
+       p_close label fused want_t ~tol:(fun _ -> 1e-3));
+   in_leg ~leg:cpu_leg "cvf: the unfused and the fused conv routines are both labeled tensorized"
+     (fun label ->
+       let (_, _, census_u), (_, _, census_f) = Lazy.force cvf in
+       claim_tensorized label (rendered_tensorized census_u && rendered_tensorized census_f)));
 
   (* === The GPU staged leg and the aligned-merged Grid flavor (gh-ocannl-493 follow-ups). Both legs
      use micro-kernel extents divisible by Metal's 8x8x8 intrinsic tile: row = 8, oc = 16, ic = 8.
@@ -724,48 +732,52 @@ let () =
      kernel-window anchor, Tensorize at the backend lane width (the accumulator fragment stays
      resident across the whole kernel window, gh-ocannl-480/501). Tolerance tier: the reorder and
      the fragment arithmetic reassociate each element's reduction. --- *)
-  if has_uniform_f32_mma then (
-    let x, kern, y = make_conv8 "cvu_g" in
-    let conv_sched (site : Autotune.conv_site) _seg =
-      let w =
-        match (Context.hardware_limits (Context.auto ())).Ir.Backend_intf.mma with
-        | Some m -> m.Ir.Backend_intf.mma_simd_width
-        | None -> 32
-      in
-      let stage source tile_loops =
-        Sched.Stage
-          {
-            source;
-            tile_loops;
-            shared = true;
-            cooperative = Some w;
-            hoisted = false;
-            swizzle = None;
-            pad_stride = None;
-            pipeline_depth = 1;
-            tile_prec = None;
-          }
-      in
-      let tz, _lane =
-        Sched.tensorize ~i:site.Autotune.c_row ~j:site.Autotune.c_oc ~k:site.Autotune.c_red
-          ~simd_width:w ()
-      in
-      List.map site.Autotune.c_outer ~f:(fun (s, _) -> Sched.Retype { axis = s; ty = LL.Grid })
-      @ reorder_swaps ~current:site.Autotune.c_loops ~target:(conv_target site)
-      @ [
-          stage x.Tensor.value [ site.Autotune.c_row; site.Autotune.c_red ];
-          stage kern.Tensor.value [ site.Autotune.c_red; site.Autotune.c_oc ];
-          tz;
-        ]
-    in
-    let got, census = run_fiss_sched "cvu_gpu" y ~conv_sched in
-    p_close "cvu: GPU staged conv pipeline matches the natural form within tolerance" got want8
-      ~tol:(fun _ -> 1e-3);
-    claim_tensorized "cvu: the GPU staged conv pipeline's routine is labeled tensorized"
-      (rendered_tensorized census))
-  else (
-    skipped "cvu: GPU staged conv pipeline matches the natural form within tolerance";
-    skipped "cvu: the GPU staged conv pipeline's routine is labeled tensorized");
+  let uniform_f32_leg = Verdict.leg ~when_:has_uniform_f32_mma ~on:backend_name () in
+  (let cvu =
+     lazy
+       (let x, kern, y = make_conv8 "cvu_g" in
+        let conv_sched (site : Autotune.conv_site) _seg =
+          let w =
+            match (Context.hardware_limits (Context.auto ())).Ir.Backend_intf.mma with
+            | Some m -> m.Ir.Backend_intf.mma_simd_width
+            | None -> 32
+          in
+          let stage source tile_loops =
+            Sched.Stage
+              {
+                source;
+                tile_loops;
+                shared = true;
+                cooperative = Some w;
+                hoisted = false;
+                swizzle = None;
+                pad_stride = None;
+                pipeline_depth = 1;
+                tile_prec = None;
+              }
+          in
+          let tz, _lane =
+            Sched.tensorize ~i:site.Autotune.c_row ~j:site.Autotune.c_oc ~k:site.Autotune.c_red
+              ~simd_width:w ()
+          in
+          List.map site.Autotune.c_outer ~f:(fun (s, _) -> Sched.Retype { axis = s; ty = LL.Grid })
+          @ reorder_swaps ~current:site.Autotune.c_loops ~target:(conv_target site)
+          @ [
+              stage x.Tensor.value [ site.Autotune.c_row; site.Autotune.c_red ];
+              stage kern.Tensor.value [ site.Autotune.c_red; site.Autotune.c_oc ];
+              tz;
+            ]
+        in
+        run_fiss_sched "cvu_gpu" y ~conv_sched)
+   in
+   in_leg ~leg:uniform_f32_leg
+     "cvu: GPU staged conv pipeline matches the natural form within tolerance" (fun label ->
+       let got, _ = Lazy.force cvu in
+       p_close label got want8 ~tol:(fun _ -> 1e-3));
+   in_leg ~leg:uniform_f32_leg "cvu: the GPU staged conv pipeline's routine is labeled tensorized"
+     (fun label ->
+       let _, census = Lazy.force cvu in
+       claim_tensorized label (rendered_tensorized census)));
   (* --- The whole-routine zeroed GPU site (gh-ocannl-503): unfissioned, the conv output's
      whole-node [Zero_out] shares the annotated kernel, so the pipeline expands it into a per-cell
      nest with the site's own geometry (Grid outer loops, the row-block split, the column over the
@@ -828,56 +840,62 @@ let () =
   in
   let ran = function `Ran _ -> true | `Declined -> false in
   let ran_ok f = function `Ran r -> f r | `Declined -> true in
-  if Lazy.force gpu_capable then (
-    let zeroed, seeds, results =
-      whole_routine_gpu_leg ~tag:"cvz" ~want:want8 ~build:(fun sub ->
-          let _, _, y = make_conv8 sub in
-          y)
-    in
-    p "cvz: the whole-routine conv site is zeroed in its lowering" zeroed;
-    p_all "cvz: the whole-routine zeroed site seeds GPU staged conv flavors" seeds ~f:(fun s ->
-        s.Autotune.sk_conv && s.Autotune.sk_gpu);
-    p_all
-      "cvz: every whole-routine zeroed GPU candidate compiles, and matches the natural form run \
-       twice"
-      results ~f:(function
-      | `Ran (ok, _) -> ok
-      | `Declined -> false);
-    p_all "cvz: every whole-routine zeroed GPU candidate's routine is labeled tensorized" results
-      ~f:(ran_ok snd);
-    let zeroed, seeds, results =
-      whole_routine_gpu_leg ~tag:"cvzt" ~want:want_t ~build:(fun sub ->
-          let _, _, _, y = make_tail sub in
-          y)
-    in
-    p "cvzt: the whole-routine conv+tail site is zeroed in its lowering" zeroed;
-    p_all "cvzt: the whole-routine zeroed conv+tail site seeds GPU staged conv flavors" seeds
-      ~f:(fun s -> s.Autotune.sk_conv && s.Autotune.sk_gpu);
-    p_all "cvzt: every whole-routine zeroed conv+tail GPU seed is a fused-epilogue twin" seeds
-      ~f:(fun s -> s.Autotune.sk_epilogue);
-    p_all "cvzt: every whole-routine zeroed conv+tail GPU candidate compiles" results ~f:ran;
-    p_all
-      "cvzt: every compiling whole-routine conv+tail GPU candidate matches the natural form, run \
-       twice"
-      results ~f:(ran_ok fst);
-    p_all "cvzt: every compiling whole-routine conv+tail GPU candidate is labeled tensorized"
-      results ~f:(ran_ok snd))
-  else
-    List.iter ~f:skipped
-      [
-        "cvz: the whole-routine conv site is zeroed in its lowering";
-        "cvz: the whole-routine zeroed site seeds GPU staged conv flavors";
-        "cvz: every whole-routine zeroed GPU candidate compiles, and matches the natural form run \
-         twice";
-        "cvz: every whole-routine zeroed GPU candidate's routine is labeled tensorized";
-        "cvzt: the whole-routine conv+tail site is zeroed in its lowering";
-        "cvzt: the whole-routine zeroed conv+tail site seeds GPU staged conv flavors";
-        "cvzt: every whole-routine zeroed conv+tail GPU seed is a fused-epilogue twin";
-        "cvzt: every whole-routine zeroed conv+tail GPU candidate compiles";
-        "cvzt: every compiling whole-routine conv+tail GPU candidate matches the natural form, run \
-         twice";
-        "cvzt: every compiling whole-routine conv+tail GPU candidate is labeled tensorized";
-      ];
+  (* The GPU legs below are open where the seeder judges an f32 site seedable on this backend. *)
+  let gpu_leg = Verdict.leg ~when_:(Lazy.force gpu_capable) ~on:backend_name () in
+  (let cvz =
+     lazy
+       (whole_routine_gpu_leg ~tag:"cvz" ~want:want8 ~build:(fun sub ->
+            let _, _, y = make_conv8 sub in
+            y))
+   in
+   in_leg ~leg:gpu_leg "cvz: the whole-routine conv site is zeroed in its lowering" (fun label ->
+       let zeroed, _, _ = Lazy.force cvz in
+       p label zeroed);
+   in_leg ~leg:gpu_leg "cvz: the whole-routine zeroed site seeds GPU staged conv flavors"
+     (fun label ->
+       let _, seeds, _ = Lazy.force cvz in
+       p_all label seeds ~f:(fun s -> s.Autotune.sk_conv && s.Autotune.sk_gpu));
+   in_leg ~leg:gpu_leg
+     "cvz: every whole-routine zeroed GPU candidate compiles, and matches the natural form run \
+      twice" (fun label ->
+       let _, _, results = Lazy.force cvz in
+       p_all label results ~f:(function `Ran (ok, _) -> ok | `Declined -> false));
+   in_leg ~leg:gpu_leg
+     "cvz: every whole-routine zeroed GPU candidate's routine is labeled tensorized" (fun label ->
+       let _, _, results = Lazy.force cvz in
+       p_all label results ~f:(ran_ok snd)));
+  (let cvzt =
+     lazy
+       (whole_routine_gpu_leg ~tag:"cvzt" ~want:want_t ~build:(fun sub ->
+            let _, _, _, y = make_tail sub in
+            y))
+   in
+   in_leg ~leg:gpu_leg "cvzt: the whole-routine conv+tail site is zeroed in its lowering"
+     (fun label ->
+       let zeroed, _, _ = Lazy.force cvzt in
+       p label zeroed);
+   in_leg ~leg:gpu_leg "cvzt: the whole-routine zeroed conv+tail site seeds GPU staged conv flavors"
+     (fun label ->
+       let _, seeds, _ = Lazy.force cvzt in
+       p_all label seeds ~f:(fun s -> s.Autotune.sk_conv && s.Autotune.sk_gpu));
+   in_leg ~leg:gpu_leg
+     "cvzt: every whole-routine zeroed conv+tail GPU seed is a fused-epilogue twin" (fun label ->
+       let _, seeds, _ = Lazy.force cvzt in
+       p_all label seeds ~f:(fun s -> s.Autotune.sk_epilogue));
+   in_leg ~leg:gpu_leg "cvzt: every whole-routine zeroed conv+tail GPU candidate compiles"
+     (fun label ->
+       let _, _, results = Lazy.force cvzt in
+       p_all label results ~f:ran);
+   in_leg ~leg:gpu_leg
+     "cvzt: every compiling whole-routine conv+tail GPU candidate matches the natural form, run \
+      twice" (fun label ->
+       let _, _, results = Lazy.force cvzt in
+       p_all label results ~f:(ran_ok fst));
+   in_leg ~leg:gpu_leg
+     "cvzt: every compiling whole-routine conv+tail GPU candidate is labeled tensorized"
+     (fun label ->
+       let _, _, results = Lazy.force cvzt in
+       p_all label results ~f:(ran_ok snd)));
   (* --- The per-segment fused twins on the folded-zero conv+tail segment (gh-ocannl-1453): the
      segmentation the tuner's [F_sketch] candidates use ([fold_zeros], the default GPU mapping
      probe, promoted locals) folds the conv output's per-cell zero into the conv's own segment, and
@@ -953,46 +971,43 @@ let () =
     in
     (!folded_local, !seeds, List.mapi !seeds ~f:run_seed)
   in
-  if Lazy.force gpu_capable then (
-    let folded_local, seeds, results =
-      segment_gpu_leg ~tag:"cvft" ~want:want_t ~build:(fun sub ->
-          let _, _, _, y = make_tail sub in
-          y)
-    in
-    p "cvft: the conv segment folds the conv output's per-cell zero, the output not materialized"
-      folded_local;
-    p_exists "cvft: the folded conv+tail segment seeds fused-epilogue GPU twins" seeds ~f:(fun s ->
-        s.Autotune.sk_conv && s.Autotune.sk_gpu && s.Autotune.sk_epilogue);
-    let fused = List.filter results ~f:(fun (s, _) -> s.Autotune.sk_epilogue) in
-    p_all
-      "cvft: every fused-epilogue GPU twin of the folded segment compiles, and matches the natural \
-       form run twice"
-      fused ~f:(function
-      | _, `Ran (ok, _) -> ok
-      | _, (`Declined | `Failed _) -> false);
-    p_all "cvft: every compiling candidate of the folded segment matches the natural form run twice"
-      results ~f:(function
-      | _, `Ran (ok, _) -> ok
-      | _, (`Declined | `Failed _) -> true);
-    p_none "cvft: no candidate of the folded segment fails other than at companion coverage" results
-      ~f:(function
-      | _, `Failed _ -> true
-      | _, (`Ran _ | `Declined) -> false);
-    p_all "cvft: every compiling candidate of the folded segment is labeled tensorized" results
-      ~f:(function
-      | _, `Ran (_, t) -> t
-      | _, (`Declined | `Failed _) -> true))
-  else
-    List.iter ~f:skipped
-      [
-        "cvft: the conv segment folds the conv output's per-cell zero, the output not materialized";
-        "cvft: the folded conv+tail segment seeds fused-epilogue GPU twins";
-        "cvft: every fused-epilogue GPU twin of the folded segment compiles, and matches the \
-         natural form run twice";
-        "cvft: every compiling candidate of the folded segment matches the natural form run twice";
-        "cvft: no candidate of the folded segment fails other than at companion coverage";
-        "cvft: every compiling candidate of the folded segment is labeled tensorized";
-      ];
+  (let cvft =
+     lazy
+       (segment_gpu_leg ~tag:"cvft" ~want:want_t ~build:(fun sub ->
+            let _, _, _, y = make_tail sub in
+            y))
+   in
+   in_leg ~leg:gpu_leg
+     "cvft: the conv segment folds the conv output's per-cell zero, the output not materialized"
+     (fun label ->
+       let folded_local, _, _ = Lazy.force cvft in
+       p label folded_local);
+   in_leg ~leg:gpu_leg "cvft: the folded conv+tail segment seeds fused-epilogue GPU twins"
+     (fun label ->
+       let _, seeds, _ = Lazy.force cvft in
+       p_exists label seeds ~f:(fun s ->
+           s.Autotune.sk_conv && s.Autotune.sk_gpu && s.Autotune.sk_epilogue));
+   in_leg ~leg:gpu_leg
+     "cvft: every fused-epilogue GPU twin of the folded segment compiles, and matches the natural \
+      form run twice" (fun label ->
+       let _, _, results = Lazy.force cvft in
+       let fused = List.filter results ~f:(fun (s, _) -> s.Autotune.sk_epilogue) in
+       p_all label fused ~f:(function _, `Ran (ok, _) -> ok | _, (`Declined | `Failed _) -> false));
+   in_leg ~leg:gpu_leg
+     "cvft: every compiling candidate of the folded segment matches the natural form run twice"
+     (fun label ->
+       let _, _, results = Lazy.force cvft in
+       p_all label results ~f:(function
+         | _, `Ran (ok, _) -> ok
+         | _, (`Declined | `Failed _) -> true));
+   in_leg ~leg:gpu_leg
+     "cvft: no candidate of the folded segment fails other than at companion coverage" (fun label ->
+       let _, _, results = Lazy.force cvft in
+       p_none label results ~f:(function _, `Failed _ -> true | _, (`Ran _ | `Declined) -> false));
+   in_leg ~leg:gpu_leg "cvft: every compiling candidate of the folded segment is labeled tensorized"
+     (fun label ->
+       let _, _, results = Lazy.force cvft in
+       p_all label results ~f:(function _, `Ran (_, t) -> t | _, (`Declined | `Failed _) -> true)));
   (* --- Seeding + tuning on the conv-alone graph: the C backends seed serial + Grid per fission
      segment (and whole-routine); metal seeds the staged GPU flavor per fission segment and on the
      whole routine, whose zeroed site the pipeline expands (gh-ocannl-503). --- *)
@@ -1057,58 +1072,62 @@ let () =
     let _, _, y = make_conv8_s2 "cvu2_r" in
     run_plain "cvu2_ref" y
   in
-  if has_f32_input_mma then (
-    let x, kern, y = make_conv8_s2 "cvu2_g" in
-    let kernel_extents = ref None in
-    let conv_sched (site : Autotune.conv_site) _seg =
-      kernel_extents := Some (site.Autotune.c_nrow, site.Autotune.c_noc, site.Autotune.c_nred);
-      let w =
-        match (Context.hardware_limits (Context.auto ())).Ir.Backend_intf.mma with
-        | Some m -> m.Ir.Backend_intf.mma_simd_width
-        | None -> 32
-      in
-      let stage source tile_loops =
-        Sched.Stage
-          {
-            source;
-            tile_loops;
-            shared = true;
-            cooperative = Some w;
-            hoisted = false;
-            swizzle = None;
-            pad_stride = None;
-            pipeline_depth = 1;
-            tile_prec = None;
-          }
-      in
-      let tz, _lane =
-        Sched.tensorize ~i:site.Autotune.c_row ~j:site.Autotune.c_oc ~k:site.Autotune.c_red
-          ~simd_width:w ()
-      in
-      List.map site.Autotune.c_outer ~f:(fun (s, _) -> Sched.Retype { axis = s; ty = LL.Grid })
-      @ reorder_swaps ~current:site.Autotune.c_loops ~target:(conv_target site)
-      @ [
-          stage x.Tensor.value [ site.Autotune.c_row; site.Autotune.c_red ];
-          stage kern.Tensor.value [ site.Autotune.c_red; site.Autotune.c_oc ];
-          tz;
-        ]
-    in
-    let got, census = run_fiss_sched "cvu2_gpu" y ~conv_sched in
-    p_close "cvu2: GPU staged stride-2 conv (compacted) matches the natural form within tolerance"
-      got want8s2 ~tol:(fun _ -> 1e-3);
-    let rendered_label =
-      "cvu2: the GPU staged stride-2 conv pipeline's routine is labeled tensorized"
-    in
-    match !kernel_extents with
-    | Some (m, n, k) when not (advertised_tile_divides ~m ~n ~k) ->
-        Stdio.eprintf
-          "cvu2: the advertised f32-site tile does not divide the %dx%dx%d micro-kernel\n" m n k;
-        skipped rendered_label
-    | Some _ -> claim_tensorized rendered_label (rendered_tensorized census)
-    | None -> p rendered_label false)
-  else (
-    skipped "cvu2: GPU staged stride-2 conv (compacted) matches the natural form within tolerance";
-    skipped "cvu2: the GPU staged stride-2 conv pipeline's routine is labeled tensorized");
+  let f32_input_leg = Verdict.leg ~when_:has_f32_input_mma ~on:backend_name () in
+  (let cvu2 =
+     lazy
+       (let x, kern, y = make_conv8_s2 "cvu2_g" in
+        let kernel_extents = ref None in
+        let conv_sched (site : Autotune.conv_site) _seg =
+          kernel_extents := Some (site.Autotune.c_nrow, site.Autotune.c_noc, site.Autotune.c_nred);
+          let w =
+            match (Context.hardware_limits (Context.auto ())).Ir.Backend_intf.mma with
+            | Some m -> m.Ir.Backend_intf.mma_simd_width
+            | None -> 32
+          in
+          let stage source tile_loops =
+            Sched.Stage
+              {
+                source;
+                tile_loops;
+                shared = true;
+                cooperative = Some w;
+                hoisted = false;
+                swizzle = None;
+                pad_stride = None;
+                pipeline_depth = 1;
+                tile_prec = None;
+              }
+          in
+          let tz, _lane =
+            Sched.tensorize ~i:site.Autotune.c_row ~j:site.Autotune.c_oc ~k:site.Autotune.c_red
+              ~simd_width:w ()
+          in
+          List.map site.Autotune.c_outer ~f:(fun (s, _) -> Sched.Retype { axis = s; ty = LL.Grid })
+          @ reorder_swaps ~current:site.Autotune.c_loops ~target:(conv_target site)
+          @ [
+              stage x.Tensor.value [ site.Autotune.c_row; site.Autotune.c_red ];
+              stage kern.Tensor.value [ site.Autotune.c_red; site.Autotune.c_oc ];
+              tz;
+            ]
+        in
+        let got, census = run_fiss_sched "cvu2_gpu" y ~conv_sched in
+        (got, census, !kernel_extents))
+   in
+   in_leg ~leg:f32_input_leg
+     "cvu2: GPU staged stride-2 conv (compacted) matches the natural form within tolerance"
+     (fun label ->
+       let got, _, _ = Lazy.force cvu2 in
+       p_close label got want8s2 ~tol:(fun _ -> 1e-3));
+   in_leg ~leg:f32_input_leg
+     "cvu2: the GPU staged stride-2 conv pipeline's routine is labeled tensorized" (fun label ->
+       let _, census, kernel_extents = Lazy.force cvu2 in
+       match kernel_extents with
+       | Some (m, n, k) when not (advertised_tile_divides ~m ~n ~k) ->
+           Stdio.eprintf
+             "cvu2: the advertised f32-site tile does not divide the %dx%dx%d micro-kernel\n" m n k;
+           skipped label
+       | Some _ -> claim_tensorized label (rendered_tensorized census)
+       | None -> p label false));
 
   (* --- The same stride-2 site through the seeding wave (gh-ocannl-502): the per-segment counts
      match the unit-stride [cvu] leg — the stride only changes the packing Stage's load arithmetic,
@@ -1170,47 +1189,56 @@ let () =
     in
     (x, kern, y)
   in
-  if on_cpu then (
-    let limits = narrowed_to_16 (Context.hardware_limits (Context.auto ())) in
-    let want12 =
-      let _, _, y = make_conv_s2_r12 "cvs2b_r" in
-      run_plain "cvs2b_ref" y
-    in
-    let seeds = ref [] in
-    (* The seeding target is the unzeroed [`Normal] segment (the conv's [Zero_out] fissions into its
-       own [`Zeros] segment) — the same tuples [Autotune.tune]'s per-segment seeding consumes. A
-       preset that schedules nothing lets the segments coalesce and the preset re-run on the merged
-       whole, so the probe keys on the unzeroed site. *)
-    (let _, _, y = make_conv_s2_r12 "cvs2b_p" in
-     ignore
-       (run_fiss_sched "cvs2b_probe" y ~conv_sched:(fun site seg ->
-            if not site.Autotune.c_zeroed then
-              seeds := Autotune.sketch_seed_params ~is_gpu:false ~is_cpu:true ~limits seg;
-            [])));
-    let run_seed i p_ =
-      let tag = Printf.sprintf "cvs2b_%d" i in
-      let _, _, y = make_conv_s2_r12 tag in
-      let got, census =
-        run_fiss_sched tag y ~conv_sched:(fun site seg ->
-            if site.Autotune.c_zeroed then [] else Autotune.sketch_schedule ~accum_prec ~p:p_ seg)
-      in
-      ( (not (Array.is_empty got))
-        && Array.for_all2_exn got want12 ~f:(fun a b -> Float.(abs (a - b) < 1e-3)),
-        rendered_tensorized census )
-    in
-    p_all "cvs2b: the strided non-dividing row seeds a padded row-panel flavor" !seeds ~f:(fun s ->
-        List.exists !seeds ~f:(fun t -> t.Autotune.sk_bm = 8)
-        && List.length !seeds = 3
-        && s.Autotune.sk_conv);
-    let results = List.mapi !seeds ~f:run_seed in
-    p_all "cvs2b: every per-segment stride-2 candidate matches the natural form within tolerance"
-      results ~f:fst;
-    claim_tensorized "cvs2b: every per-segment stride-2 candidate's routine is labeled tensorized"
-      (List.for_all results ~f:snd && not (List.is_empty results)))
-  else (
-    skipped "cvs2b: the strided non-dividing row seeds a padded row-panel flavor";
-    skipped "cvs2b: every per-segment stride-2 candidate matches the natural form within tolerance";
-    skipped "cvs2b: every per-segment stride-2 candidate's routine is labeled tensorized");
+  (let cvs2b =
+     lazy
+       (let limits = narrowed_to_16 (Context.hardware_limits (Context.auto ())) in
+        let want12 =
+          let _, _, y = make_conv_s2_r12 "cvs2b_r" in
+          run_plain "cvs2b_ref" y
+        in
+        let seeds = ref [] in
+        (* The seeding target is the unzeroed [`Normal] segment (the conv's [Zero_out] fissions into
+           its own [`Zeros] segment) — the same tuples [Autotune.tune]'s per-segment seeding
+           consumes. A preset that schedules nothing lets the segments coalesce and the preset
+           re-run on the merged whole, so the probe keys on the unzeroed site. *)
+        (let _, _, y = make_conv_s2_r12 "cvs2b_p" in
+         ignore
+           (run_fiss_sched "cvs2b_probe" y ~conv_sched:(fun site seg ->
+                if not site.Autotune.c_zeroed then
+                  seeds := Autotune.sketch_seed_params ~is_gpu:false ~is_cpu:true ~limits seg;
+                [])));
+        (!seeds, want12))
+   in
+   let run_seed want12 i p_ =
+     let tag = Printf.sprintf "cvs2b_%d" i in
+     let _, _, y = make_conv_s2_r12 tag in
+     let got, census =
+       run_fiss_sched tag y ~conv_sched:(fun site seg ->
+           if site.Autotune.c_zeroed then [] else Autotune.sketch_schedule ~accum_prec ~p:p_ seg)
+     in
+     ( (not (Array.is_empty got))
+       && Array.for_all2_exn got want12 ~f:(fun a b -> Float.(abs (a - b) < 1e-3)),
+       rendered_tensorized census )
+   in
+   in_leg ~leg:cpu_leg "cvs2b: the strided non-dividing row seeds a padded row-panel flavor"
+     (fun label ->
+       let seeds, _ = Lazy.force cvs2b in
+       p_all label seeds ~f:(fun s ->
+           List.exists seeds ~f:(fun t -> t.Autotune.sk_bm = 8)
+           && List.length seeds = 3
+           && s.Autotune.sk_conv));
+   let results =
+     lazy
+       (let seeds, want12 = Lazy.force cvs2b in
+        List.mapi seeds ~f:(run_seed want12))
+   in
+   in_leg ~leg:cpu_leg
+     "cvs2b: every per-segment stride-2 candidate matches the natural form within tolerance"
+     (fun label -> p_all label (Lazy.force results) ~f:fst);
+   in_leg ~leg:cpu_leg "cvs2b: every per-segment stride-2 candidate's routine is labeled tensorized"
+     (fun label ->
+       let results = Lazy.force results in
+       claim_tensorized label (List.for_all results ~f:snd && not (List.is_empty results))));
 
   (* === Blocked tile flavors (gh-ocannl-500): the GEMM row is split into [Grid] panels before the
      reorder — cache-blocked pool panels on the C backends, extra threadgroups per row-block on GPU
@@ -1285,32 +1313,32 @@ let () =
   in
   (* Constant label across backends (the [.expected] is backend-neutral): the CPU leg uses
      non-shared packing panels, the metal leg cooperative shared tiles at the backend lane width. *)
-  let blocked_claim =
-    "cvb: blocked (row-panel) conv pipeline matches the natural form within tolerance"
-  in
-  let blocked_rendered_claim = "cvb: the blocked conv pipeline's routine is labeled tensorized" in
-  if on_cpu then (
-    let x, kern, y = make_conv16 "cvb_c" in
-    let got, census =
-      run_fiss_sched "cvb_cpu" y ~conv_sched:(blocked_sched ~shared:false ~simd_width:1 (x, kern))
-    in
-    p_close blocked_claim got want16 ~tol:(fun _ -> 1e-3);
-    claim_tensorized blocked_rendered_claim (rendered_tensorized census))
-  else if has_uniform_f32_mma then (
-    let w =
-      match (Context.hardware_limits (Context.auto ())).Ir.Backend_intf.mma with
-      | Some m -> m.Ir.Backend_intf.mma_simd_width
-      | None -> 32
-    in
-    let x, kern, y = make_conv16 "cvb_g" in
-    let got, census =
-      run_fiss_sched "cvb_gpu" y ~conv_sched:(blocked_sched ~shared:true ~simd_width:w (x, kern))
-    in
-    p_close blocked_claim got want16 ~tol:(fun _ -> 1e-3);
-    claim_tensorized blocked_rendered_claim (rendered_tensorized census))
-  else (
-    skipped blocked_claim;
-    skipped blocked_rendered_claim);
+  (let blocked_leg = Verdict.leg ~when_:(on_cpu || has_uniform_f32_mma) ~on:backend_name () in
+   let cvb =
+     lazy
+       (if on_cpu then
+          let x, kern, y = make_conv16 "cvb_c" in
+          run_fiss_sched "cvb_cpu" y
+            ~conv_sched:(blocked_sched ~shared:false ~simd_width:1 (x, kern))
+        else
+          let w =
+            match (Context.hardware_limits (Context.auto ())).Ir.Backend_intf.mma with
+            | Some m -> m.Ir.Backend_intf.mma_simd_width
+            | None -> 32
+          in
+          let x, kern, y = make_conv16 "cvb_g" in
+          run_fiss_sched "cvb_gpu" y
+            ~conv_sched:(blocked_sched ~shared:true ~simd_width:w (x, kern)))
+   in
+   in_leg ~leg:blocked_leg
+     "cvb: blocked (row-panel) conv pipeline matches the natural form within tolerance"
+     (fun label ->
+       let got, _ = Lazy.force cvb in
+       p_close label got want16 ~tol:(fun _ -> 1e-3));
+   in_leg ~leg:blocked_leg "cvb: the blocked conv pipeline's routine is labeled tensorized"
+     (fun label ->
+       let _, census = Lazy.force cvb in
+       claim_tensorized label (rendered_tensorized census)));
 
   (* --- Seeding: the fission segment now proposes the row-block flavors alongside the whole-extent
      ones — an extra CPU cache-panel seed (bm=8, two panels) and an extra GPU threadgroup-block seed
@@ -1344,37 +1372,34 @@ let () =
     ~tol:(fun _ -> 1e-3);
   (* The same site whole-routine (gh-ocannl-503, see [cvz]): the dividing 8-row block flavor and the
      pipelined twins, with the expanded zero's row loop split into the same [Grid] blocks. *)
-  if Lazy.force gpu_capable then (
-    let zeroed, seeds, results =
-      whole_routine_gpu_leg ~tag:"cvzb" ~want:want16 ~build:(fun sub ->
-          let _, _, y = make_conv16 sub in
-          y)
-    in
-    p "cvzb: the whole-routine blocked-shape conv site is zeroed in its lowering" zeroed;
-    (* An 8-row block is a flavor only where it is a whole number of the advertised tile's rows
-       (Metal's 8x8x8; CUDA's 16-row tf32 tile cannot split this 16-row site into two blocks). *)
-    let label = "cvzb: the whole-routine zeroed site seeds a GPU row-block flavor" in
-    if advertised_tile_divides ~m:8 ~n:16 ~k:8 then
-      p_exists label seeds ~f:(fun s ->
-          s.Autotune.sk_conv && s.Autotune.sk_gpu && s.Autotune.sk_bm > 0)
-    else skipped label;
-    p_all
-      "cvzb: every whole-routine zeroed GPU candidate compiles, and matches the natural form run \
-       twice"
-      results ~f:(function
-      | `Ran (ok, _) -> ok
-      | `Declined -> false);
-    p_all "cvzb: every whole-routine zeroed GPU candidate's routine is labeled tensorized" results
-      ~f:(ran_ok snd))
-  else
-    List.iter ~f:skipped
-      [
-        "cvzb: the whole-routine blocked-shape conv site is zeroed in its lowering";
-        "cvzb: the whole-routine zeroed site seeds a GPU row-block flavor";
-        "cvzb: every whole-routine zeroed GPU candidate compiles, and matches the natural form run \
-         twice";
-        "cvzb: every whole-routine zeroed GPU candidate's routine is labeled tensorized";
-      ];
+  (let cvzb =
+     lazy
+       (whole_routine_gpu_leg ~tag:"cvzb" ~want:want16 ~build:(fun sub ->
+            let _, _, y = make_conv16 sub in
+            y))
+   in
+   in_leg ~leg:gpu_leg "cvzb: the whole-routine blocked-shape conv site is zeroed in its lowering"
+     (fun label ->
+       let zeroed, _, _ = Lazy.force cvzb in
+       p label zeroed);
+   (* An 8-row block is a flavor only where it is a whole number of the advertised tile's rows
+      (Metal's 8x8x8; CUDA's 16-row tf32 tile cannot split this 16-row site into two blocks). *)
+   in_leg ~leg:gpu_leg "cvzb: the whole-routine zeroed site seeds a GPU row-block flavor"
+     (fun label ->
+       let _, seeds, _ = Lazy.force cvzb in
+       if advertised_tile_divides ~m:8 ~n:16 ~k:8 then
+         p_exists label seeds ~f:(fun s ->
+             s.Autotune.sk_conv && s.Autotune.sk_gpu && s.Autotune.sk_bm > 0)
+       else skipped label);
+   in_leg ~leg:gpu_leg
+     "cvzb: every whole-routine zeroed GPU candidate compiles, and matches the natural form run \
+      twice" (fun label ->
+       let _, _, results = Lazy.force cvzb in
+       p_all label results ~f:(function `Ran (ok, _) -> ok | `Declined -> false));
+   in_leg ~leg:gpu_leg
+     "cvzb: every whole-routine zeroed GPU candidate's routine is labeled tensorized" (fun label ->
+       let _, _, results = Lazy.force cvzb in
+       p_all label results ~f:(ran_ok snd)));
 
   (* === Blocked flavor on an aligned-merged segment (gh-ocannl-500): the realistic convnet shape,
      conv + materialized companions. The whole-segment Grid geometry comes from the aligned
@@ -1399,55 +1424,58 @@ let () =
     let _, _, y = make_merged16 "cvmb_r" in
     run_plain "cvmb_ref" y
   in
-  if on_cpu then (
-    let x, kern, y = make_merged16 "cvmb_g" in
-    let conv_sched (site : Autotune.conv_site) seg =
-      let sp_row, row_o, row_i =
-        Sched.split ~axis:site.Autotune.c_row ~factor:bm ~outer:LL.Serial ~inner:LL.Serial
-      in
-      let current =
-        List.concat_map site.Autotune.c_loops ~f:(fun s ->
-            if Ir.Indexing.equal_symbol s site.Autotune.c_row then [ row_o; row_i ] else [ s ])
-      in
-      let target =
-        List.map site.Autotune.c_outer ~f:fst
-        @ [ row_o ] @ site.Autotune.c_kernel
-        @ [ row_i; site.Autotune.c_oc; site.Autotune.c_red ]
-      in
-      let stage source tile_loops =
-        Sched.Stage
-          {
-            source;
-            tile_loops;
-            shared = false;
-            cooperative = None;
-            hoisted = false;
-            swizzle = None;
-            pad_stride = None;
-            pipeline_depth = 1;
-            tile_prec = None;
-          }
-      in
-      let tz, _lane =
-        Sched.tensorize ~i:row_i ~j:site.Autotune.c_oc ~k:site.Autotune.c_red ~simd_width:1 ()
-      in
-      Sched.default_cpu ~min_work:0 seg
-      @ (sp_row :: reorder_swaps ~current ~target)
-      @ [
-          stage x.Tensor.value [ row_i; site.Autotune.c_red ];
-          stage kern.Tensor.value [ site.Autotune.c_red; site.Autotune.c_oc ];
-          tz;
-        ]
-    in
-    let got, census = run_fiss_sched "cvmb_cpu" y ~conv_sched in
-    p_close "cvmb: merged-segment blocked conv pipeline matches the natural form within tolerance"
-      got want_mb ~tol:(fun _ -> 1e-3);
-    claim_tensorized
-      "cvmb: the merged-segment blocked conv pipeline's routine is labeled tensorized"
-      (rendered_tensorized census))
-  else (
-    skipped "cvmb: merged-segment blocked conv pipeline matches the natural form within tolerance";
-    skipped "cvmb: the merged-segment blocked conv pipeline's routine is labeled tensorized");
+  (let cvmb =
+     lazy
+       (let x, kern, y = make_merged16 "cvmb_g" in
+        let conv_sched (site : Autotune.conv_site) seg =
+          let sp_row, row_o, row_i =
+            Sched.split ~axis:site.Autotune.c_row ~factor:bm ~outer:LL.Serial ~inner:LL.Serial
+          in
+          let current =
+            List.concat_map site.Autotune.c_loops ~f:(fun s ->
+                if Ir.Indexing.equal_symbol s site.Autotune.c_row then [ row_o; row_i ] else [ s ])
+          in
+          let target =
+            List.map site.Autotune.c_outer ~f:fst
+            @ [ row_o ] @ site.Autotune.c_kernel
+            @ [ row_i; site.Autotune.c_oc; site.Autotune.c_red ]
+          in
+          let stage source tile_loops =
+            Sched.Stage
+              {
+                source;
+                tile_loops;
+                shared = false;
+                cooperative = None;
+                hoisted = false;
+                swizzle = None;
+                pad_stride = None;
+                pipeline_depth = 1;
+                tile_prec = None;
+              }
+          in
+          let tz, _lane =
+            Sched.tensorize ~i:row_i ~j:site.Autotune.c_oc ~k:site.Autotune.c_red ~simd_width:1 ()
+          in
+          Sched.default_cpu ~min_work:0 seg
+          @ (sp_row :: reorder_swaps ~current ~target)
+          @ [
+              stage x.Tensor.value [ row_i; site.Autotune.c_red ];
+              stage kern.Tensor.value [ site.Autotune.c_red; site.Autotune.c_oc ];
+              tz;
+            ]
+        in
+        run_fiss_sched "cvmb_cpu" y ~conv_sched)
+   in
+   in_leg ~leg:cpu_leg
+     "cvmb: merged-segment blocked conv pipeline matches the natural form within tolerance"
+     (fun label ->
+       let got, _ = Lazy.force cvmb in
+       p_close label got want_mb ~tol:(fun _ -> 1e-3));
+   in_leg ~leg:cpu_leg
+     "cvmb: the merged-segment blocked conv pipeline's routine is labeled tensorized" (fun label ->
+       let _, census = Lazy.force cvmb in
+       claim_tensorized label (rendered_tensorized census)));
   clean_cache "autotune_cache_conv_merged_blocked";
   let _, _, y = make_merged16 "cvmb_t" in
   let reports = ref [] in
@@ -1500,43 +1528,46 @@ let () =
     let _, _, y = make_merged "cva_r" in
     run_plain "cva_ref" y
   in
-  if on_cpu then (
-    let x, kern, y = make_merged "cva_g" in
-    let conv_sched (site : Autotune.conv_site) seg =
-      let stage source tile_loops =
-        Sched.Stage
-          {
-            source;
-            tile_loops;
-            shared = false;
-            cooperative = None;
-            hoisted = false;
-            swizzle = None;
-            pad_stride = None;
-            pipeline_depth = 1;
-            tile_prec = None;
-          }
-      in
-      let tz, _lane =
-        Sched.tensorize ~i:site.Autotune.c_row ~j:site.Autotune.c_oc ~k:site.Autotune.c_red
-          ~simd_width:1 ()
-      in
-      Sched.default_cpu ~min_work:0 seg
-      @ reorder_swaps ~current:site.Autotune.c_loops ~target:(conv_target site)
-      @ [
-          stage x.Tensor.value [ site.Autotune.c_row; site.Autotune.c_red ];
-          stage kern.Tensor.value [ site.Autotune.c_red; site.Autotune.c_oc ];
-          tz;
-        ]
-    in
-    let got, census = run_fiss_sched "cva_gemm" y ~conv_sched in
-    p_close "cva: aligned-grid conv pipeline on a merged segment matches within tolerance" got
-      want_m ~tol:(fun _ -> 1e-3);
-    claim_tensorized "cva: the aligned-grid conv pipeline's routine is labeled tensorized"
-      (rendered_tensorized census))
-  else (
-    skipped "cva: aligned-grid conv pipeline on a merged segment matches within tolerance";
-    skipped "cva: the aligned-grid conv pipeline's routine is labeled tensorized");
+  (let cva =
+     lazy
+       (let x, kern, y = make_merged "cva_g" in
+        let conv_sched (site : Autotune.conv_site) seg =
+          let stage source tile_loops =
+            Sched.Stage
+              {
+                source;
+                tile_loops;
+                shared = false;
+                cooperative = None;
+                hoisted = false;
+                swizzle = None;
+                pad_stride = None;
+                pipeline_depth = 1;
+                tile_prec = None;
+              }
+          in
+          let tz, _lane =
+            Sched.tensorize ~i:site.Autotune.c_row ~j:site.Autotune.c_oc ~k:site.Autotune.c_red
+              ~simd_width:1 ()
+          in
+          Sched.default_cpu ~min_work:0 seg
+          @ reorder_swaps ~current:site.Autotune.c_loops ~target:(conv_target site)
+          @ [
+              stage x.Tensor.value [ site.Autotune.c_row; site.Autotune.c_red ];
+              stage kern.Tensor.value [ site.Autotune.c_red; site.Autotune.c_oc ];
+              tz;
+            ]
+        in
+        run_fiss_sched "cva_gemm" y ~conv_sched)
+   in
+   in_leg ~leg:cpu_leg
+     "cva: aligned-grid conv pipeline on a merged segment matches within tolerance" (fun label ->
+       let got, _ = Lazy.force cva in
+       p_close label got want_m ~tol:(fun _ -> 1e-3));
+   in_leg ~leg:cpu_leg "cva: the aligned-grid conv pipeline's routine is labeled tensorized"
+     (fun label ->
+       let _, census = Lazy.force cva in
+       claim_tensorized label (rendered_tensorized census)));
   clean_cache "autotune_cache_conv_aligned";
   let _, _, y = make_merged "cva_t" in
   let reports = ref [] in
@@ -1582,75 +1613,75 @@ let () =
    geometry reorders no element's reduction. 64 out-channels give the micro-kernel eight to sixteen
    vector columns, where the register file affords alternatives at every width. === *)
 let () =
-  let tiled_label = "cvr: every register-tile twin renders its geometry from the schedule" in
-  let bitwise_label = "cvr: every register-tile twin matches its auto sibling bitwise" in
-  if not on_cpu then (
-    skipped tiled_label;
-    skipped bitwise_label)
-  else
-    let make tag =
-      let x =
-        NTDSL.init ~l:(tag ^ "x") ~prec:Ir.Ops.single ~b:[ 2 ] ~o:[ 18; 18; 8 ]
-          ~f:(Ll_test.weighted ~weights:[| 1; 1; 2; 3 |] ~modulus:7 ~offset:0. ~stride:1.)
-          ()
-      in
-      let kern =
-        NTDSL.init ~l:(tag ^ "k") ~prec:Ir.Ops.single ~i:[ 3; 3; 8 ] ~o:[ 64 ]
-          ~f:(Ll_test.weighted ~weights:[| 2; 1; 1; 3 |] ~modulus:5 ~offset:(-2.) ~stride:1.)
-          ()
-      in
-      let%op y =
-        x +* "...| oh<+kh, ow<+kw, ..ic..; |kh, kw, ..ic.. -> ..oc.. => ...| oh, ow, ..oc.." kern
-      in
-      y
+  let make tag =
+    let x =
+      NTDSL.init ~l:(tag ^ "x") ~prec:Ir.Ops.single ~b:[ 2 ] ~o:[ 18; 18; 8 ]
+        ~f:(Ll_test.weighted ~weights:[| 1; 1; 2; 3 |] ~modulus:7 ~offset:0. ~stride:1.)
+        ()
     in
-    let limits = Context.hardware_limits (Context.auto ()) in
-    let seeds = ref [] in
-    ignore
-      (Context.compile
-         ~lowered_transform:(fun o ->
-           seeds := Autotune.sketch_seed_params ~is_gpu:false ~is_cpu:true ~limits o;
-           [ o ])
-         (Context.auto ())
-         (named "cvr_probe" (Train.forward (make "cvr_p")))
-         Ir.Indexing.Empty);
-    let run name p_ =
-      let y = make name in
-      let ctx, routine =
-        Context.compile
-          ~lowered_transform:(fun o ->
-            [ Sched.apply (Autotune.sketch_schedule ~accum_prec ~p:p_ o) o ])
-          (Context.auto ())
-          (named name (Train.forward y))
-          Ir.Indexing.Empty
-      in
-      let ctx = Context.run ctx routine in
-      Context.get_values ctx y.Tensor.value
+    let kern =
+      NTDSL.init ~l:(tag ^ "k") ~prec:Ir.Ops.single ~i:[ 3; 3; 8 ] ~o:[ 64 ]
+        ~f:(Ll_test.weighted ~weights:[| 2; 1; 1; 3 |] ~modulus:5 ~offset:(-2.) ~stride:1.)
+        ()
     in
-    let tiled = List.filter !seeds ~f:(fun s -> Option.is_some s.Autotune.sk_tile) in
-    Stdio.eprintf "cvr: %d CPU conv seeds, %d register-tile twins (not part of the golden)\n"
-      (List.length !seeds) (List.length tiled);
-    if List.is_empty tiled then (
-      (* A vector file affording no alternative at this micro-kernel proposes no twin. *)
-      skipped tiled_label;
-      skipped bitwise_label)
-    else
-      let results =
-        List.mapi tiled ~f:(fun i s ->
-            let t = Option.value_exn s.Autotune.sk_tile in
-            let name = Printf.sprintf "cvr_t%d" i in
-            let got = run name s in
-            let src = Generated.read name in
-            let header =
-              Printf.sprintf "Tile_mma register tiling: %dx%d C-tile of %d-lane"
-                t.Ir.Register_tile.rm t.Ir.Register_tile.rn t.Ir.Register_tile.lanes
-            in
-            let rendered =
-              String.is_substring src ~substring:header
-              && String.is_substring src ~substring:"geometry from the schedule"
-            in
-            let auto = run (Printf.sprintf "cvr_a%d" i) { s with Autotune.sk_tile = None } in
-            (rendered, Array.equal Float.equal (nonzero name got) auto))
-      in
-      p_all tiled_label results ~f:fst;
-      p_all bitwise_label results ~f:snd
+    let%op y =
+      x +* "...| oh<+kh, ow<+kw, ..ic..; |kh, kw, ..ic.. -> ..oc.. => ...| oh, ow, ..oc.." kern
+    in
+    y
+  in
+  let tiled =
+    lazy
+      (let limits = Context.hardware_limits (Context.auto ()) in
+       let seeds = ref [] in
+       ignore
+         (Context.compile
+            ~lowered_transform:(fun o ->
+              seeds := Autotune.sketch_seed_params ~is_gpu:false ~is_cpu:true ~limits o;
+              [ o ])
+            (Context.auto ())
+            (named "cvr_probe" (Train.forward (make "cvr_p")))
+            Ir.Indexing.Empty);
+       let tiled = List.filter !seeds ~f:(fun s -> Option.is_some s.Autotune.sk_tile) in
+       Stdio.eprintf "cvr: %d CPU conv seeds, %d register-tile twins (not part of the golden)\n"
+         (List.length !seeds) (List.length tiled);
+       tiled)
+  in
+  (* A vector file affording no alternative at this micro-kernel proposes no twin. *)
+  let leg =
+    Verdict.sub_leg cpu_leg ~when_:(lazy (not (List.is_empty (Lazy.force tiled)))) ~on:backend_name
+  in
+  let run name p_ =
+    let y = make name in
+    let ctx, routine =
+      Context.compile
+        ~lowered_transform:(fun o ->
+          [ Sched.apply (Autotune.sketch_schedule ~accum_prec ~p:p_ o) o ])
+        (Context.auto ())
+        (named name (Train.forward y))
+        Ir.Indexing.Empty
+    in
+    let ctx = Context.run ctx routine in
+    Context.get_values ctx y.Tensor.value
+  in
+  let results =
+    lazy
+      (List.mapi (Lazy.force tiled) ~f:(fun i s ->
+           let t = Option.value_exn s.Autotune.sk_tile in
+           let name = Printf.sprintf "cvr_t%d" i in
+           let got = run name s in
+           let src = Generated.read name in
+           let header =
+             Printf.sprintf "Tile_mma register tiling: %dx%d C-tile of %d-lane"
+               t.Ir.Register_tile.rm t.Ir.Register_tile.rn t.Ir.Register_tile.lanes
+           in
+           let rendered =
+             String.is_substring src ~substring:header
+             && String.is_substring src ~substring:"geometry from the schedule"
+           in
+           let auto = run (Printf.sprintf "cvr_a%d" i) { s with Autotune.sk_tile = None } in
+           (rendered, Array.equal Float.equal (nonzero name got) auto)))
+  in
+  in_leg ~leg "cvr: every register-tile twin renders its geometry from the schedule" (fun label ->
+      p_all label (Lazy.force results) ~f:fst);
+  in_leg ~leg "cvr: every register-tile twin matches its auto sibling bitwise" (fun label ->
+      p_all label (Lazy.force results) ~f:snd)

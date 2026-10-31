@@ -524,25 +524,47 @@ let structure_claim = function
       "a matmul site whose row is the minor output axis, read at stride 2 and strictly taller than \
        every output axis read at unit stride"
 
-let leg ?(declines = false) ?(row = `Batch) ~what ~tag s =
-  let o = probe ~tag s in
-  let unscheduled = run_plain (tag ^ "_ref") s in
+(* One site's claims, made in [leg] -- open everywhere unless a caller confines them to the backends
+   that can evaluate the site, skipped by name elsewhere in the order this code makes them
+   (gh-ocannl-1703). Everything the claims rest on is computed lazily, in this order, only where the
+   leg is open; the probed site is returned the same way. *)
+let seed_leg ?(declines = false) ?(row = `Batch)
+    ?(leg = Verdict.leg ~when_:true ~on:backend_name ()) ~what ~tag s =
+  let base =
+    lazy
+      (let o = probe ~tag s in
+       let unscheduled = run_plain (tag ^ "_ref") s in
+       (match s.build with
+       | `Einsum _ -> ()
+       | `Resnet_block ->
+           Stdio.eprintf "%s: max |unscheduled| %.6g over %d cells (not part of the golden)\n%!" tag
+             (Array.fold unscheduled ~init:0. ~f:(fun m a -> Float.max m (Float.abs a)))
+             (Array.length unscheduled));
+       (o, unscheduled))
+  in
+  let o = lazy (fst (Lazy.force base)) and unscheduled = lazy (snd (Lazy.force base)) in
   (match s.build with
   | `Einsum _ ->
-      let want = oracle s ~stride:s.stride in
-      p_exists
+      let want =
+        lazy
+          (ignore (Lazy.force base : probed * float array);
+           oracle s ~stride:s.stride)
+      in
+      in_leg ~leg
         (what ^ ": the producers discriminate: a unit-stride read of A changes the result")
-        (List.zip_exn (Array.to_list want) (Array.to_list (oracle s ~stride:1)))
-        ~f:(fun (a, b) -> Float.(a <> b));
-      p_close (what ^ ": the unscheduled form matches the host oracle") unscheduled want
-        ~tol:(fun _ -> 1e-3)
-  | `Resnet_block ->
-      Stdio.eprintf "%s: max |unscheduled| %.6g over %d cells (not part of the golden)\n%!" tag
-        (Array.fold unscheduled ~init:0. ~f:(fun m a -> Float.max m (Float.abs a)))
-        (Array.length unscheduled));
-  p
+        (fun label ->
+          let want = Lazy.force want in
+          p_exists label
+            (List.zip_exn (Array.to_list want) (Array.to_list (oracle s ~stride:1)))
+            ~f:(fun (a, b) -> Float.(a <> b)));
+      in_leg ~leg (what ^ ": the unscheduled form matches the host oracle") (fun label ->
+          p_close label (Lazy.force unscheduled) (Lazy.force want) ~tol:(fun _ -> 1e-3))
+  | `Resnet_block -> ());
+  in_leg ~leg
     (what ^ ": " ^ structure_claim row)
-    (match row with `Batch -> stride_on_batch_loops o | `Strided -> stride_on_row o);
+    (fun label ->
+      let o = Lazy.force o in
+      p label (match row with `Batch -> stride_on_batch_loops o | `Strided -> stride_on_row o));
   let close ~tol ~want got =
     Array.length got = Array.length want
     && Array.for_all2_exn got want ~f:(fun a b -> Float.(abs (a - b) < tol b))
@@ -554,7 +576,7 @@ let leg ?(declines = false) ?(row = `Batch) ~what ~tag s =
      them. *)
   let rounding b = 1e-3 +. (1e-5 *. Float.abs b) in
   let matches_ref ~want got = close ~tol:exact ~want got in
-  let matches got = matches_ref ~want:unscheduled got in
+  let matches got = matches_ref ~want:(Lazy.force unscheduled) got in
   (* Which run diverged from which form and by how much, so a red claim names its seed: the
      differing cells, the worst one with both values, and the form's magnitude, on stderr. *)
   let report ?(tol = exact) ~against ~want name what_ran got =
@@ -564,86 +586,109 @@ let leg ?(declines = false) ?(row = `Batch) ~what ~tag s =
          got want ~tol
         : bool)
   in
-  let seg_seeds =
-    Option.value_map o.segs ~default:[] ~f:(fun l ->
-        List.concat_map l ~f:(fun (arity_cuts, key, qs) ->
-            List.map qs ~f:(fun q -> (arity_cuts, key, q))))
-  in
   (* The tuner's own seeding must propose, whatever the pinned-width population adds on cc. *)
-  (let whole_n = List.length o.device_whole
-   and seg_n =
-     Option.value_map o.device_segs ~default:0
-       ~f:(List.sum (module Int) ~f:(fun (_, _, q) -> List.length q))
+  (let flavors () =
+     let o = Lazy.force o in
+     ( List.length o.device_whole,
+       Option.value_map o.device_segs ~default:0
+         ~f:(List.sum (module Int) ~f:(fun (_, _, q) -> List.length q)) )
    in
    if declines then
-     p_all
-       (what ^ ": the device's own limits seed at least one flavor")
-       [ whole_n + seg_n ]
-       ~f:(fun n -> n > 0)
+     in_leg ~leg (what ^ ": the device's own limits seed at least one flavor") (fun label ->
+         let whole_n, seg_n = flavors () in
+         p_all label [ whole_n + seg_n ] ~f:(fun n -> n > 0))
    else
-     p_all (what ^ ": the device's own limits seed both flavors") [ whole_n; seg_n ] ~f:(fun n ->
-         n > 0));
+     in_leg ~leg (what ^ ": the device's own limits seed both flavors") (fun label ->
+         let whole_n, seg_n = flavors () in
+         p_all label [ whole_n; seg_n ] ~f:(fun n -> n > 0)));
   (* A whole-routine seed reorders the site's reduction against the unscheduled form, which on the
      bare sites' exact integers changes nothing, and in the block may round its inexact sums by a
      few ulps (a misread operand is off by far more). *)
   let whole_tol = if declines then rounding else exact in
-  let whole_matches got = close ~tol:whole_tol ~want:unscheduled got in
-  (* Declined candidates (see {!candidate}) yield [None]; a run keeps its name and seed for the
-     census claims below. *)
-  let whole_runs =
-    List.mapi o.whole ~f:(fun i q ->
-        let name = Printf.sprintf "%s_w%d" tag i in
-        let r = run_whole_candidate name s q in
-        Option.iter r ~f:(fun (got, _) ->
-            report ~tol:whole_tol ~against:"unscheduled" ~want:unscheduled name (show q) got);
-        (name, q, r))
+  let whole_matches got = close ~tol:whole_tol ~want:(Lazy.force unscheduled) got in
+  (* Every candidate run, in this order: the whole-routine seeds, the default-preset segmentations
+     (the block only) and the per-segment seeds. *)
+  let runs =
+    lazy
+      (let o = Lazy.force o and unscheduled = Lazy.force unscheduled in
+       let seg_seeds =
+         Option.value_map o.segs ~default:[] ~f:(fun l ->
+             List.concat_map l ~f:(fun (arity_cuts, key, qs) ->
+                 List.map qs ~f:(fun q -> (arity_cuts, key, q))))
+       in
+       (* Declined candidates (see {!candidate}) yield [None]; a run keeps its name and seed for the
+          census claims below. *)
+       let whole_runs =
+         List.mapi o.whole ~f:(fun i q ->
+             let name = Printf.sprintf "%s_w%d" tag i in
+             let r = run_whole_candidate name s q in
+             Option.iter r ~f:(fun (got, _) ->
+                 report ~tol:whole_tol ~against:"unscheduled" ~want:unscheduled name (show q) got);
+             (name, q, r))
+       in
+       (* The form a per-segment seed is compared against: on the bare sites the unscheduled one,
+          whose values are exact integers; in the block, the default-preset run of the seed's own
+          segmentation (see {!run_default_fission}), since there the values are not exact. *)
+       let seg_baselines =
+         if not declines then []
+         else
+           List.dedup_and_sort ~compare:Bool.compare (List.map seg_seeds ~f:(fun (a, _, _) -> a))
+           |> List.map ~f:(fun arity_cuts ->
+               let name = Printf.sprintf "%s_f%b" tag arity_cuts in
+               let got = run_default_fission name s ~arity_cuts in
+               let what_ran = Printf.sprintf "default preset, arity cuts %b" arity_cuts in
+               Option.iter got ~f:(fun got ->
+                   if Array.length got = Array.length unscheduled then
+                     Stdio.eprintf
+                       "%s (%s): max |diff| from the unscheduled form %.3g (not part of the golden)\n\
+                        %!"
+                       name what_ran
+                       (Array.fold2_exn got unscheduled ~init:0. ~f:(fun m a b ->
+                            Float.max m (Float.abs (a -. b))));
+                   report ~tol:rounding ~against:"unscheduled" ~want:unscheduled name what_ran got);
+               (arity_cuts, got))
+       in
+       let seg_want arity_cuts =
+         if not declines then Some ("unscheduled", unscheduled)
+         else
+           Option.map
+             (Option.join (List.Assoc.find seg_baselines ~equal:Bool.equal arity_cuts))
+             ~f:(fun want -> ("default-preset segmentation", want))
+       in
+       let seg_runs =
+         List.mapi seg_seeds ~f:(fun i (arity_cuts, key, q) ->
+             let name = Printf.sprintf "%s_s%d" tag i in
+             let r = run_seg_candidate name s ~arity_cuts ~key q in
+             Option.iter r ~f:(fun (hit, (got, _)) ->
+                 if not hit then
+                   Stdio.eprintf
+                     "%s (%s): no final segment carried its key (not part of the golden)\n%!" name
+                     (show q);
+                 Option.iter (seg_want arity_cuts) ~f:(fun (against, want) ->
+                     report ~against ~want name (show q) got));
+             ( name,
+               (key, q),
+               Option.map r ~f:(fun (hit, (got, census)) -> (arity_cuts, hit, got, census)) ))
+       in
+       let seg_ok (arity_cuts, hit, got, _) =
+         hit
+         && Option.value_map (seg_want arity_cuts) ~default:false ~f:(fun (_, want) ->
+             matches_ref ~want got)
+       in
+       (whole_runs, seg_baselines, seg_runs, seg_ok))
   in
-  (* The form a per-segment seed is compared against: on the bare sites the unscheduled one, whose
-     values are exact integers; in the block, the default-preset run of the seed's own segmentation
-     (see {!run_default_fission}), since there the values are not exact. *)
-  let seg_baselines =
-    if not declines then []
-    else
-      List.dedup_and_sort ~compare:Bool.compare (List.map seg_seeds ~f:(fun (a, _, _) -> a))
-      |> List.map ~f:(fun arity_cuts ->
-          let name = Printf.sprintf "%s_f%b" tag arity_cuts in
-          let got = run_default_fission name s ~arity_cuts in
-          let what_ran = Printf.sprintf "default preset, arity cuts %b" arity_cuts in
-          Option.iter got ~f:(fun got ->
-              if Array.length got = Array.length unscheduled then
-                Stdio.eprintf
-                  "%s (%s): max |diff| from the unscheduled form %.3g (not part of the golden)\n%!"
-                  name what_ran
-                  (Array.fold2_exn got unscheduled ~init:0. ~f:(fun m a b ->
-                       Float.max m (Float.abs (a -. b))));
-              report ~tol:rounding ~against:"unscheduled" ~want:unscheduled name what_ran got);
-          (arity_cuts, got))
-  in
-  let seg_want arity_cuts =
-    if not declines then Some ("unscheduled", unscheduled)
-    else
-      Option.map
-        (Option.join (List.Assoc.find seg_baselines ~equal:Bool.equal arity_cuts))
-        ~f:(fun want -> ("default-preset segmentation", want))
-  in
-  let seg_runs =
-    List.mapi seg_seeds ~f:(fun i (arity_cuts, key, q) ->
-        let name = Printf.sprintf "%s_s%d" tag i in
-        let r = run_seg_candidate name s ~arity_cuts ~key q in
-        Option.iter r ~f:(fun (hit, (got, _)) ->
-            if not hit then
-              Stdio.eprintf "%s (%s): no final segment carried its key (not part of the golden)\n%!"
-                name (show q);
-            Option.iter (seg_want arity_cuts) ~f:(fun (against, want) ->
-                report ~against ~want name (show q) got));
-        ( name,
-          (key, q),
-          Option.map r ~f:(fun (hit, (got, census)) -> (arity_cuts, hit, got, census)) ))
-  in
-  let seg_ok (arity_cuts, hit, got, _) =
-    hit
-    && Option.value_map (seg_want arity_cuts) ~default:false ~f:(fun (_, want) ->
-        matches_ref ~want got)
+  let whole_runs () =
+    let whole_runs, _, _, _ = Lazy.force runs in
+    whole_runs
+  and seg_baselines () =
+    let _, seg_baselines, _, _ = Lazy.force runs in
+    seg_baselines
+  and seg_runs () =
+    let _, _, seg_runs, _ = Lazy.force runs in
+    seg_runs
+  and seg_ok r =
+    let _, _, _, seg_ok = Lazy.force runs in
+    seg_ok r
   in
   let values runs = List.map runs ~f:(fun (_, _, r) -> r) in
   (* A tensorized seed whose [Tile_mma] declines at codegen renders the scalar fallback, which
@@ -656,41 +701,45 @@ let leg ?(declines = false) ?(row = `Batch) ~what ~tag s =
      schedule cross to a wider machine without silently losing its tile. Gated on {!capability},
      judged under the device limits, never on the seeds proposed: where the capability holds, a
      flavor that proposes no tensorized seed fails the population floor. *)
-  let whole_census = List.map whole_runs ~f:(fun (name, q, r) -> (name, q, Option.map r ~f:snd))
-  and seg_census =
-    List.map seg_runs ~f:(fun (name, (_, q), r) ->
+  let whole_census () =
+    List.map (whole_runs ()) ~f:(fun (name, q, r) -> (name, q, Option.map r ~f:snd))
+  and seg_census () =
+    List.map (seg_runs ()) ~f:(fun (name, (_, q), r) ->
         (name, q, Option.map r ~f:(fun (_, _, _, census) -> census)))
   in
   let tensorized = List.filter ~f:(fun (_, q, _) -> q.Autotune.sk_mma) in
-  let advertised, aggregation =
-    match capability s o with `Advertised -> (true, None) | `Withheld a -> (false, Some a)
+  let judged =
+    lazy
+      (match capability s (Lazy.force o) with
+      | `Advertised -> (true, None)
+      | `Withheld a -> (false, Some a))
   in
   let census_claim ~on_decline label runs =
+    let advertised, aggregation = Lazy.force judged in
     gated_all ?aggregation ~when_:advertised ~on:backend_name label (tensorized runs)
       ~f:(fun (name, q, census) -> Option.value_map census ~default:on_decline ~f:(rendered name q))
   in
   if not declines then (
     (* The bare sites: each flavor seeds, and every seed runs — a decline fails. *)
-    p_all
-      (what ^ ": every whole-routine seed runs and matches the unscheduled form")
-      (values whole_runs)
-      ~f:(Option.value_map ~default:false ~f:(fun (got, _) -> matches got));
-    p_all
+    in_leg ~leg (what ^ ": every whole-routine seed runs and matches the unscheduled form")
+      (fun label ->
+        p_all label
+          (values (whole_runs ()))
+          ~f:(Option.value_map ~default:false ~f:(fun (got, _) -> matches got)));
+    in_leg ~leg
       (what
      ^ ": every per-segment seed runs, scheduling the segment it was keyed on, and matches the \
-        unscheduled form")
-      (values seg_runs)
-      ~f:(Option.value_map ~default:false ~f:seg_ok);
-    census_claim ~on_decline:false
+        unscheduled form") (fun label ->
+        p_all label (values (seg_runs ())) ~f:(Option.value_map ~default:false ~f:seg_ok));
+    in_leg ~leg
       (what
      ^ ": the whole-routine seeds include tensorized ones, and every one renders tensorized per \
-        its routine's mma census")
-      whole_census;
-    census_claim ~on_decline:false
+        its routine's mma census") (fun label ->
+        census_claim ~on_decline:false label (whole_census ()));
+    in_leg ~leg
       (what
      ^ ": the per-segment seeds include tensorized ones, and every one renders tensorized per its \
-        routine's mma census")
-      seg_census)
+        routine's mma census") (fun label -> census_claim ~on_decline:false label (seg_census ())))
   else (
     (* The block: which flavor seeds is backend-dependent (whole-routine on the C backends, which do
        not fission it; per-segment on GPU, which gates the zeroed whole-routine site), and inside it
@@ -699,43 +748,46 @@ let leg ?(declines = false) ?(row = `Batch) ~what ~tag s =
        recombined per-segment candidates (several keyed segments' best seeds at once, the block's
        conv segments included) are not exercised: they are the fission machinery's composition, not
        this site's seeds. *)
-    p_all
+    in_leg ~leg
       (what
      ^ ": every seed either tuner flavor proposes, applied alone, declines with a typed cause or \
         runs and matches the form it replaces one schedule of: the unscheduled form up to f32 \
         rounding for a whole-routine seed, its segmentation on the default preset for a \
-        per-segment one")
-      (List.map (values whole_runs)
-         ~f:(Option.value_map ~default:true ~f:(fun (got, _) -> whole_matches got))
-      @ List.map (values seg_runs) ~f:(Option.value_map ~default:true ~f:seg_ok))
-      ~f:Fn.id;
+        per-segment one") (fun label ->
+        p_all label
+          (List.map
+             (values (whole_runs ()))
+             ~f:(Option.value_map ~default:true ~f:(fun (got, _) -> whole_matches got))
+          @ List.map (values (seg_runs ())) ~f:(Option.value_map ~default:true ~f:seg_ok))
+          ~f:Fn.id);
     (* gh-ocannl-1147: the main branch reads [x] too, at its own index vector, and [Stage] leaves
        that read on the source. A whole-routine seed that declined here would leave the C backends,
        where the block does not fission, with no sketch for the tuner to time for the shortcut. *)
-    gated_all ~when_:on_cpu ~on:backend_name
+    in_leg ~leg
       (what
      ^ ": on the C backends, which do not fission the block, every whole-routine seed runs (its \
         operand Stage leaves the main branch's read of the input on the source) and matches the \
-        unscheduled form up to f32 rounding")
-      (values whole_runs)
-      ~f:(Option.value_map ~default:false ~f:(fun (got, _) -> whole_matches got));
-    census_claim ~on_decline:true
+        unscheduled form up to f32 rounding") (fun label ->
+        gated_all ~when_:on_cpu ~on:backend_name label
+          (values (whole_runs ()))
+          ~f:(Option.value_map ~default:false ~f:(fun (got, _) -> whole_matches got)));
+    in_leg ~leg
       (what
      ^ ": every tensorized seed either tuner flavor proposes declines with a typed cause or \
-        renders tensorized per its routine's mma census")
-      (whole_census @ seg_census);
+        renders tensorized per its routine's mma census") (fun label ->
+        census_claim ~on_decline:true label (whole_census () @ seg_census ()));
     (* The per-segment comparison above is only as good as its reference: each default-preset
        segmentation must itself compute the block, up to the f32 rounding of reordered inexact sums.
        On the C backends the block does not fission, so there is no segmentation. *)
-    let label =
-      what
-      ^ ": every segmentation a seed is keyed in, on the default preset, runs and matches the \
-         unscheduled form up to f32 rounding"
-    in
-    if on_cpu then skipped label
-    else
-      p_all label seg_baselines ~f:(fun (_, got) ->
-          Option.value_map got ~default:false ~f:(close ~tol:rounding ~want:unscheduled)));
+    in_leg ~leg
+      (what
+     ^ ": every segmentation a seed is keyed in, on the default preset, runs and matches the \
+        unscheduled form up to f32 rounding") (fun label ->
+        if on_cpu then skipped label
+        else
+          p_all label (seg_baselines ()) ~f:(fun (_, got) ->
+              Option.value_map got ~default:false
+                ~f:(close ~tol:rounding ~want:(Lazy.force unscheduled)))));
   o
 
 (* [conv_detection_boundary]'s [cdb_k11s] witness: a valid-mode 1x1 window at stride 2 over a 7x7
@@ -751,27 +803,15 @@ let padded = "... | 2*oh=+kh, 2*ow=+kw, ..ic..; |kh, kw, ..ic.. -> ..oc.. => ...
    HIP's rocWMMA, CUDA, Metal), where the operands reach the Stage + Tensorize pipelines. The C
    backends' seeding pre-filters to uniform f32/f64, so there every claim is skipped. *)
 let f16_leg ~row ~what ~tag s =
-  if not on_cpu then ignore (leg ~row ~what ~tag s : probed)
-  else
-    List.iter
-      [
-        "the producers discriminate: a unit-stride read of A changes the result";
-        "the unscheduled form matches the host oracle";
-        structure_claim row;
-        "the device's own limits seed both flavors";
-        "every whole-routine seed runs and matches the unscheduled form";
-        "every per-segment seed runs, scheduling the segment it was keyed on, and matches the \
-         unscheduled form";
-        "the whole-routine seeds include tensorized ones, and every one renders tensorized per its \
-         routine's mma census";
-        "the per-segment seeds include tensorized ones, and every one renders tensorized per its \
-         routine's mma census";
-      ]
-      ~f:(fun c -> skipped (what ^ ": " ^ c))
+  ignore
+    (seed_leg ~leg:(Verdict.leg ~when_:(not on_cpu) ~on:backend_name ()) ~row ~what ~tag s
+      : probed Lazy.t)
 
 let () =
   let f32 = Ir.Ops.single in
-  let run_leg ?declines ?row ~what ~tag s = ignore (leg ?declines ?row ~what ~tag s : probed) in
+  let run_leg ?declines ?row ~what ~tag s =
+    ignore (seed_leg ?declines ?row ~what ~tag s : probed Lazy.t)
+  in
   (* At batch 2 the strided row [ow] (4 and 16 tall here, 8 in the block below) is taller than the
      batch row, so it owns the GEMM row (gh-ocannl-1397). *)
   run_leg ~row:`Strided ~what:"k11s witness" ~tag:"s11w"
@@ -805,8 +845,18 @@ let () =
   (* A batch of one (gh-ocannl-1148): no output axis is read at unit stride, so the strided window
      owns the row, and every seed packs A through a compacting [Stage]. *)
   (let o =
-     leg ~row:`Strided ~what:"batch of one" ~tag:"s11o"
-       { prec = f32; b = 1; h = 16; w = 32; ic = 16; oc = 16; stride = 2; build = `Einsum padded }
+     Lazy.force
+       (seed_leg ~row:`Strided ~what:"batch of one" ~tag:"s11o"
+          {
+            prec = f32;
+            b = 1;
+            h = 16;
+            w = 32;
+            ic = 16;
+            oc = 16;
+            stride = 2;
+            build = `Einsum padded;
+          })
    in
    p_empty "batch of one: the input is read at no unit-stride output axis"
      ~over:(Array.to_list o.in_map)

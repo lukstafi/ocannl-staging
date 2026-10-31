@@ -508,13 +508,6 @@ let () =
     ~f:(fun v -> Float.(v > 0.));
   p_exists "the routine-local product's reference has relu-clamped cells" (Array.to_list want)
     ~f:(fun v -> Float.(v = 0.));
-  let structural =
-    [
-      "the tuner's segmentation folds the routine-local product's zero per cell into one segment";
-      "the product is not materialized in the folded segment";
-      "the routine-local product's folded segment seeds tensorized fused-epilogue twins";
-    ]
-  in
   (* The one segment opening with the product's PER-CELL zero (a whole-node [Zero_out] is the form
      the bug hid behind). *)
   let folded_per_cell segments =
@@ -536,33 +529,36 @@ let () =
      segment: this claim is false under it, and under a pipeline that drops the fold. *)
   p "the tuner's segmentation under a synthetic GPU folds the routine-local product's zero per cell"
     (Option.is_some (folded_per_cell (fission opt)));
-  let pre =
-    if not (Sched.backend_is_gpu backend_name) then (
-      List.iter structural ~f:(Verdict.skipped ~backend:backend_name);
-      opt)
-    else
-      let limits = Context.hardware_limits (Context.auto ()) in
-      let pre = folded_per_cell (snd (Ll_test.tuner_segments opt)) in
-      p (List.nth_exn structural 0) (Option.is_some pre);
-      let pre = Option.value pre ~default:opt in
-      p (List.nth_exn structural 1)
+  (* Off a GPU backend these claims are skipped by name, in the order this one sequence makes them
+     (gh-ocannl-1703). *)
+  let on_gpu = Sched.backend_is_gpu backend_name in
+  let leg = Verdict.leg ~when_:on_gpu ~on:backend_name () in
+  let folded = lazy (folded_per_cell (snd (Ll_test.tuner_segments opt))) in
+  in_leg ~leg
+    "the tuner's segmentation folds the routine-local product's zero per cell into one segment"
+    (fun label -> p label (Option.is_some (Lazy.force folded)));
+  let gpu_pre = lazy (Option.value (Lazy.force folded) ~default:opt) in
+  in_leg ~leg "the product is not materialized in the folded segment" (fun label ->
+      p label
         (not
-           (Ir.Tnode.Placements.is_materialized_peek pre.LL.optimize_ctx.LL.placements
-              prod.Tensor.value));
-      (* Gated, like [folded_seed_claims]' tensorized claim, on the tile the backend advertises for
-         the site's precisions: no f32-input tile, no tensorized seed (HIP; CUDA without tf32). *)
-      (match
-         Option.map (Autotune.detect_matmul pre.LL.llc) ~f:(fun site ->
-             Ll_test.tensorized_matmul_capability ~is_gpu:true ~is_cpu:false ~limits
-               ~a:site.Autotune.m_a ~b:site.m_b ~d:site.m_d)
-       with
-      | Some (`Withheld aggregation) ->
-          Verdict.skipped ~aggregation ~backend:backend_name (List.nth_exn structural 2)
+           (Ir.Tnode.Placements.is_materialized_peek
+              (Lazy.force gpu_pre).LL.optimize_ctx.LL.placements prod.Tensor.value)));
+  (* Gated, like [folded_seed_claims]' tensorized claim, on the tile the backend advertises for the
+     site's precisions: no f32-input tile, no tensorized seed (HIP; CUDA without tf32). *)
+  in_leg ~leg "the routine-local product's folded segment seeds tensorized fused-epilogue twins"
+    (fun label ->
+      let limits = Context.hardware_limits (Context.auto ()) in
+      let pre = Lazy.force gpu_pre in
+      match
+        Option.map (Autotune.detect_matmul pre.LL.llc) ~f:(fun site ->
+            Ll_test.tensorized_matmul_capability ~is_gpu:true ~is_cpu:false ~limits
+              ~a:site.Autotune.m_a ~b:site.m_b ~d:site.m_d)
+      with
+      | Some (`Withheld aggregation) -> Verdict.skipped ~aggregation ~backend:backend_name label
       | Some `Advertised | None ->
-          p_exists (List.nth_exn structural 2) (gpu_seeds ~limits pre) ~f:(fun q ->
+          p_exists label (gpu_seeds ~limits pre) ~f:(fun q ->
               q.Autotune.sk_mma && q.Autotune.sk_epilogue));
-      pre
-  in
+  let pre = if on_gpu then Lazy.force gpu_pre else opt in
   (* Gated in itself: on the C backends it executes no seed and reports both claims skipped. *)
   folded_seed_claims ~tag:"zl_seed_" ~what:"folded routine-local product with its tail" ~pre ~out
     ~seed ~want ~matches:(Array.equal Float.equal)
