@@ -1845,7 +1845,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules print_tree_one_recompute)
- (libraries base ocannl stdio arrayjit.verdict)
+ (libraries base ocannl stdio printbox-text arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 

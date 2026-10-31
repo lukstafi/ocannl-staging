@@ -40,6 +40,54 @@ and gives the parent no buffer for any virtual node: true
  1.00  2.00  3.00   │ 2.00 │                      │                      │      │                      │      │         │      │         │
  4.00  5.00  6.00   │      │                      │                      │      │                      │      │         │      │         │
 printing the tree compiles one recompute routine: true
+printing at depth 1 compiles one recompute routine too: true
+and names every node of the graph, past depth 1 included (the golden shows their values): true
+            #15 +_out
+             7.00     1.80e+1  3.50e+1
+             5.80e+1  8.70e+1  1.22e+2
+#13 -_v5                                     │#14 1
+ 6.00     1.70e+1  3.40e+1                   │ 1.00
+ 5.70e+1  8.60e+1  1.21e+2                   │
+├─#12 *.                                     │
+│  1.00e+1  3.00e+1  6.20e+1                 │
+│  1.06e+2  1.62e+2  2.30e+2                 │
+│ ├─#10 +_v4                                 │
+│ │  5.00     1.50e+1  3.10e+1               │
+│ │  5.30e+1  8.10e+1  1.15e+2               │
+│ │ ├─#9 -_v3                                │
+│ │ │  2.00     9.00     2.20e+1             │
+│ │ │  4.10e+1  6.60e+1  9.70e+1             │
+│ │ │ ├─#6 +_v2                              │
+│ │ │ │  4.00     1.30e+1  2.80e+1           │
+│ │ │ │  4.90e+1  7.60e+1  1.09e+2           │
+│ │ │ │ ├─#5 *.                              │
+│ │ │ │ │  3.00     1.20e+1  2.70e+1         │
+│ │ │ │ │  4.80e+1  7.50e+1  1.08e+2         │
+│ │ │ │ │ ├─#3 +_v1                          │
+│ │ │ │ │ │  3.00     6.00     9.00          │
+│ │ │ │ │ │  1.20e+1  1.50e+1  1.80e+1       │
+│ │ │ │ │ │ ├─#2 *.                          │
+│ │ │ │ │ │ │  2.00  4.00     6.00           │
+│ │ │ │ │ │ │  8.00  1.00e+1  1.20e+1        │
+│ │ │ │ │ │ │ ├─#0 1,2,3,4,5..._pt_x         │
+│ │ │ │ │ │ │ │  1.00  2.00  3.00            │
+│ │ │ │ │ │ │ │  4.00  5.00  6.00            │
+│ │ │ │ │ │ │ └─#1 2                         │
+│ │ │ │ │ │ │    2.00                        │
+│ │ │ │ │ │ └─[#0 1,2,3,4,5..._pt_x]         │
+│ │ │ │ │ └─[#0 1,2,3,4,5..._pt_x]           │
+│ │ │ │ └─#4 1                               │
+│ │ │ │    1.00                              │
+│ │ │ └─#8 *.                                │
+│ │ │    2.00  4.00     6.00                 │
+│ │ │    8.00  1.00e+1  1.20e+1              │
+│ │ │   ├─[#0 1,2,3,4,5..._pt_x]             │
+│ │ │   └─#7 2                               │
+│ │ │      2.00                              │
+│ │ └─[#3 +_v1]                              │
+│ └─#11 2                                    │
+│    2.00                                    │
+└─[#6 +_v2]                                  │
 after a write to x, the shared read sees v1 = 3 x of the new x: true
 the pipeline placed h Local and u, w virtual: true
 to_host_all refuses u with the refusal to_host gives it: true
