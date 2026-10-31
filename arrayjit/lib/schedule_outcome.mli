@@ -124,7 +124,8 @@ val artifact_missing_stage : string
     {!Environment} rejection (gh-ocannl-1717). *)
 
 val codesign_stage : string
-(** The requested host signing step rejected the compiled library. *)
+(** The requested host signing step rejected the compiled library: a {!Configuration} rejection,
+    since the step runs only when [cc_backend_verify_codesign] asks for it (gh-ocannl-1728). *)
 
 val toolchain_stage : string
 (** The stage of a {!Configuration} rejection at [Backend_compile]: the kernel failed to compile,

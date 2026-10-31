@@ -14,3 +14,11 @@ Library_missing raises severity Environment
 some case is a signing refusal: true
 some case is a missing library: true
 some case is a link defect: true
+a library that loads is loaded once, without a pause: true
+a signing refusal that clears loads on the one retry, after one pause: true
+a signing refusal that persists is refused after exactly one retry: true
+a retry refused for another reason is classified by the retry's own dlerror: true
+a link defect is not retried: true
+a missing library is not retried: true
+a real signing refusal, its library re-signed in place, loads on the retry: true
+a real signing refusal that persists is refused again on the retry: true

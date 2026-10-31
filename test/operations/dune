@@ -840,13 +840,22 @@
 ; its load) and which are OCANNL's link bug, over canned dlerror texts.
 
 (test
- ; ocannl-backend: cc -- calls the cc backend's pure dlopen-refusal classifier over canned texts;
- ; it creates no context and loads no kernel.
+ ; ocannl-backend: cc -- calls the cc backend's dlopen-refusal classifier and its signing retry
+ ; over canned texts and a scripted loader, and on arm64 macOS loads one probe library built with
+ ; the cc backend's compiler command; it creates no context and loads no kernel.
  (name cc_load_refusal_classes)
  (package neural_nets_lib)
  (deps ocannl_config)
  (modules cc_load_refusal_classes)
- (libraries base stdio arrayjit.ir arrayjit.context arrayjit.verdict))
+ (libraries
+  base
+  stdio
+  unix
+  ctypes
+  ctypes.foreign
+  arrayjit.ir
+  arrayjit.context
+  arrayjit.verdict))
 
 ; gh-ocannl-1077: a cc kernel that compiles but fails at dlopen surfaces as a typed Backend_link
 ; cause, and autotune does not absorb it. The compiler command renames `expf` to a symbol nothing

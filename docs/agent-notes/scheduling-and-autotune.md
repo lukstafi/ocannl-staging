@@ -1521,7 +1521,14 @@ files.
   `Cc_backend.classify_load_refusal` reads the signing class off the dlerror text but the missing
   class off whether the library still exists, since dyld's signing refusal lists a path with
   "no such file" and a missing dependency reads like a missing file everywhere. An undefined
-  symbol or missing dependency stays `Compiler_bug`. A search must surface all of them instead of
+  symbol or missing dependency stays `Compiler_bug`. A signing refusal is reported only after one
+  in-process retry 0.5 s later (`Cc_backend.load_retrying_signing_refusal`, gh-ocannl-1728):
+  measured on arm64 macOS, dyld keeps no verdict on a refused path, so a reload loads once the
+  cause clears (re-signed in place, or a system-policy refusal lifted on the unchanged file), and a
+  library the policy keeps refusing costs only the pause. Whether a load-induced daemon refusal
+  clears within 0.5 s is not measured: it never reproduced on demand. The opt-in
+  `cc_backend_verify_codesign` step failing is `Configuration` (a `User_error` naming the
+  setting), since nothing runs it unless the user asked. A search must surface all of them instead of
   quietly falling back. The `cc_dlopen_cause` modes provoke each path with permissive
   classification on Unix (`code_signing` strips the library's signature, which only arm64 macOS
   refuses); Windows cannot run the shell fixtures or defer undefined symbols to dlopen.

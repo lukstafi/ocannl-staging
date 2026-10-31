@@ -1307,6 +1307,41 @@ let load_refusal_severity = function
   | Load_defect -> Schedule_outcome.Compiler_bug
   | Code_signing_refusal | Library_missing -> Schedule_outcome.Environment
 
+(* gh-ocannl-1728: a code-signing refusal is retried once, after a short pause, in the same process.
+   Measured on arm64 macOS 27 first: dyld keeps no verdict on a path it refused, so once the cause
+   is gone, a reload 50 ms or 500 ms later loads. That held both for a library re-signed in place
+   and for an unchanged file whose system-policy refusal (a quarantine attribute, reading "not valid
+   for use in process: library load disallowed by system policy" as the transient refusal did) was
+   lifted. A library the policy keeps refusing (an unsigned one) is refused again, so the retry only
+   costs a persistent refusal the pause. The other classes are not retried: a missing library stays
+   missing, and a link defect is deterministic. *)
+let signing_retry_pause = 0.5
+
+type 'lib load_outcome =
+  | Loaded of 'lib
+  | Loaded_on_retry of { lib : 'lib; first_dlerror : string }
+  | Refused of { refusal : load_refusal; dlerror : string; first_dlerror : string option }
+
+let load_retrying_signing_refusal ~load ~pause ~library_present =
+  let classify dlerror = classify_load_refusal ~library_present:(library_present ()) dlerror in
+  match load () with
+  | Ok lib -> Loaded lib
+  | Error dlerror -> (
+      match classify dlerror with
+      | Code_signing_refusal -> (
+          pause ();
+          match load () with
+          | Ok lib -> Loaded_on_retry { lib; first_dlerror = dlerror }
+          | Error retry_dlerror ->
+              Refused
+                {
+                  refusal = classify retry_dlerror;
+                  dlerror = retry_dlerror;
+                  first_dlerror = Some dlerror;
+                })
+      | (Load_defect | Library_missing) as refusal ->
+          Refused { refusal; dlerror; first_dlerror = None })
+
 let%track7_sexp c_compile_and_load ~name:(base_name : string) ~run_id ~f_paths =
   (* The pool restriction (gh-ocannl-530) must be in force before the first [-fopenmp] kernel is
      dlopened, not merely before its first parallel region: libgomp computes its default team size
@@ -1523,7 +1558,9 @@ let%track7_sexp c_compile_and_load ~name:(base_name : string) ~run_id ~f_paths =
     Unix.sleepf 0.001
   done;
   (* Signing is a host/toolchain prerequisite, not a schedule constraint (gh-ocannl-1142). Expected
-     to succeed on MacOS only. *)
+     to succeed on MacOS only. The step runs only because the user asked for it, so its failure is
+     the setting's: a [Configuration] rejection, rendered as a user error naming the setting
+     (gh-ocannl-1728), not a report of a bug in OCANNL. *)
   let verify_codesign =
     Utils.get_global_flag ~default:false ~arg_name:"cc_backend_verify_codesign"
   in
@@ -1534,9 +1571,15 @@ let%track7_sexp c_compile_and_load ~name:(base_name : string) ~run_id ~f_paths =
      in
      let rc = Stdlib.Sys.command command in
      if rc <> 0 then
-       reject_link Schedule_outcome.codesign_stage
+       reject_link ~severity:Schedule_outcome.Configuration Schedule_outcome.codesign_stage
          (Printf.sprintf
-            "Cc_backend.c_compile_and_load: codesign failed with exit code %d for library %s\n\
+            "OCANNL cc backend: the code-signing step that cc_backend_verify_codesign=true \
+             requests failed (exit code %d) for library %s.\n\
+             This is a configuration problem, not a defect in OCANNL or in the generated code: the \
+             setting runs the codesign tool on each compiled library, and that tool failed. Check \
+             that codesign is available and works on this host (it ships with the macOS developer \
+             tools; other hosts have none), or turn the step off with \
+             cc_backend_verify_codesign=false (the default).\n\
              Codesign command: %s\n\
              Compilation command: %s"
             rc libname command _cmdline));
@@ -1544,39 +1587,66 @@ let%track7_sexp c_compile_and_load ~name:(base_name : string) ~run_id ~f_paths =
      (gh-ocannl-1077), and [Schedule_outcome.protect] makes it fatal rather than a candidate
      decline. The object compiled, so what the loader refuses -- typically a symbol neither the link
      line nor the process supplies -- is OCANNL's link bug, unless {!classify_load_refusal} finds
-     the host refusing the library itself (gh-ocannl-1717). *)
+     the host refusing the library itself (gh-ocannl-1717). A code-signing refusal is retried once
+     ({!load_retrying_signing_refusal}, gh-ocannl-1728). *)
+  let load () =
+    try Ok (Dl.dlopen ~filename:libname ~flags:[ RTLD_NOW ])
+    with Dl.DL_error dlerror -> Error dlerror
+  in
   let lib =
-    try Dl.dlopen ~filename:libname ~flags:[ RTLD_NOW ]
-    with Dl.DL_error dlerror ->
-      let library_present = Stdlib.Sys.file_exists libname in
-      let refusal = classify_load_refusal ~library_present dlerror in
-      let verdict =
-        match refusal with
-        | Load_defect ->
-            Printf.sprintf
-              "This is a bug in OCANNL: the kernel references a symbol, or a library, that neither \
-               its link line nor the process supplies. Please file an issue with %s"
-              source_note
-        | Code_signing_refusal ->
-            "This is an environment refusal, not a defect in the generated code: the host's \
-             code-signing policy refused the library the compiler built. Seen transiently on a \
-             loaded host, where rerunning succeeds; if it persists, check that the toolchain signs \
-             what it links (cc_backend_verify_codesign=true signs each library ad hoc)."
-        | Library_missing ->
-            "This is an environment refusal, not a defect in the generated code: the library the \
-             compiler built was gone by the time it was loaded -- something outside this process \
-             removed it, such as a temporary-directory cleaner. Rerunning usually succeeds."
-      in
-      let severity = load_refusal_severity refusal in
-      let detail =
-        Printf.sprintf
-          "OCANNL cc backend: the compiled kernel failed to load (dlopen).\n\
-           %s\n\
-           dlerror: %s\n\
-           Compilation command: %s"
-          verdict dlerror _cmdline
-      in
-      reject_link ~severity Schedule_outcome.dlopen_stage detail
+    match
+      load_retrying_signing_refusal ~load
+        ~pause:(fun () -> Unix.sleepf signing_retry_pause)
+        ~library_present:(fun () -> Stdlib.Sys.file_exists libname)
+    with
+    | Loaded lib -> lib
+    | Loaded_on_retry { lib; first_dlerror } ->
+        Stdio.eprintf
+          "OCANNL cc backend: the host's code-signing policy refused library %s, which then loaded \
+           on a retry after %g s (an environment refusal, gh-ocannl-1728).\n\
+           First dlerror: %s\n\
+           %!"
+          libname signing_retry_pause first_dlerror;
+        lib
+    | Refused { refusal; dlerror; first_dlerror } ->
+        let retry_note =
+          match first_dlerror with
+          | None -> ""
+          | Some first ->
+              Printf.sprintf
+                "The load was retried once, %g s after a code-signing refusal; the dlerror below \
+                 is the retry's.%s\n"
+                signing_retry_pause
+                (if String.equal first dlerror then "" else "\nFirst dlerror: " ^ first)
+        in
+        let verdict =
+          match refusal with
+          | Load_defect ->
+              Printf.sprintf
+                "This is a bug in OCANNL: the kernel references a symbol, or a library, that \
+                 neither its link line nor the process supplies. Please file an issue with %s"
+                source_note
+          | Code_signing_refusal ->
+              "This is an environment refusal, not a defect in the generated code: the host's \
+               code-signing policy refused the library the compiler built, on a reload too. Seen \
+               transiently on a loaded host, where rerunning succeeds; if it persists, check that \
+               the toolchain signs what it links (cc_backend_verify_codesign=true signs each \
+               library ad hoc)."
+          | Library_missing ->
+              "This is an environment refusal, not a defect in the generated code: the library the \
+               compiler built was gone by the time it was loaded -- something outside this process \
+               removed it, such as a temporary-directory cleaner. Rerunning usually succeeds."
+        in
+        let severity = load_refusal_severity refusal in
+        let detail =
+          Printf.sprintf
+            "OCANNL cc backend: the compiled kernel failed to load (dlopen).\n\
+             %s\n\
+             %sdlerror: %s\n\
+             Compilation command: %s"
+            verdict retry_note dlerror _cmdline
+        in
+        reject_link ~severity Schedule_outcome.dlopen_stage detail
   in
   (* Loaded: a debug run's private source copy has served its purpose, the informational
      [build_files/] copy being the one a reader looks at. *)
