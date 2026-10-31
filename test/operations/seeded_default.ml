@@ -104,6 +104,80 @@ let seeded_gated seed_gate =
 
 let seeded ~min_reduction = seeded_gated (Autotune.Min_reduction min_reduction)
 
+(* The structural leg (gh-ocannl-1626): per-PR CI runs cc, where the CUDA/HIP claims below are
+   skipped. What the seeded default seeds and refines is its plan, derived on the host
+   ([Autotune.seeded_plan]), so it is derived here for "cuda" whatever the host, on the lowering
+   this host captures, at the executed leg's thresholds and gates. The controls: the same derivation
+   for cc (where the seeded default leaves the default alone) derives no plan, and above every
+   reduction extent the plan seeds nothing, so the census is the seeding's, not the fixture's. *)
+let () =
+  let opt = Context.lowered_for_decisions (Context.auto ()) comp Ir.Indexing.Empty in
+  let derive ?(limits = Ir.Backend_intf.no_hardware_limits) ?min_reduction ?seed_gate backend =
+    Autotune.seeded_plan ?min_reduction ?seed_gate ~backend ~limits ~accum_prec:Fn.id
+      ~static_indices:[] opt
+  in
+  let rated =
+    {
+      Ir.Backend_intf.no_hardware_limits with
+      peak_flops = Some 2e13;
+      peak_memory_bandwidth = Some 9e11;
+    }
+  in
+  let plan ~backend ~min_reduction = Ll_test.seeded_census (derive ~min_reduction backend) in
+  let cuda = plan ~backend:"cuda" ~min_reduction:128 in
+  p "structural: the plan derived for cuda seeds a segment at the threshold of 128"
+    (Option.exists cuda ~f:(fun c -> c.Ll_test.sketched >= 1));
+  p "structural: it cuts the bias gradient's companion away to seed the weight gradient"
+    (Option.exists cuda ~f:(fun c -> c.Ll_test.refined >= 1));
+  p "structural control: the same derivation for cc derives no plan"
+    (Option.is_none (plan ~backend:"cc" ~min_reduction:128));
+  p "structural control: above every reduction extent the plan derived for cuda seeds nothing"
+    (Option.for_all
+       (plan ~backend:"cuda" ~min_reduction:(nb * ns * 2))
+       ~f:(fun c -> c.Ll_test.sketched = 0 && c.refined = 0));
+  let ranked capacity =
+    Autotune.Ranked
+      {
+        capacity;
+        cache_rate = None;
+        scalar_rate = None;
+        dram_rate = None;
+        matrix_rate = None;
+        gather_rate = None;
+        fill = None;
+        sector_rate = None;
+        wg_capacity = None;
+      }
+  in
+  let decisions plan =
+    match plan with
+    | Some { Autotune.sp_segments = Some (_, ds); _ } ->
+        List.map ds ~f:(function
+          | Autotune.Seeded_sketch { params; _ } -> Autotune.sketch_params_label params
+          | Autotune.Seeded_sunk { swaps; _ } -> Printf.sprintf "sunk %d" swaps
+          | Autotune.Seeded_preset -> "preset")
+    | _ -> []
+  in
+  let d32 = decisions (derive ~min_reduction:32 "cuda") in
+  let d_auto = decisions (derive ~limits:rated ~seed_gate:(ranked (Some 0)) "cuda") in
+  let d_cached = decisions (derive ~limits:rated ~seed_gate:(ranked (Some Int.max_value)) "cuda") in
+  let sketched ds =
+    List.count ds ~f:(fun d -> not (String.equal d "preset" || String.is_prefix d ~prefix:"sunk"))
+  in
+  Stdio.eprintf "structural: t32 [%s] auto [%s] cached [%s] (not part of the golden)\n"
+    (String.concat ~sep:"; " d32) (String.concat ~sep:"; " d_auto)
+    (String.concat ~sep:"; " d_cached);
+  (* The [auto] gate prices a sketch against the preset at the device's rated ceilings, which
+     [no_hardware_limits] leaves unset: stand-in rated limits, as cost_model_reuse states them. *)
+  p
+    "structural: on rated limits, past capacity the auto gate decides for cuda what threshold 32 \
+     decides"
+    (sketched d32 >= 1 && List.equal String.equal d_auto d32);
+  p
+    "structural: on rated limits, below capacity the auto gate seeds fewer segments than threshold \
+     32"
+    (sketched d_cached < sketched d32)
+
 let () =
   let w_default, b_default = run Context.compile in
   let (w_seeded, b_seeded), r = seeded ~min_reduction:128 in

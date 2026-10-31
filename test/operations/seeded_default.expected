@@ -1,3 +1,9 @@
+structural: the plan derived for cuda seeds a segment at the threshold of 128: true
+structural: it cuts the bias gradient's companion away to seed the weight gradient: true
+structural control: the same derivation for cc derives no plan: true
+structural control: above every reduction extent the plan derived for cuda seeds nothing: true
+structural: on rated limits, past capacity the auto gate decides for cuda what threshold 32 decides: true
+structural: on rated limits, below capacity the auto gate seeds fewer segments than threshold 32: true
 on CUDA/HIP the seeded default seeds a segment at a threshold below the weight gradient's reduction: true
 on CUDA/HIP it cuts the bias gradient's companion away from the weight gradient to seed it: true
 on CUDA/HIP the seeded routine compiles without falling back to the default: true

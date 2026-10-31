@@ -202,6 +202,27 @@ let refused_seed_search () =
         Int.incr seeded_seen;
         if !seeded_seen = 1 then Float.nan else ms))
 
+(* The structural leg (gh-ocannl-1626): per-PR CI runs cc, where the claims gated on [seeds_here]
+   and [splits_here] below are skipped. The plan the untuned compile and the search's first
+   candidate share is derived on the host ([Autotune.seeded_plan]) under the configuration's
+   settings, so it is derived here for "cuda" whatever the host, on the lowering this host captures:
+   it seeds a contraction and, where [Autotune.seeded_split_backend] says CUDA splits, splits a
+   reduction. The control: for cc no plan is derived. *)
+let () =
+  let opt = Context.lowered_for_decisions (Context.auto ()) comp Ir.Indexing.Empty in
+  let census backend =
+    Ll_test.seeded_census
+      (Autotune.seeded_plan ~backend ~limits:Ir.Backend_intf.no_hardware_limits ~accum_prec:Fn.id
+         ~static_indices opt)
+  in
+  let cuda = census "cuda" in
+  p "structural: the plan derived for cuda seeds a contraction"
+    (Option.exists cuda ~f:(fun c -> c.Ll_test.sketched >= 1));
+  p "structural: the plan derived for cuda splits a reduction exactly where CUDA splits"
+    (Option.exists cuda ~f:(fun c ->
+         Bool.equal (not (List.is_empty c.Ll_test.split)) (Autotune.seeded_split_backend "cuda")));
+  p "structural control: for cc no plan is derived" (Option.is_none (census "cc"))
+
 let () =
   let (w_untuned, b_untuned), untuned_digest, choice = untuned () in
   let claim label evaluate = Verdict.gate ~when_:seeds_here ~on:backend_name label evaluate in

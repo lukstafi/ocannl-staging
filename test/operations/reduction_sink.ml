@@ -208,6 +208,24 @@ let sunk ?reduction_sink () =
   in
   (values, Option.value_exn ~here:[%here] !report)
 
+(* The structural leg (gh-ocannl-1626): per-PR CI runs cc, where the claims gated on [sinks_here]
+   below are skipped. Which segments the untuned compile sinks is the seeded plan's decision,
+   derived on the host ([Autotune.seeded_plan]), so it is derived here for "cuda" whatever the host,
+   on the lowering this host captures, with the seeding off as below. The controls: with the sink
+   off, and for cc, nothing is sunk. *)
+let () =
+  let opt = Context.lowered_for_decisions (Context.auto ()) comp Ir.Indexing.Empty in
+  let census ?(backend = "cuda") reduction_sink =
+    Ll_test.seeded_census
+      (Autotune.seeded_plan ~min_reduction:0 ~reduction_sink ~backend
+         ~limits:Ir.Backend_intf.no_hardware_limits ~accum_prec:Fn.id ~static_indices:[] opt)
+  in
+  p "structural: for cuda the untuned plan sinks a segment with the seeding off, seeding none"
+    (Option.exists (census true) ~f:(fun c -> c.Ll_test.sunk >= 1 && c.sketched = 0));
+  p "structural control: for cuda with the sink off nothing is sunk"
+    (Option.for_all (census false) ~f:(fun c -> c.Ll_test.sunk = 0));
+  p "structural control: for cc no plan is derived" (Option.is_none (census ~backend:"cc" true))
+
 let () =
   let w_default, b_default, peel_default = run Context.compile in
   let (w_sunk, b_sunk, peel_sunk), r = sunk ~reduction_sink:true () in

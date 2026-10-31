@@ -1,3 +1,6 @@
+structural: the plan derived for cuda seeds a contraction: true
+structural: the plan derived for cuda splits a reduction exactly where CUDA splits: true
+structural control: for cc no plan is derived: true
 on CUDA/HIP the untuned plan seeds a contraction: true
 where the untuned compile splits (CUDA and HIP), the plan splits a reduction: true
 off CUDA/HIP the untuned compile is the plain default: true

@@ -1,3 +1,6 @@
+structural: for cuda the bias gradient is split at a threshold below its serial chain: true
+structural control: for cuda a threshold above every serial chain splits none of the sites: true
+structural control: for cc none of the sites is split at the same threshold: true
 on CUDA and HIP the seeded default splits the bias gradient at a threshold below its serial chain: true
 on CUDA and HIP the split routine compiles without falling back to the default: true
 off CUDA and HIP the seeded default splits nothing: true

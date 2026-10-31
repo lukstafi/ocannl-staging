@@ -4,6 +4,11 @@ a bf16 matmul output accumulated at bf16 is seeded (the control): true
 under a widening accumulator the rule refuses it: true
 under a widening accumulator the rule refuses it with the admission off too: true
 admitted, the rule seeds it at the geometry it seeds at storage-width accumulation: true
+structural: under a widening accumulator the plan derived for cuda seeds the weight gradient admitted: true
+structural: and sinks the bias gradient admitted: true
+structural: with the admission off it seeds and sinks fewer segments: true
+structural: with the key unset it decides as with the admission off: true
+structural control: under an accumulator that does not widen, the admission changes nothing: true
 the weight gradient is not trivially zero: true
 where accum_prec widens bf16, with the admission off the seeded default seeds and sinks fewer segments than with it on: true
 with the admission off the weight gradient is bitwise the default pipeline's: true

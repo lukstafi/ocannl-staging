@@ -197,6 +197,46 @@ let census (r : Autotune.seeded_choice) =
       Printf.sprintf "u%d %s" at (Autotune.sketch_params_label p))
   @ List.map r.sd_sunk ~f:(fun (at, n) -> Printf.sprintf "u%d sunk %d" at n)
 
+(* The structural leg (gh-ocannl-1626): per-PR CI runs cc, where the claims gated on [narrow_here]
+   below are skipped. Which segments the admission seeds and sinks is the seeded plan's decision,
+   derived on the host ([Autotune.seeded_plan]), so it is derived here for "cuda" whatever the host,
+   on the lowering this host captures, with [widen] standing in for CUDA's resolution of bf16 (the
+   [narrow_here] premise). The control: under an accumulator that does not widen, the admission
+   changes no decision, so the census moves with the premise, not with the flag alone. Runs before
+   part 4 states the key. *)
+let () =
+  let opt = Context.lowered_for_decisions (Context.auto ()) comp Ir.Indexing.Empty in
+  let decisions ?seed_narrow accum_prec =
+    match
+      Autotune.seeded_plan ~min_reduction:128 ?seed_narrow ~backend:"cuda"
+        ~limits:Ir.Backend_intf.no_hardware_limits ~accum_prec ~static_indices:[] opt
+    with
+    | Some { Autotune.sp_segments = Some (_, ds); _ } ->
+        List.map ds ~f:(function
+          | Autotune.Seeded_sketch { params; _ } -> "sketch " ^ Autotune.sketch_params_label params
+          | Autotune.Seeded_sunk { swaps; _ } -> Printf.sprintf "sunk %d" swaps
+          | Autotune.Seeded_preset -> "preset")
+    | _ -> []
+  in
+  let count prefix ds = List.count ds ~f:(String.is_prefix ~prefix) in
+  let off = decisions ~seed_narrow:false widen and on = decisions ~seed_narrow:true widen in
+  Stdio.eprintf "structural: off [%s] on [%s] (not part of the golden)\n%!"
+    (String.concat ~sep:"; " off) (String.concat ~sep:"; " on);
+  p
+    "structural: under a widening accumulator the plan derived for cuda seeds the weight gradient \
+     admitted"
+    (count "sketch" on >= 1);
+  p "structural: and sinks the bias gradient admitted" (count "sunk" on >= 1);
+  p "structural: with the admission off it seeds and sinks fewer segments"
+    (count "sketch" off < count "sketch" on && count "sunk" off < count "sunk" on);
+  p "structural: with the key unset it decides as with the admission off"
+    (List.equal String.equal (decisions widen) off);
+  p "structural control: under an accumulator that does not widen, the admission changes nothing"
+    ((not (List.is_empty (decisions Fn.id)))
+    && List.equal String.equal
+         (decisions ~seed_narrow:true Fn.id)
+         (decisions ~seed_narrow:false Fn.id))
+
 let () =
   Stdio.eprintf "seeded_narrow_storage: narrow_here=%b on %s (not part of the golden)\n%!"
     narrow_here backend_name;
