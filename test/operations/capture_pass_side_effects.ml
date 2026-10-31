@@ -170,7 +170,8 @@ let case_nested_under_width1 () =
 
 (* A local producer written cell by cell, [r[0] := ell[0] + 100; r[1] := ell[1] + 100] -- covered,
    so the raw analysis demands nothing of it, but its fixed-cell components cannot be served at a
-   loop-varying read ([13:call-site-index-mismatch]) -- read only in the sibling's dead arm. *)
+   loop-varying read ([13:call-site-index-mismatch]: they cover [r] only together, which the fixed
+   positions' guards do not prove, gh-ocannl-1735) -- read only in the sibling's dead arm. *)
 let case_dead_arm_placement () =
   let label = "dead sibling arm, local producer" and tag = "dp" in
   let n = 2 in

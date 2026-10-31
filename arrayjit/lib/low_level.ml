@@ -2822,9 +2822,10 @@ let instantiate_computations ~(fresh_symbol : unit -> Indexing.symbol)
     Set_local (id, Binop (lane_op, (ctr_read, scalar_precision ctr_read), (lane_sc, iprec)))
   in
   (* gh-133 Stage A: a guard's else-branch reads [Get_local id] -- the zero/init local produced by a
-     [Zero_out] computation. If the producer has no [Zero_out] (e.g. a surjective producer that was
-     previously materialized), that local is never initialized, so we must NOT emit a guard; such
-     reads fall back to materialization via [Non_virtual 13] below, preserving prior behavior. *)
+     [Zero_out] computation. Without one, the guarded update starts from an explicit [0.] init
+     ([needs_init] below), which the Stage B guards may rely on only because their maps are
+     surjective, and a fixed-index guard only where another component covers the node
+     ([covered_by_other]). *)
   let has_zero_init =
     let rec contains = function
       | Zero_out tn -> Tn.equal tn self
@@ -2842,6 +2843,28 @@ let instantiate_computations ~(fresh_symbol : unit -> Indexing.symbol)
     List.count computations ~f:(fun (def_args, _) -> Option.is_some def_args)
   in
   let global_needs_init = ref false in
+  (* gh-ocannl-1735: whether a component other than [def] writes every cell of the node,
+     unconditionally: a setter of [self] whose write view {!Affine.covers_box} over its enclosing
+     loops, none of them dead. A component holds no guard ([check_and_store_virtual] refuses an [If]
+     as [142]) and no scan ([148]), so a setter reached through loops alone executes once per
+     iteration of them. Static symbols have no range here and so cover nothing -- the conservative
+     direction. Such a component defines every cell the replay's shared local falls back on, in
+     either order: replayed before a fixed-index component it supplies the cells that component does
+     not write, replayed after it rewrites every cell, as the materialized program does. *)
+  let covered_by_other def =
+    let dims = lazy (Lazy.force self.Tn.dims) in
+    let rec covers ranges = function
+      | For_loop { from_; to_; _ } when to_ < from_ -> false
+      | For_loop { index; from_; to_; body; _ } -> covers ((index, (from_, to_)) :: ranges) body
+      | Seq (a, b) -> covers ranges a || covers ranges b
+      | Set { tn; idcs; _ } when Tn.equal tn self ->
+          let range s = List.Assoc.find ranges s ~equal:Indexing.equal_symbol in
+          Affine.covers_box ~range (Affine.view ~dims:(Lazy.force dims) idcs)
+      | _ -> false
+    in
+    List.exists computations ~f:(fun (def_args, other) ->
+        Option.is_some def_args && (not (phys_equal other def)) && covers [] other)
+  in
   (* In the order of computation. *)
   let loop_proc ((def_args : Indexing.axis_index array option), (def : t)) : t option =
     (* One substitution step: replace env-bound symbols, folding nested affine/fixed
@@ -3025,9 +3048,10 @@ let instantiate_computations ~(fresh_symbol : unit -> Indexing.symbol)
     done;
     let env = !env in
     (* Remaining non-binding positions become consistency guards: [subst(producer_pos) = call_site].
-       [Fixed_idx]/[Sub_axis] carry no symbol, so a static mismatch there is a genuine
-       sparse-producer mismatch and stays materialized via [Non_virtual 13]. Guards are materialized
-       at the [Set] node with the live (freshened) env. *)
+       [Fixed_idx]/[Sub_axis] carry no symbol: a [Fixed_idx] position read at a symbolic index is
+       guarded too, under a fallback proof ([fixed_guardable], gh-ocannl-1735); a static mismatch
+       between two fixed cells, or any [Sub_axis] position, stays materialized via [Non_virtual 13].
+       Guards are materialized at the [Set] node with the live (freshened) env. *)
     let depends_on_symbol (idx : Indexing.axis_index) =
       match idx with
       | Indexing.Iterator s -> not (Set.mem static_indices s)
@@ -3038,13 +3062,12 @@ let instantiate_computations ~(fresh_symbol : unit -> Indexing.symbol)
     in
     (* gh-ocannl-1690: a coordinate of extent 1 has one cell, so a producer position [Fixed_idx 0]
        there addresses the same cell as every in-bounds symbolic call index -- typically a read
-       through a one-iteration loop. The two forms are equal: no guard, no refusal. (Refusing is not
-       even always possible: a constant producer is committed [Virtual] ahead of any read site, so a
-       [Non_virtual] here would try to retract that commitment.) The extent is the COORDINATE's on
-       both sides ([Affine.axis_extents]), not the axis's dim: after a [Sub_axis] run a component is
-       a flattened index over the run's extent product, so [x[Sub_axis; t]] on dims [4; 1] reads
-       four cells. A [Fixed_idx] call index other than 0 would read out of bounds, and stays a
-       mismatch. *)
+       through a one-iteration loop. The two forms are equal: no guard, no refusal. The extent is
+       the COORDINATE's on both sides ([Affine.axis_extents]), not the axis's dim: after a
+       [Sub_axis] run a component is a flattened index over the run's extent product, so
+       [x[Sub_axis; t]] on dims [4; 1] reads four cells, and a [Fixed_idx 0] component there is a
+       fixed-index guard's case ([fixed_guardable]). A [Fixed_idx] call index other than 0 would
+       read out of bounds, and stays a mismatch. *)
     let unit_extent =
       lazy
         (let dims = Lazy.force self.Tn.dims in
@@ -3059,6 +3082,21 @@ let instantiate_computations ~(fresh_symbol : unit -> Indexing.symbol)
         | Indexing.Fixed_idx _ | Indexing.Sub_axis | Indexing.Concat _ -> false)
       && (Lazy.force unit_extent) i
     in
+    (* gh-ocannl-1735: a producer position [Fixed_idx k] on a wider coordinate, read at a symbolic
+       index, writes the read cell exactly when [k = index] -- the guard (index precision on the
+       condition). Where it is false the component contributes nothing and the replay's shared local
+       carries on, which is the materialized value only if that local is defined at the cell: a
+       [Zero_out] of the node ([has_zero_init]) or another component covering it
+       ([covered_by_other]). Without either proof the position refuses as before -- it is not the
+       guard's job to invent a value for a cell no write of the replay reaches. *)
+    let fallback_defined = lazy (has_zero_init || covered_by_other def) in
+    let fixed_guardable (lhs_ind : Indexing.axis_index) (rhs_ind : Indexing.axis_index) =
+      (match lhs_ind with Indexing.Fixed_idx _ -> true | _ -> false)
+      && (match rhs_ind with
+        | Indexing.Iterator _ | Indexing.Affine _ -> true
+        | Indexing.Fixed_idx _ | Indexing.Sub_axis | Indexing.Concat _ -> false)
+      && Lazy.force fallback_defined
+    in
     let guards =
       Array.foldi def_args_arr ~init:[] ~f:(fun i guards lhs_ind ->
           if bound_pos.(i) then guards
@@ -3067,7 +3105,8 @@ let instantiate_computations ~(fresh_symbol : unit -> Indexing.symbol)
             let lhs' = subst env lhs_ind in
             if Indexing.equal_axis_index lhs' rhs_ind || same_unit_cell i lhs_ind rhs_ind then
               guards
-            else if depends_on_symbol lhs_ind then (lhs_ind, rhs_ind) :: guards
+            else if depends_on_symbol lhs_ind || fixed_guardable lhs_ind rhs_ind then
+              (lhs_ind, rhs_ind) :: guards
             else raise @@ Non_virtual "13:call-site-index-mismatch")
     in
     let guards = List.rev guards in
@@ -3152,11 +3191,13 @@ let instantiate_computations ~(fresh_symbol : unit -> Indexing.symbol)
           in
           let conds = eq_conds @ range_conds in
           (* Off-condition reads fall back to [Get_local id] -- the init local emitted by the
-             producer's [Zero_out] ([has_zero_init]) or, when absent (an injective+surjective
-             scatter that skipped neutral init -- Stage B), the explicit init prepended below. The
-             no-[Zero_out] case implies the map is surjective, so every read cell IS written by
-             exactly one iteration (injectivity) and the init value is always overwritten -- 0. is a
-             safe neutral. *)
+             producer's [Zero_out] ([has_zero_init]) or, when absent, the explicit init prepended
+             below. For an affine guard the no-[Zero_out] case implies the map is surjective (an
+             injective+surjective scatter that skipped neutral init -- Stage B), so every read cell
+             IS written by exactly one iteration (injectivity) and the init value is always
+             overwritten -- 0. is a safe neutral. A fixed-index guard is admitted without a
+             [Zero_out] only when another component covers the node ([fixed_guardable]), which
+             overwrites that init at every cell. *)
           if (not (List.is_empty conds)) && not has_zero_init then needs_init := true;
           (* task-9658aac9: the then-arm [acc] structurally contains the producer read at the
              unit-solved index, so for a non-matching kept-loop iteration that index (hence the flat
@@ -9472,8 +9513,14 @@ let template_leaves (optim_ctx : optimize_ctx) (tn : Tn.t) : Set.M(Tnode).t =
 
 let decide_placements (optim_ctx : optimize_ctx) traced_store ~max_visits ~reads_covered
     ~read_multiplicity ~footprint ~(footprint_scoped : (Tn.t, Tn.provenance option) Hashtbl.t)
+    ~(tentative_constexpr : Tn.t Hash_set.t)
     ~(live_local : Tn.t -> [ `Unread | `Covered | `Uncovered ]) =
   let plc = optim_ctx.placements in
+  (* gh-ocannl-1735: whether the per-node heuristics below still have [tn] to decide -- an
+     unspecified placement that is not a scalar constexpr awaiting its deferred commitment. *)
+  let undecided tn =
+    Option.is_none (Tn.Placements.get plc tn) && not (Hash_set.mem tentative_constexpr tn)
+  in
   (* gh-ocannl-1620: a node an earlier routine of the lineage placed as routine-local scratch
      ([Local] is only ever that routine's finalization decision). It has no incoming contents, so
      every read the routine EVALUATES must be covered by the routine's own earlier writes, and the
@@ -9566,10 +9613,19 @@ let decide_placements (optim_ctx : optimize_ctx) traced_store ~max_visits ~reads
         && (traced.has_assignment || inherited_readers_clear tn)
       then Hashtbl.set footprint_scoped ~key:tn ~data:None;
       let cap_exempt = cap_exempt traced || footprint_preferred in
+      (* gh-ocannl-1735: a constant scalar is PREFERRED virtual here, not committed. It is exempt
+         from the heuristic caps below (and from the fan-in guard) exactly as a committed node would
+         be, but it stays undecided through [virtual_llc], so a store-time or consumption-time
+         refusal declines to materialization through the ordinary path instead of meeting a
+         commitment it cannot retract ("already virtual"). The coverage rule still applies: a
+         preference does not bypass legality. [specialize_proc] commits the survivors
+         [40:scalar-constexpr] once the walk has asked every site. A node already committed
+         [Virtual] (by declared intent or an earlier routine) needs no commitment. *)
       if
         virtualize_settings.inline_scalar_constexprs && traced.is_scalar_constexpr
-        && not (Tn.Placements.known_non_virtual plc tn)
-      then Tn.Placements.update plc tn Virtual (Site "40:scalar-constexpr");
+        && (not (Tn.Placements.known_non_virtual plc tn))
+        && not (Tn.Placements.known_virtual plc tn)
+      then Hash_set.add tentative_constexpr tn;
       (* Recompute-cost guard: inlining a computation replays its reduction loops (loops enclosing a
          setter without appearing in its indices) at every read site, and the cost multiplies
          through chains of virtual consumers -- reads of the consumers replay the producer's
@@ -9579,9 +9635,7 @@ let decide_placements (optim_ctx : optimize_ctx) traced_store ~max_visits ~reads
       if
         virtualize_settings.max_inline_reduction >= 0
         && traced.inline_reduction_extent > virtualize_settings.max_inline_reduction
-        && traced.read_by_other
-        && Option.is_none (Tn.Placements.get plc tn)
-        && not cap_exempt
+        && traced.read_by_other && undecided tn && not cap_exempt
       then land_on_cap traced Inline_reduction_cap;
       let skip_simple =
         virtualize_settings.inline_simple_computations && (not traced.is_complex)
@@ -9589,7 +9643,7 @@ let decide_placements (optim_ctx : optimize_ctx) traced_store ~max_visits ~reads
       in
       (* Visit cap (gh-554): the retired tracer's sampled per-cell counts, as an exact-or-upper
          cardinality bound; an uncovered read (the tracer's [Recurrent]) also trips the cap. *)
-      if (not skip_simple) && Option.is_none (Tn.Placements.get plc tn) && not cap_exempt then
+      if (not skip_simple) && undecided tn && not cap_exempt then
         (* An uncovered read is an input's, whose buffer carries entry values no scratch can serve;
            only the multiplicity half of the cap has the footprint landing spot. *)
         if not (Lazy.force covered) then Tn.Placements.update plc tn Never_virtual Visit_cap
@@ -9728,8 +9782,7 @@ let decide_placements (optim_ctx : optimize_ctx) traced_store ~max_visits ~reads
                 traced.inline_fanin <- max 1 (Set.length s);
                 if
                   Set.length s > virtualize_settings.max_inline_fanin
-                  && traced.has_assignment && traced.read_by_other
-                  && Option.is_none (Tn.Placements.get plc tn)
+                  && traced.has_assignment && traced.read_by_other && undecided tn
                   && (not (cap_exempt traced))
                   && not (Hashtbl.mem footprint_scoped tn)
                 then land_on_cap traced Inline_fanin_cap;
@@ -10478,6 +10531,9 @@ let%diagn2_sexp specialize_proc (input_ctx : optimize_ctx) (an : analysis) : opt
      offer the flip again. *)
   let footprint_scoped = Hashtbl.create (module Tnode) in
   let footprint_retracted = Hash_set.create (module Tnode) in
+  (* gh-ocannl-1735: the scalar constexprs [decide_placements] preferred virtual, committed below
+     once [virtual_llc] has asked every store and read site. *)
+  let tentative_constexpr = Hash_set.create (module Tnode) in
   (* gh-ocannl-1620: the live reads of routine-local scratch, and whether this routine covers
      them. *)
   let local_read_covered tn =
@@ -10492,7 +10548,7 @@ let%diagn2_sexp specialize_proc (input_ctx : optimize_ctx) (an : analysis) : opt
   in
   decide_placements input_ctx traced_store ~max_visits:virtualize_settings.max_visits
     ~reads_covered:an.an_reads_covered ~read_multiplicity:an.an_read_multiplicity
-    ~footprint:an.an_footprint ~footprint_scoped ~live_local;
+    ~footprint:an.an_footprint ~footprint_scoped ~tentative_constexpr ~live_local;
   [%log "optimizing"];
   (* gh-ocannl-681: taken BEFORE virtualization, so cleanup can tell the scopes this pass was handed
      from the ones it mints and only retracts its own. *)
@@ -10505,6 +10561,14 @@ let%diagn2_sexp specialize_proc (input_ctx : optimize_ctx) (an : analysis) : opt
       ~live_local input_ctx traced_store an.an_reverse_node_map static_indices ~footprint_scoped
       ~footprint_retracted llc
   in
+  (* gh-ocannl-1735: the deferred [40:scalar-constexpr] commitment. A preferred constant scalar that
+     no site refused -- a refusal committed it [Never_virtual] in the walk, and the coverage rule
+     may have placed it [On_device] -- is committed now, ahead of everything that reads the walk's
+     placements: the snapshot below, the decision-coverage check and cleanup, which drops its
+     setters. They see exactly what the commitment in [decide_placements] used to give them. *)
+  Hash_set.iter tentative_constexpr ~f:(fun tn ->
+      if Option.is_none (Tn.Placements.get input_ctx.placements tn) then
+        Tn.Placements.update input_ctx.placements tn Virtual (Site "40:scalar-constexpr"));
   (* gh-ocannl-1011: the placements as the walk left them, before cleanup commits its own reading of
      the surviving candidates — the state a read is instantiated against, in the routine and in the
      flip-candidate pricer's synthetic read alike. *)

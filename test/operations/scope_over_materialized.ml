@@ -322,9 +322,10 @@ let () =
   (* Witness 2, consumption time. The other rejection family reaches the same branch: a producer
      that writes a FIXED cell can be inlined at a read of that cell and cannot be inlined at a read
      of the same cell spelled through a (width-one) iterator -- [inline_computation] has no symbol
-     to bind and the static positions disagree, which is [Non_virtual 13]. Put the matching read
-     first and the mismatching one second, and the second read materializes a node the first has
-     already inlined into a minted scope.
+     to bind, and the equality guard a fixed position gets there (gh-ocannl-1735) needs a defined
+     fallback this lone producer cannot prove (no [Zero_out], no covering component), which is
+     [Non_virtual 13]. Put the matching read first and the mismatching one second, and the second
+     read materializes a node the first has already inlined into a minted scope.
 
      The shape needs the SAME cell read twice, so [max_visits] is pinned to 2 here: the cap is a
      policy prior decided before any legality question, not the mechanism under test. *)

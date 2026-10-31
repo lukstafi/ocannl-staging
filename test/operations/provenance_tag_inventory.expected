@@ -59,7 +59,6 @@ Site -- arrayjit/lib/low_level.ml, decide_materialized:
 Site -- arrayjit/lib/low_level.ml, decide_placements:
   35:read-only-shared
   37:read-only-input
-  40:scalar-constexpr
 Site -- arrayjit/lib/low_level.ml, footprint_prologue:
   153:footprint-scratch
 Site -- arrayjit/lib/low_level.ml, instantiate_at_synthetic_read:
@@ -71,6 +70,8 @@ Site -- arrayjit/lib/low_level.ml, loop_scalar:
   18:inlined-scope
 Site -- arrayjit/lib/low_level.ml, materialized:
   50:routine-interface
+Site -- arrayjit/lib/low_level.ml, specialize_proc:
+  40:scalar-constexpr
 Site -- arrayjit/lib/online_softmax.ml, backward_provenance:
   1002:fused-backward-row-dot
 Site -- arrayjit/lib/online_softmax.ml, provenance:
@@ -196,8 +197,8 @@ test/operations/stored_template_elision.ml -- 13 142 154 155 156
 test/operations/virtual_chain_fanin.ml -- 13 41
 test/operations/virtual_diagonal.ml -- 13 52
 test/operations/virtual_guarded_setter.ml -- 142
-test/operations/virtual_rejection_boundary.expected -- 1 4 7 9 10 13 19 51 142 147 148
-test/operations/virtual_rejection_boundary.ml -- 1 4 5 7 8 9 10 11 12 13 14 17 19 39 40 41 51 52 140 141 142 143 144 145 146 147 148 149 154 155 156
+test/operations/virtual_rejection_boundary.expected -- 1 4 7 9 10 13 19 36 51 142 147 148
+test/operations/virtual_rejection_boundary.ml -- 1 4 5 7 8 9 10 11 12 13 14 17 19 36 39 40 41 51 52 140 141 142 143 144 145 146 147 148 149 154 155 156
 test/operations/virtual_uncaptured_loop.expected -- 147
 test/operations/virtual_uncaptured_loop.ml -- 9 147
 test/support/provenance_tag_scan.ml -- 13 41

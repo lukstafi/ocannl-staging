@@ -333,7 +333,11 @@ order, which is what decides whether a code can fire. The exit codes:
 - `12:no-setter` — No setter found.
 - `13:call-site-index-mismatch` — Index mismatch at a particular inlining site (per-site fallback to
   materialization). A producer `Fixed_idx 0` on an axis of extent 1 is not a mismatch against a
-  symbolic call index: both address the axis's only cell (gh-ocannl-1690).
+  symbolic call index: both address the axis's only cell (gh-ocannl-1690). A producer `Fixed_idx k`
+  on a wider coordinate read at a symbolic index is not one either when the replay's fallback is
+  proved defined — a `Zero_out` of the node, or another component covering it — and is served by an
+  equality guard `k == index` (gh-ocannl-1735). Two different fixed cells, a `Sub_axis` position, or
+  a fixed position without that proof still mismatch.
 - `14:empty-inlined-body` — Empty computation list at inline time.
 - `19:declare-local` — `Declare_local` encountered during virtualization (see the note below: no
   longer defensive).
@@ -385,8 +389,9 @@ When a `Get` references a virtual tensor, `inline_computation` produces the inli
 2. **Ground affine occurrences**: any remaining affine occurrence is grounded via `subst`, which
    rewrites symbols through the binding environment.
 
-If an LHS index neither matches a bound iterator nor equals the call-site index, the site cannot be
-inlined and falls back with `Non_virtual 13`. A `Set_from_vec` to the virtual tensor cannot be
+If an LHS index neither matches a bound iterator nor equals the call-site index, and is not guarded
+(a symbol-carrying position, or a `Fixed_idx` one with a proved fallback, gh-ocannl-1735), the site
+cannot be inlined and falls back with `Non_virtual 13`. A `Set_from_vec` to the virtual tensor cannot be
 inlined as a scalar and raises `Non_virtual 140` (forcing the tensor `Never_virtual 140`).
 
 #### Substitution with Affine Indices
