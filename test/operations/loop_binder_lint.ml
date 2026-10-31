@@ -44,8 +44,7 @@ let accepted ?static_indices ~label llc =
   p (label ^ ": optimize accepts it")
     (Option.is_none (lint_refusal ?static_indices ~name:label llc))
 
-let static_of s : Idx.static_symbol =
-  { static_symbol = s; static_range = Some n; used_as_extent = false; used_as_slice = false }
+let static_of s : Idx.static_symbol = Idx.make_static_symbol ~static_range:n s
 
 (* Fresh nodes per leg: the analysis cache would otherwise hand an alpha-equivalent build the first
    build's symbols (#1151's trap), and a refusal leg must not depend on an earlier leg's

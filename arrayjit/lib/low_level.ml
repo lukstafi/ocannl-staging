@@ -10363,14 +10363,7 @@ let instantiate_at_synthetic_read ~(placements : Tn.Placements.t) ~static_indice
         | _ ->
             let s = pricing_symbol () in
             let static_range = Option.some_if (a < Array.length dims && dims.(a) > 0) dims.(a) in
-            reader :=
-              {
-                Indexing.static_symbol = s;
-                static_range;
-                used_as_extent = false;
-                used_as_slice = false;
-              }
-              :: !reader;
+            reader := Indexing.make_static_symbol ?static_range s :: !reader;
             Indexing.Iterator s)
   in
   let plc = Tn.Placements.copy placements in

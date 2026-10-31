@@ -351,13 +351,7 @@ let () =
   let parent = make_on_device 5 "parent" in
   let view = make_on_device 6 "view" in
   Tn.set_alias_of view ~parent
-    ~batch_idx:
-      {
-        Idx.static_symbol = Idx.get_symbol ();
-        static_range = Some 1;
-        used_as_extent = false;
-        used_as_slice = false;
-      };
+    ~batch_idx:(Idx.make_static_symbol ~static_range:1 (Idx.get_symbol ()));
   (* The refusal message of compiling [optimized], or [""] when nothing was refused. *)
   let refusal ~name optimized =
     try

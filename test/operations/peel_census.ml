@@ -83,9 +83,8 @@ type prog = {
    loop (which is what makes it a peelable guard symbol rather than an enclosing index) and cannot
    be folded away by the guard simplifier the way a constant bound can. *)
 let extent_symbol () =
-  let s, bindings = Idx.get_static_symbol ~static_range:cols Idx.Empty in
-  s.Idx.used_as_extent <- true;
-  (s, bindings)
+  let s = Idx.make_static_symbol ~static_range:cols ~used_as:`Extent (Idx.get_symbol ()) in
+  (s, Idx.Bind (s, Idx.Empty))
 
 let make shape : prog =
   let node ?(dims = [| rows; cols |]) label =

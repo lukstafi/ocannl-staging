@@ -94,9 +94,4 @@ size set, then a symbolic operand: the meeting is a shape error: true
 size set, then a symbolic operand: the reference keeps the solution it held, and only that: true
 operand-solved symbol, then a size set: the meeting is a shape error: true
 operand-solved symbol, then a size set: the reference keeps the solution it held, and only that: true
-Indexing guard: re-setting the held symbol is a no-op: true
-Indexing guard: a size, even the symbol's maximum, is refused on a symbol: true
-Indexing guard: the refused size leaves the symbol alone: true
-Indexing guard: re-setting the held size is a no-op: true
-Indexing guard: a symbol is refused on a size: true
-Indexing guard: the refused symbol leaves the size alone: true
+with the tensor frontend linked, claiming the shape writer is refused: true

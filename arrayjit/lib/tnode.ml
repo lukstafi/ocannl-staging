@@ -103,6 +103,128 @@ let rec leading_provenance = function
 type delayed_prec = Default of Ops.prec | Inferred of Ops.prec Lazy.t | Specified of Ops.prec
 [@@deriving sexp_of]
 
+(* Session hook installed by the tensor frontend (gh-ocannl-1624), like [session_gate] below: called
+   once per write that changes a node's delayed precision, so the frontend counts it as a session
+   mutation. Direct low-level use with no frontend session sees the no-op default. *)
+let prec_write_hook : (unit -> unit) ref = ref (fun () -> ())
+
+(** A node's delayed precision, sealed (gh-ocannl-1624) together with the storage precision it
+    settles into: read with [get], written only by the guarded [update_prec] / [update_infer_prec]
+    -- which {!update_prec} and {!update_infer_prec} wrap -- each write that changes the value
+    reported to {!prec_write_hook}. [storage] is the node's {!field-storage_prec}, forced from the
+    value; once it is forced, [update_prec] only validates and [update_infer_prec] refuses. The cell
+    owns that lazy, so no caller can hand the guard a different one. *)
+module Prec_cell : sig
+  type t [@@deriving sexp_of]
+
+  val make : delayed_prec -> t
+  val get : t -> delayed_prec
+  val storage : t -> Ops.prec Lazy.t
+  val update_prec : ?only_if:(Ops.prec -> bool) -> name:(unit -> string) -> t -> Ops.prec -> unit
+
+  val update_infer_prec :
+    ?only_if:(Ops.prec -> bool) -> name:(unit -> string) -> t -> Ops.prec Lazy.t -> unit
+end = struct
+  type t = { mutable value : delayed_prec; storage : Ops.prec Lazy.t }
+
+  let sexp_of_t { value; storage = _ } = sexp_of_delayed_prec value
+
+  let make value =
+    let rec cell =
+      {
+        value;
+        storage =
+          lazy
+            (match cell.value with Default prec | Specified prec | Inferred (lazy prec) -> prec);
+      }
+    in
+    cell
+
+  let get { value; storage = _ } = value
+  let storage { value = _; storage } = storage
+
+  let set cell value =
+    !prec_write_hook ();
+    cell.value <- value
+
+  let passes only_if cell =
+    match only_if with
+    | None -> true
+    | Some cond -> (
+        match cell.value with
+        | Specified old_prec -> cond old_prec
+        | Default old_prec -> cond old_prec
+        | Inferred old_prec when Lazy.is_val old_prec -> cond @@ Lazy.force old_prec
+        | _ -> true)
+
+  let update_prec ?only_if ~name cell prec =
+    let settled = cell.storage in
+    if passes only_if cell then
+      if Lazy.is_val settled then (
+        if not @@ Ops.equal_prec (Lazy.force settled) prec then
+          raise
+          @@ Utils.User_error
+               (String.concat
+                  [
+                    "Tnode.update_prec: setting precision ";
+                    Ops.prec_string prec;
+                    " for ";
+                    name ();
+                    " but the settled precision is ";
+                    Ops.prec_string (Lazy.force settled);
+                  ]))
+      else
+        match (cell.value, only_if) with
+        | Specified old_prec, _ when not @@ Ops.equal_prec old_prec prec ->
+            raise
+            @@ Utils.User_error
+                 (String.concat
+                    [
+                      "Tnode.update_prec: setting precision ";
+                      Ops.prec_string prec;
+                      " for ";
+                      name ();
+                      ", but the precision is already set to ";
+                      Ops.prec_string (Lazy.force settled);
+                    ])
+        | Specified _, _ -> () (* The precision it already holds: no write. *)
+        | Inferred old_prec, Some cond ->
+            set cell
+              (Inferred
+                 (lazy
+                   (let old = Lazy.force old_prec in
+                    if cond old then prec else old)))
+        | Default old_prec, Some cond -> if cond old_prec then set cell (Specified prec)
+        | _ -> set cell (Specified prec)
+
+  let update_infer_prec ?only_if ~name cell delayed_prec =
+    let settled = cell.storage in
+    if passes only_if cell then
+      if Lazy.is_val settled then
+        raise
+        @@ Utils.User_error
+             (String.concat
+                [
+                  "Tnode.update_infer_prec: cannot update precision for ";
+                  name ();
+                  " because it has already been forced";
+                ])
+      else
+        match (cell.value, only_if) with
+        | Specified _, _ -> () (* User-specified precision has higher priority *)
+        | Default old_prec, Some cond -> if cond old_prec then set cell (Inferred delayed_prec)
+        | Default _, None -> set cell (Inferred delayed_prec)
+        | Inferred old_prec, Some cond ->
+            set cell
+              (Inferred
+                 (lazy
+                   (let old = Lazy.force old_prec in
+                    if cond old then Ops.promote_prec old (Lazy.force delayed_prec) else old)))
+        | Inferred old_prec, None ->
+            set cell
+              (Inferred (lazy (Ops.promote_prec (Lazy.force old_prec) (Lazy.force delayed_prec))))
+end
+
 (** Per-tensor scalar value bounds: the interprocedural layer of the interval analysis
     (docs/proposals/interval-analysis-scalar-t.md), the third instance of the {!delayed_prec}
     propose/settle lifecycle. Writers {e propose} bounds (joined, like [Inferred] promotion); a
@@ -176,8 +298,10 @@ type t = {
   label : string list;
       (** Display information. It is better if the last element of the list is the most narrow or
           alphanumeric, e.g. an identifier. *)
-  mutable delayed_prec_unsafe : delayed_prec;
-      (** Participates in the computation of {!field-storage_prec}. *)
+  delayed_prec_unsafe : Prec_cell.t;
+      (** Participates in the computation of {!field-storage_prec}. Sealed (gh-ocannl-1624): read
+          with [Prec_cell.get] (or {!get_specified_prec}), written only by {!update_prec} and
+          {!update_infer_prec}, which guard it and count each write. *)
   mutable bounds : bounds_state;
       (** Scalar value bounds summary; see {!bounds_state} for the lifecycle. *)
   mutable memory_mode_intent : (memory_mode * provenance) option;
@@ -480,94 +604,15 @@ let update_memory_mode tn mode provenance =
     Some (transition_memory_mode ~debug_name:(debug_name tn) tn.memory_mode_intent mode provenance)
 
 let update_prec ?only_if tn prec =
-  let do_update =
-    match only_if with
-    | None -> true
-    | Some cond -> (
-        match tn.delayed_prec_unsafe with
-        | Specified old_prec -> cond old_prec
-        | Default old_prec -> cond old_prec
-        | Inferred old_prec when Lazy.is_val old_prec -> cond @@ Lazy.force old_prec
-        | _ -> true)
-  in
-  if do_update then
-    if Lazy.is_val tn.storage_prec then (
-      if not @@ Ops.equal_prec (Lazy.force tn.storage_prec) prec then
-        raise
-        @@ Utils.User_error
-             (String.concat
-                [
-                  "Tnode.update_prec: setting precision ";
-                  Ops.prec_string prec;
-                  " for ";
-                  debug_name tn;
-                  " but the settled precision is ";
-                  Ops.prec_string (Lazy.force tn.storage_prec);
-                ]))
-    else
-      match (tn.delayed_prec_unsafe, only_if) with
-      | Specified old_prec, _ when not @@ Ops.equal_prec old_prec prec ->
-          raise
-          @@ Utils.User_error
-               (String.concat
-                  [
-                    "Tnode.update_prec: setting precision ";
-                    Ops.prec_string prec;
-                    " for ";
-                    debug_name tn;
-                    ", but the precision is already set to ";
-                    Ops.prec_string (Lazy.force tn.storage_prec);
-                  ])
-      | Inferred old_prec, Some cond ->
-          tn.delayed_prec_unsafe <-
-            Inferred
-              (lazy
-                (let old = Lazy.force old_prec in
-                 if cond old then prec else old))
-      | Default old_prec, Some cond ->
-          tn.delayed_prec_unsafe <- (if cond old_prec then Specified prec else Default old_prec)
-      | _ -> tn.delayed_prec_unsafe <- Specified prec
+  Prec_cell.update_prec ?only_if ~name:(fun () -> debug_name tn) tn.delayed_prec_unsafe prec
 
 let update_infer_prec ?only_if tn delayed_prec =
-  let do_update =
-    match only_if with
-    | None -> true
-    | Some cond -> (
-        match tn.delayed_prec_unsafe with
-        | Specified old_prec -> cond old_prec
-        | Default old_prec -> cond old_prec
-        | Inferred old_prec when Lazy.is_val old_prec -> cond @@ Lazy.force old_prec
-        | _ -> true)
-  in
-  if do_update then
-    if Lazy.is_val tn.storage_prec then
-      raise
-      @@ Utils.User_error
-           (String.concat
-              [
-                "Tnode.update_infer_prec: cannot update precision for ";
-                debug_name tn;
-                " because it has already been forced";
-              ])
-    else
-      match (tn.delayed_prec_unsafe, only_if) with
-      | Specified _, _ -> () (* User-specified precision has higher priority *)
-      | Default old_prec, Some cond ->
-          tn.delayed_prec_unsafe <-
-            (if cond old_prec then Inferred delayed_prec else Default old_prec)
-      | Default _, None -> tn.delayed_prec_unsafe <- Inferred delayed_prec
-      | Inferred old_prec, Some cond ->
-          tn.delayed_prec_unsafe <-
-            Inferred
-              (lazy
-                (let old = Lazy.force old_prec in
-                 if cond old then Ops.promote_prec old (Lazy.force delayed_prec) else old))
-      | Inferred old_prec, None ->
-          tn.delayed_prec_unsafe <-
-            Inferred (lazy (Ops.promote_prec (Lazy.force old_prec) (Lazy.force delayed_prec)))
+  Prec_cell.update_infer_prec ?only_if
+    ~name:(fun () -> debug_name tn)
+    tn.delayed_prec_unsafe delayed_prec
 
 let get_specified_prec tn =
-  match tn.delayed_prec_unsafe with Specified prec -> Some prec | _ -> None
+  match Prec_cell.get tn.delayed_prec_unsafe with Specified prec -> Some prec | _ -> None
 
 (** {2 Value-bounds lifecycle (see {!bounds_state})} *)
 
@@ -982,9 +1027,6 @@ end)
 
 let registry = Registry.create 16
 
-let prec_of_dalayed tn =
-  match tn.delayed_prec_unsafe with Default prec | Specified prec | Inferred (lazy prec) -> prec
-
 (* docs/proposals/signed-index-precision.md: index arithmetic is signed int32 unless [large_models]
    selects int64. Int32 overflow is excluded by contract, not by widening: every index intermediate
    is bounded by some node's extent by projection construction (axis indices by their dims, conv
@@ -1023,15 +1065,16 @@ let create ?namespace delayed_prec ~id ~label ~unpadded_dims ~padding () =
        validate_padded_numel_contract ~id ~label padded;
        padded)
   in
+  let prec_cell = Prec_cell.make delayed_prec in
   let rec size_in_bytes =
     lazy
       (let n = num_elems tn in
        n * Ops.prec_in_bytes (Lazy.force tn.storage_prec))
   and tn =
     {
-      delayed_prec_unsafe = delayed_prec;
+      delayed_prec_unsafe = prec_cell;
       bounds = Bounds_unknown;
-      storage_prec = lazy (prec_of_dalayed tn);
+      storage_prec = Prec_cell.storage prec_cell;
       dims;
       padding;
       size_in_bytes;
@@ -1073,11 +1116,12 @@ let create_from_padded ?namespace ~id ~label ~ndarray ~padding () =
   validate_padded_numel_contract ~id ~label dims_val;
   let prec_val = Nd.get_prec ndarray in
   let size_in_bytes = lazy (Nd.size_in_bytes ndarray) in
-  let rec tn =
+  let prec_cell = Prec_cell.make (Specified prec_val) in
+  let tn =
     {
-      delayed_prec_unsafe = Specified prec_val;
+      delayed_prec_unsafe = prec_cell;
       bounds = Bounds_unknown;
-      storage_prec = lazy (prec_of_dalayed tn);
+      storage_prec = Prec_cell.storage prec_cell;
       dims = lazy dims_val;
       padding = lazy padding;
       size_in_bytes;
@@ -1116,6 +1160,7 @@ let create_with_reshape ~id ~label ~base_ndarray ~unpadded_dims ~padding ~from_p
        validate_padded_numel_contract ~id ~label padded;
        padded)
   in
+  let prec_cell = Prec_cell.make (Specified prec_val) in
   let rec init_buffer =
     lazy
       (let semantic_dims = Lazy.force unpadded_dims in
@@ -1160,9 +1205,9 @@ let create_with_reshape ~id ~label ~base_ndarray ~unpadded_dims ~padding ~from_p
        n * Ops.prec_in_bytes (Lazy.force tn.storage_prec))
   and tn =
     {
-      delayed_prec_unsafe = Specified prec_val;
+      delayed_prec_unsafe = prec_cell;
       bounds = Bounds_unknown;
-      storage_prec = lazy (prec_of_dalayed tn);
+      storage_prec = Prec_cell.storage prec_cell;
       dims;
       padding;
       size_in_bytes;
@@ -1190,8 +1235,9 @@ let initial_default_prec =
 let find_namespaced =
   let mock =
     {
+      (* A lookup probe, never handed out or written: its storage need not be its cell's. *)
       storage_prec = lazy initial_default_prec;
-      delayed_prec_unsafe = Specified initial_default_prec;
+      delayed_prec_unsafe = Prec_cell.make (Specified initial_default_prec);
       bounds = Bounds_unknown;
       dims = lazy [||];
       padding = lazy None;

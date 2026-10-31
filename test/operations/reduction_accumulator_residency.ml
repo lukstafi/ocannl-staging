@@ -421,10 +421,8 @@ let () =
   let out = node ~dims:[| 2 |] "res_extent_out" in
   List.iter [ src; out ] ~f:Ll_test.materialize;
   let j = Ll_test.sym () and i = Ll_test.sym () in
-  let extent, bindings =
-    (Idx.get_static_symbol ~static_range:2 Idx.Empty : Idx.static_symbol * Idx.unit_bindings)
-  in
-  extent.Idx.used_as_extent <- true;
+  let extent = Idx.make_static_symbol ~static_range:2 ~used_as:`Extent (Idx.get_symbol ()) in
+  let bindings : Idx.unit_bindings = Idx.Bind (extent, Idx.Empty) in
   let out_cell = [| Ll_test.iter j |] in
   let update =
     Ll_test.set out out_cell

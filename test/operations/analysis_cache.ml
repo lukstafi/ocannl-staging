@@ -70,14 +70,7 @@ let phase1 () =
   let _o3, h3, m3 = delta (fun () -> optimize (build_llc (mk_tns ())) ~static_indices:[]) in
   p "same structure over different tensor nodes misses" (Poly.equal (h3, m3) (`Hits 0, `Misses 1));
   (* Static symbols key by identity and by their (mutable) range facts. *)
-  let mk_static () =
-    {
-      Idx.static_symbol = sym ();
-      static_range = Some 3;
-      used_as_extent = false;
-      used_as_slice = false;
-    }
-  in
+  let mk_static () = Idx.make_static_symbol ~static_range:3 (sym ()) in
   let stns = mk_tns () in
   let sx, _, soa, _ = stns in
   let static = mk_static () in
@@ -93,7 +86,7 @@ let phase1 () =
   let static' = mk_static () in
   let _, h6, m6 = delta (fun () -> optimize (static_llc static') ~static_indices:[ static' ]) in
   p "a fresh static symbol misses" (Poly.equal (h6, m6) (`Hits 0, `Misses 1));
-  static'.Idx.static_range <- Some 2;
+  Idx.set_static_range static' (Some 2);
   let _, h7, m7 = delta (fun () -> optimize (static_llc static') ~static_indices:[ static' ]) in
   p "mutating the static's range misses" (Poly.equal (h7, m7) (`Hits 0, `Misses 1))
 

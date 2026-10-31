@@ -423,13 +423,13 @@ Construction-time writes on operands' tensor nodes, audited for this contract:
 
 | Write | Verdict |
 |---|---|
-| top-down precision links | deferred until the operation is registered; skipped on closed operands |
+| top-down precision links | deferred until the operation is registered; skipped on closed operands; every precision write that changes a node's precision counts as a session mutation |
 | `uint4x32` precision on operands (`Operation`) | refused when it would change a closed operand |
 | memory mode, context ownership, gradient observability (`Tensor.param`) | `param` over a closed tensor is refused |
 | memory mode, `host_constant` (literals), `slice_of` (`@\|`) | written on the new node only |
 | `alias_of` | written at lowering, not at construction |
 | `observable` (Train's loss) | only ever turned on; can pessimise placement, never values |
-| static-symbol roles (`used_as_extent` / `used_as_slice`) | claims are deferred to a successful closure, dropped by a rewind |
+| static-symbol roles (`used_as_extent` / `used_as_slice`) | claims are deferred to a successful closure, dropped by a rewind; only `Shape` can write the flags |
 | host-init data and registry entries of discarded nodes | unreachable garbage (memory only) |
 
 ## Projections inference

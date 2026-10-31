@@ -126,9 +126,9 @@ type delayed_var_ref = private {
 [@@deriving equal, sexp_of]
 (** Private (gh-ocannl-1573): read and matched freely, written only by [Shape] -- through guarded
     setters that refuse a reference a rewind discarded and count the write as a session mutation --
-    and built only by {!get_variable_ref}. The privacy is shallow in one place:
-    {!Ir.Indexing.set_solved_dim} and [set_solved_sym] are public, guarded by the [variable_ref]'s
-    own write-once invariant but not by the session's accounting. *)
+    and built only by {!get_variable_ref}. The [Ir.Indexing.variable_ref] it carries is solved only
+    by [Shape] too: [Ir.Indexing.set_solved_dim] and [set_solved_sym] take the process's one
+    [Ir.Indexing.shape_writer], which [Shape] claims as it initializes (gh-ocannl-1624). *)
 
 val get_variable_ref : string -> delayed_var_ref
 (** Returns a fully unset variable reference with the given label.

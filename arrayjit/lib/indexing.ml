@@ -46,6 +46,16 @@ type static_symbol = {
 }
 [@@deriving compare, equal, sexp, hash]
 
+let make_static_symbol ?static_range ?used_as static_symbol =
+  {
+    static_symbol;
+    static_range;
+    used_as_extent = Option.exists used_as ~f:(Poly.equal `Extent);
+    used_as_slice = Option.exists used_as ~f:(Poly.equal `Slice);
+  }
+
+let set_static_range s static_range = s.static_range <- static_range
+
 type 'a bindings = Empty | Bind of static_symbol * (int -> 'a) bindings [@@deriving sexp_of]
 
 let bound_symbols bs =
@@ -122,9 +132,7 @@ let unassigned_message syms =
             Printf.sprintf "%s (%s)" (symbol_ident s.static_symbol) (launch_param_kind s))))
 
 let get_static_symbol ?static_range bindings =
-  let s =
-    { static_symbol = get_symbol (); static_range; used_as_extent = false; used_as_slice = false }
-  in
+  let s = make_static_symbol ?static_range (get_symbol ()) in
   (s, Bind (s, bindings))
 
 (** Validates a launch-parameter value against its declared range (minimum 0 is implicit) and, when
@@ -539,7 +547,23 @@ let refuse_solution r ~held ~wanted =
          "Indexing: the variable reference %{r.ref_label} is already solved to %{held}; it cannot \
           be solved to %{wanted}"]
 
-let set_solved_dim r d =
+(* The process's one shape writer (gh-ocannl-1624): the value carries nothing, its type is the
+   capability, and [writer_claimed] makes it unique. *)
+type shape_writer = Shape_writer
+
+let writer_claimed = ref false
+
+let claim_shape_writer () =
+  if !writer_claimed then
+    raise
+    @@ Utils.User_error
+         "Indexing.claim_shape_writer: the shape writer is already claimed -- in a program linking \
+          the tensor frontend, by Shape as it initialized; only shape inference solves capture \
+          references and commits static-symbol roles";
+  writer_claimed := true;
+  Shape_writer
+
+let set_solved_dim Shape_writer r d =
   match (r.solved_dim, r.solved_sym) with
   | Some d0, _ when d0 = d -> ()
   | Some d0, _ -> refuse_solution r ~held:(Int.to_string d0) ~wanted:(Int.to_string d)
@@ -549,7 +573,7 @@ let set_solved_dim r d =
         ~wanted:(Int.to_string d)
   | None, None -> r.solved_dim <- Some d
 
-let set_solved_sym r s =
+let set_solved_sym Shape_writer r s =
   match (r.solved_sym, r.solved_dim) with
   | Some s0, _ when equal_static_symbol s0 s -> ()
   | Some s0, _ ->
@@ -560,6 +584,20 @@ let set_solved_sym r s =
       refuse_solution r ~held:(Int.to_string d0)
         ~wanted:(Sexp.to_string_hum (sexp_of_static_symbol s))
   | None, None -> r.solved_sym <- Some s
+
+let commit_role Shape_writer s role =
+  let refuse ~held ~wanted =
+    raise
+    @@ Utils.User_error
+         [%string
+           "Indexing: static index %{symbol_ident s.static_symbol} is already used as a %{held}; \
+            it cannot also be used as a %{wanted}"]
+  in
+  match role with
+  | `Extent when s.used_as_slice -> refuse ~held:"batch-slice index" ~wanted:"symbolic extent"
+  | `Slice when s.used_as_extent -> refuse ~held:"symbolic extent" ~wanted:"batch-slice index"
+  | `Extent -> s.used_as_extent <- true
+  | `Slice -> s.used_as_slice <- true
 
 module Doc_helpers = struct
   let ( ^^ ) = PPrint.( ^^ )

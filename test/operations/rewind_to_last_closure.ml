@@ -475,6 +475,25 @@ let exact_allocated_nodes () =
         false);
   p_all2 "and its values read back" !read_back [| 0.5; -2. |] ~f:Float.equal
 
+(* gh-ocannl-1624: a node's delayed precision is sealed in Tnode, written only by its guarded
+   setters, and the frontend counts each write that changes it as a session mutation -- an operation
+   result's [Inferred] precision made [Specified], here. Re-setting the held precision is no write,
+   and a refused one writes nothing. *)
+let precision_writes () =
+  Tensor.rewind_to_last_closure ();
+  let x = leaf "rw_prec_x" [| 1.; 2. |] in
+  let%op u = x *. 2. in
+  let before = Row.mutation_serial () in
+  Ir.Tnode.update_prec u.Tensor.value Ir.Ops.half;
+  let after_write = Row.mutation_serial () in
+  Ir.Tnode.update_prec u.Tensor.value Ir.Ops.half;
+  let after_noop = Row.mutation_serial () in
+  let refused = outcome (fun () -> Ir.Tnode.update_prec u.Tensor.value Ir.Ops.double) in
+  p "a write that changes a node's precision counts as a session mutation" (after_write > before);
+  p "re-setting the precision the node holds is not counted" (after_noop = after_write);
+  p "a conflicting precision is refused, and not counted"
+    (Result.is_error refused && Row.mutation_serial () = after_noop)
+
 let () =
   match Sys.get_argv () with
   | [| _; "fresh" |] -> fresh_leg ()
@@ -484,4 +503,5 @@ let () =
       symbol_roles ();
       retained_handles ();
       context_entry_points ();
-      exact_allocated_nodes ()
+      exact_allocated_nodes ();
+      precision_writes ()

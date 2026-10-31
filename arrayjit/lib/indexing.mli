@@ -28,13 +28,27 @@ val symbol_ident : symbol -> string
 
 type 'a environment = 'a Map.M(Symbol).t [@@deriving sexp]
 
-type static_symbol = {
+type static_symbol = private {
   static_symbol : symbol;
   mutable static_range : int option;
   mutable used_as_extent : bool;
   mutable used_as_slice : bool;
 }
 [@@deriving compare, equal, sexp, hash]
+(** Private (gh-ocannl-1624): read and matched freely, built by {!make_static_symbol} or
+    {!get_static_symbol}, and written only through the setters below. The roles ([used_as_extent],
+    [used_as_slice]) are shape-inference state of a caller-retained symbol: after its birth a role
+    is written only by {!commit_role}, which takes {!shape_writer}. The declared range is not
+    inference state; {!set_static_range} writes it. *)
+
+val make_static_symbol :
+  ?static_range:int -> ?used_as:[ `Extent | `Slice ] -> symbol -> static_symbol
+(** A static symbol over [symbol], holding the role [used_as] from birth (default: none). A role
+    given at birth is not a write to a symbol anything else holds yet, so it needs no writer --
+    hand-built IR uses it for a symbolic extent no shape inference claimed. *)
+
+val set_static_range : static_symbol -> int option -> unit
+(** Re-declares the symbol's range. The analysis caches key on it, so a changed range misses. *)
 
 type 'a bindings = Empty | Bind of static_symbol * (int -> 'a) bindings [@@deriving sexp_of]
 
@@ -156,19 +170,36 @@ type variable_ref = private {
 [@@deriving sexp_of, equal]
 (** Private (gh-ocannl-1573): read and matched freely, written only through the setters below. A
     solution is reached once: at most one of [solved_dim], [solved_sym] is ever set, and a set field
-    keeps its value. Shape inference is the only writer ([Shape]'s capture references wrap these
-    setters with the session's accounting); the cell is shared, so an [Assignments.Embed_dim] built
-    before inference observes the solution it later reaches. *)
+    keeps its value. Shape inference is the only writer: the setters take {!shape_writer}, which
+    [Shape] holds, and its capture references wrap them with the session's accounting
+    (gh-ocannl-1624). The cell is shared, so an [Assignments.Embed_dim] built before inference
+    observes the solution it later reaches. *)
 
 val variable_ref : string -> variable_ref
 (** A fresh, unsolved reference with the given label. *)
 
-val set_solved_dim : variable_ref -> int -> unit
+type shape_writer
+(** The capability to write shape-inference state held by this module's records: solve a
+    {!variable_ref}, commit a static symbol's role (gh-ocannl-1624). A process has at most one: the
+    first {!claim_shape_writer} returns it and every later one raises. In a program linking the
+    tensor frontend, [Shape] claims it as it initializes, so the setters taking it are [Shape]'s
+    alone -- a write through them could not skip the session's accounting (liveness of a rewound
+    reference, the open set, the mutation serial). *)
+
+val claim_shape_writer : unit -> shape_writer
+(** Returns the process's {!shape_writer}; raises [Utils.User_error] when it was already claimed. *)
+
+val set_solved_dim : shape_writer -> variable_ref -> int -> unit
 (** Records a concrete solution. Setting the value it already holds is a no-op; a different value,
     or a reference already solved to a symbol, raises. *)
 
-val set_solved_sym : variable_ref -> static_symbol -> unit
+val set_solved_sym : shape_writer -> variable_ref -> static_symbol -> unit
 (** Records a symbolic-extent solution, guarded like {!set_solved_dim}. *)
+
+val commit_role : shape_writer -> static_symbol -> [ `Extent | `Slice ] -> unit
+(** Sets the symbol's role flag. Committing the role it holds is a no-op; the other role raises (a
+    binding cannot be validated both inclusively and strictly). [Shape] calls it only from a
+    successful [finish_inference], for the claims [Row.claim_symbol_role] counted. *)
 
 module Doc_helpers : sig
   val ( ^^ ) : PPrint.document -> PPrint.document -> PPrint.document
