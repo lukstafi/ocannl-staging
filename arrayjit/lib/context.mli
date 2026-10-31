@@ -844,7 +844,12 @@ val release : t -> unit
     contexts by design and outlive them until device teardown. A root's other constants are freed
     with the release of the last context binding them (gh-ocannl-1654). That is a real bound on what
     this can do for a schedule search — a hoisted [Stage] candidate mints a fresh packed constant
-    per application, so those accumulate whatever the caller does here (gh-ocannl-565).
+    per application, so those accumulate whatever the caller does here (gh-ocannl-565). It is one
+    for a loop that builds a fresh graph per step too: each graph's literal adds a constant pool,
+    and keeps the literal's node and host data, for the process (gh-ocannl-1762). Nor does it free
+    an ancestor: the pools of a context minted on the caller's behalf, such as the initialization
+    context of {!Train.forward_once}, stay until that context is released, which only its minter can
+    do.
 
     This exists because releasing is otherwise not something a finalizer can be relied on to do
     (gh-ocannl-550): the backends' pool tables hold a strong reference to every slab they allocated,

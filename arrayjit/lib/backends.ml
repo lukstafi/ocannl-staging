@@ -438,7 +438,6 @@ module Add_buffer_retrieval_and_syncing (Backend : No_buffer_retrieval_or_syncin
   let wait_for_ready ~dst ~src tn =
     let s = src.device in
     let d = dst.device in
-    (* TODO: maybe it's worthwhile to clean up s.updating_for every now and then. *)
     Hashtbl.find s.updating_for tn
     |> Option.iter ~f:(fun upd_e ->
         if not (equal_device s d || Backend.is_done upd_e) then Backend.will_wait_for dst upd_e)
@@ -456,11 +455,24 @@ module Add_buffer_retrieval_and_syncing (Backend : No_buffer_retrieval_or_syncin
         true
     | None -> false
 
-  let update_writer_event ?e ctx tn =
+  (* gh-ocannl-1747: the entries whose event is done are dropped before a write records new ones.
+     The table's only reader, [wait_for_ready], ignores a done event exactly as a missing entry, so
+     pruning changes no ordering; without it the table held every node any routine output or upload
+     ever wrote, for the life of the (singleton) device, and with the node its host-init data -- the
+     strong key that kept every dropped graph's nodes alive after [Context.release]. One scan per
+     routine run for all its outputs, and per synchronous host or device upload; a transfer
+     routine's copy, whose work can run as a device task, records without one. So the table is
+     bounded by the writes still in flight plus the copies since the last scan. *)
+  let prune_done_writers s =
+    Hashtbl.filter_inplace s.updating_for ~f:(fun e -> not (Backend.is_done e))
+
+  let update_writer_event ?(prune = true) ?e ctx tn =
     let s = ctx.device in
     let e = Option.value_or_thunk e ~default:(fun () -> Backend.all_work s) in
     match tn with
-    | Assignments.Node tn -> Hashtbl.update s.updating_for tn ~f:(fun _ -> e)
+    | Assignments.Node tn ->
+        if prune then prune_done_writers s;
+        Hashtbl.set s.updating_for ~key:tn ~data:e
     | Assignments.Merge_buffer tn ->
         (* Note: the previous event does not need to be done! *)
         s.updating_for_merge_buffer <- Some (tn, Some e)
@@ -650,7 +662,8 @@ module Add_buffer_retrieval_and_syncing (Backend : No_buffer_retrieval_or_syncin
                     Backend.(
                       device_to_device tn ~into_merge_buffer ~dst_loc:(Some d_loc) ~dst
                         ~src_loc:s_loc ~src);
-                    update_writer_event dst @@ Node tn;
+                    (* A transfer routine's work may run as a device task: no table scan here. *)
+                    update_writer_event ~prune:false dst @@ Node tn;
                     [%log
                       "copying",
                       Tn.debug_name tn,
@@ -750,7 +763,8 @@ module Add_buffer_retrieval_and_syncing (Backend : No_buffer_retrieval_or_syncin
     let s = r.context.device in
     let post () =
       let e = Backend.all_work s in
-      Set.iter r.outputs ~f:(fun tn -> update_writer_event ~e r.context @@ Node tn)
+      prune_done_writers s;
+      Set.iter r.outputs ~f:(fun tn -> update_writer_event ~prune:false ~e r.context @@ Node tn)
     in
     { r with schedule = Task.(append ~work:post r.schedule) }
 

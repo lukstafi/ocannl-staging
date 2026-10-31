@@ -249,6 +249,17 @@ files.
   through. When asserting a memory bound, assert on `live_working_pools`, not `live_pools`: summing the
   constant class in makes the assertion fail for a reason it is not about, and on a workload with no
   hoisted candidates it passes while proving less than it looks like.
+- **A dropped graph is held by device tables, never by the session** (gh-ocannl-1747). Since
+  gh-ocannl-1745 the session lets an evaluated graph go, and the only strong holders of its nodes
+  were two device tables: `updating_for` (every node a routine or upload wrote, now pruned of done
+  events at each write, since its one reader treats a done event as absent) and the `Shared` keys of
+  `constant_buffer_cache` (host literals, still pinned: gh-ocannl-1762). A held node is a host-memory
+  pin, since `Host_inits` is an ephemeron keyed by the node. Pools are a separate question: the pool
+  table holds them, nodes or not, until `release`, and `Train.run_once`'s initialization context is
+  an ancestor nobody can release (gh-ocannl-1762). The analysis cache keeps eight compiles' nodes,
+  bounded. To find a pinner, put weak witnesses on the nodes and clear candidates one at a time
+  (`clear_analysis_cache`, `unsafe_reinitialize`, `sync_device`, the constant cache): the recipe
+  that found these two, and `dropped_graph_buffers` pins what it found.
 - Five facts about the allocation seams that each cost a review round to learn, and that any further
   release work will meet again. (1) There are **two** shared allocation sites, not one:
   `Backends.allocate_delta` for a compile's delta, and the transfer destinations inside

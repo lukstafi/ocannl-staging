@@ -426,7 +426,14 @@ val run_once :
 
     The session does not pin the tensor either: once its forward code is handed out, it stays a
     backprop root only while the caller holds it, so a graph dropped after a forward-only run is
-    reclaimed by the GC (gh-ocannl-1745; see {!Tensor.is_bprop_root}). *)
+    reclaimed by the GC (gh-ocannl-1745; see {!Tensor.is_bprop_root}).
+
+    Its buffers are a different matter. {!Context.release} of the returned context frees the pools
+    the routine of [f t] allocated, but the parameters live in the context {!init_params} returned
+    here: an ancestor of the result that the caller never holds, so their pools stay in the
+    backend's pool table for the process (gh-ocannl-1762). A caller that builds fresh graphs in a
+    loop and wants their memory back initializes them itself, with {!init_params} and then
+    {!to_routine} from its result, and releases both contexts, the compiled one first. *)
 
 val forward_once :
   ?output_cd_file:bool ->
