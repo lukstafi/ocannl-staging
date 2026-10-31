@@ -415,6 +415,9 @@ type report = {
   fiss_sketch_playoff_finals_admitted : int;
   fiss_sketch_staffed_timed : int;
   fiss_sketch_backdrop_fallbacks : int;
+  staffed_finals : int;
+  staffed_finals_timed : int;
+  staffed_finals_admitted : int;
   seeded_single_candidates : int;
   seeded_single_timed : int;
   seeded_single_joins : int;
@@ -557,6 +560,9 @@ let no_search_report ~timing =
     fiss_sketch_playoff_finals_admitted = 0;
     fiss_sketch_staffed_timed = 0;
     fiss_sketch_backdrop_fallbacks = 0;
+    staffed_finals = 0;
+    staffed_finals_timed = 0;
+    staffed_finals_admitted = 0;
     seeded_single_candidates = 0;
     seeded_single_timed = 0;
     seeded_single_joins = 0;
@@ -8857,6 +8863,9 @@ let tune_in_stream_scope ~timing_state ~defer ~substituted ?name ?search ?beam_w
                     fiss_sketch_playoff_finals_admitted = 0;
                     fiss_sketch_staffed_timed = 0;
                     fiss_sketch_backdrop_fallbacks = 0;
+                    staffed_finals = 0;
+                    staffed_finals_timed = 0;
+                    staffed_finals_admitted = 0;
                     seeded_single_candidates = 0;
                     seeded_single_timed = 0;
                     seeded_single_joins = 0;
@@ -9346,6 +9355,11 @@ let tune_in_stream_scope ~timing_state ~defer ~substituted ?name ?search ?beam_w
         (* gh-ocannl-1138: the staffed singles' windows, and the staffed singles retried bare. *)
         and n_staffed_timed = ref 0
         and n_backdrop_fallbacks = ref 0
+        (* gh-ocannl-1698: the staffed joins' near ties decided in shared windows, and their
+           windows. *)
+        and n_staffed_finals = ref 0
+        and n_staffed_finals_timed = ref 0
+        and n_staffed_finals_admitted = ref 0
         (* gh-ocannl-1664: the seeded singles proposed, their windows, the keys whose choice the
            seeded sweep changed, and the seeded singles retried without their staff. *)
         and n_seeded_single_candidates = ref 0
@@ -9533,6 +9547,9 @@ let tune_in_stream_scope ~timing_state ~defer ~substituted ?name ?search ?beam_w
             fiss_sketch_playoff_finals_admitted = !n_playoff_finals_admitted;
             fiss_sketch_staffed_timed = !n_staffed_timed;
             fiss_sketch_backdrop_fallbacks = !n_backdrop_fallbacks;
+            staffed_finals = !n_staffed_finals;
+            staffed_finals_timed = !n_staffed_finals_timed;
+            staffed_finals_admitted = !n_staffed_finals_admitted;
             seeded_single_candidates = !n_seeded_single_candidates;
             seeded_single_timed = !n_seeded_single_timed;
             seeded_single_joins = !n_seeded_single_joins;
@@ -10461,6 +10478,167 @@ let tune_in_stream_scope ~timing_state ~defer ~substituted ?name ?search ?beam_w
             Option.iter result ~f:admit
           in
           List.iter pre_sweep_specs ~f:run_seed;
+          (* gh-ocannl-1635/1665: the finals' windows, the one mechanism behind every near-tie crown
+             -- the beam finals' (after the rounds), the composite playoff's and the staffed sweeps'
+             joins (below). [contenders], in contender order, each with the label its windows are
+             timed under, the spec it is recompiled from and the digest that recompile must
+             reproduce ([None]: the first finals recompile's, for a contender whose window timed it
+             under another spec -- a staffed single's running composite). The windows follow
+             [finals_order], one compile PER WINDOW and one resident at a time, each under the
+             contender's label and digest and after the timing-state restore every window starts
+             from (gh-ocannl-1621). A compile per window, even for the adjacent pair in the middle
+             of the order, because that restore covers only the nodes [search_ctx] holds: the
+             buffers a compile allocates afresh (an optimizer's state before its first step, say)
+             are reset only by the next compile, so a reused compile's second window would start
+             from state the first one trained -- every window starts as a search candidate's single
+             window does. A refused or failed finals window is the finals' own: it is not a
+             candidate refusal or decline, so it neither enters [timings_contended] nor makes the
+             search uncacheable; the contender is left with fewer readings, none making the finals
+             inconclusive ([finals_crown]). Under a budget, each recompile starts only while the
+             elapsed time plus the projected compile cost ([projected_compile_s]) stays within it --
+             the projection a candidate attempt is held to -- and once one may not start, no later
+             one of this finals does; a window stops once the budget passes. Neither marks the
+             search as cut. Returns each contender's admitted readings, in contender order; [timed]
+             and [admitted] count the windows. *)
+          let finals_stop () =
+            match budget with Some b -> Float.(budget_clock () > b) | None -> false
+          in
+          let budget_allows_finals () =
+            match budget with
+            | None -> true
+            | Some b ->
+                (not !budget_spent) && Float.(budget_clock () +. projected_compile_s () <= b)
+          in
+          let finals_readings ~what ~timed ~admitted contenders =
+            let readings = Array.create ~len:(List.length contenders) [] in
+            let digests = Array.of_list (List.map contenders ~f:(fun (_, _, d) -> d)) in
+            let cut = ref false in
+            List.iter
+              (finals_order (List.mapi contenders ~f:(fun i c -> (i, c))))
+              ~f:(fun (i, (label, spec, _)) ->
+                if !cut || not (budget_allows_finals ()) then (
+                  if not !cut then
+                    logf "%s: the budget allows no further recompile, from %s on" what label;
+                  cut := true)
+                else
+                  match
+                    timed_into progress_compile_s (fun () ->
+                        budget_compile (fun () -> compile_spec spec))
+                  with
+                  | Error (Outcome.Fatal fatal) -> emit_partial_and_raise fatal
+                  | Error (Outcome.Classified classified) ->
+                      logf "%s: %s: recompile FAILED at %s %s" what label
+                        (phase_label classified.phase)
+                        (Outcome.detail_of_cause classified.cause)
+                  | Ok c
+                    when Option.exists digests.(i) ~f:(fun d -> not (String.equal c.digest_after d))
+                    ->
+                      logf "%s: %s: recompiled to digest %s, not %s: not re-timed" what label
+                        (dshort c.digest_after)
+                        (dshort (Option.value_exn digests.(i)));
+                      release_quietly ~what:(what ^ " contender " ^ label) c.cctx
+                  | Ok c -> (
+                      digests.(i) <- Some c.digest_after;
+                      pending := Some c;
+                      Int.incr timed;
+                      match timing_window ~label ~stop:finals_stop c with
+                      | Ok (`Timed timing_result) -> (
+                          match admitted_timing_ms timing_result with
+                          | Some ms ->
+                              Int.incr admitted;
+                              readings.(i) <- ms :: readings.(i);
+                              logf "%s: %s: %.4f ms (digest %s)" what label ms
+                                (dshort c.digest_after);
+                              release_candidate c
+                          | None ->
+                              logf "%s: %s: NOT TIMED, %s (digest %s)" what label
+                                (refusal_reason (timing_admission timing_result))
+                                (dshort c.digest_after);
+                              release_candidate c)
+                      | Ok `Stopped ->
+                          cut := true;
+                          logf "%s: %s: NOT TIMED, the budget passed during its timing" what label;
+                          release_candidate c
+                      | Ok (`Hopeless _) ->
+                          (* Unreachable: a finals window is timed in full. *)
+                          logf "%s: %s: NOT TIMED, cut as hopeless" what label;
+                          release_candidate c
+                      | Error (Outcome.Classified classified) -> (
+                          logf "%s: %s: RUN FAILED at %s %s" what label
+                            (phase_label classified.phase)
+                            (Outcome.detail_of_cause classified.cause);
+                          (* As a candidate's run failure (see [try_spec]): one that wrote nothing
+                             withdraws its executed claim; one that may have written condemns the
+                             lineage. *)
+                          match classified.execution_effect with
+                          | Outcome.No_device_writes ->
+                              Context.rollback_execution c.cctx c.routine.Context.routine_id;
+                              release_candidate c
+                          | Outcome.Writes_may_have_occurred ->
+                              Context.poison_lineage c.cctx ~routine_name:c.routine.Context.name
+                                (Outcome.exception_of_cause classified.cause);
+                              release_candidate c;
+                              emit_partial_and_raise
+                                (Outcome.fatal_of_classified ~candidate:label classified))
+                      | Error (Outcome.Fatal fatal) ->
+                          Context.poison_lineage c.cctx ~routine_name:c.routine.Context.name
+                            fatal.Outcome.exn;
+                          release_candidate c;
+                          emit_partial_and_raise fatal));
+            List.map (Array.to_list readings) ~f:List.rev
+          in
+          (* A finals contender for a schedule [spec] whose window timed [digest] when known: its
+             windows run under the label that digest was admitted under, else the spec's own. *)
+          let finals_contender spec digest =
+            let label =
+              Option.value
+                (Option.bind digest ~f:(Hashtbl.find label_by_digest))
+                ~default:(spec_label spec)
+            in
+            (label, spec, digest)
+          in
+          (* gh-ocannl-1665/1698: whether [challenger] beats [incumbent], each a lazy finals
+             contender with its search reading, the two readings taken in different windows. A pair
+             within [finals_contenders]' margin (config [autotune_finals_margin]) is a near tie,
+             counted in [counted] and decided by a finals of the two -- [finals_readings] re-times
+             both in adjacent windows under [what], and [finals_crown] decides, ties to the faster
+             first reading (the incumbent on equal readings): [`Finals (wins, finals_ms, other_ms)],
+             the winner's finals reading and the loser's. Outside the margin, with the margin off,
+             under a spent budget or after an inconclusive finals (a contender with no admitted
+             reading), the readings decide, the challenger winning only by reading faster:
+             [`Readings (wins, why)], [why] the log's note on why no finals decided. Either way the
+             caller keeps the winner's search reading, as the beam finals' crown does. *)
+          let finals_settle ~what ~counted ~timed ~admitted ~incumbent:(incumbent, incumbent_ms)
+              ~challenger:(challenger, challenger_ms) =
+            let by_readings why = `Readings (Float.(challenger_ms < incumbent_ms), why) in
+            let near =
+              finals_contenders ~margin:finals_margin ~width:2
+                [ (`Incumbent, incumbent_ms); (`Challenger, challenger_ms) ]
+            in
+            if List.is_empty near then by_readings ""
+            else if not (budget_allows_finals ()) then
+              by_readings ", a near tie the budget leaves no finals for"
+            else (
+              Int.incr counted;
+              let contender = function
+                | `Incumbent -> Lazy.force incumbent
+                | `Challenger -> Lazy.force challenger
+              in
+              let readings =
+                finals_readings ~what ~timed ~admitted
+                  (List.map near ~f:(fun (who, _) -> contender who))
+              in
+              let paired = List.zip_exn near readings in
+              match finals_crown paired with
+              | None -> by_readings ", a near tie whose finals were inconclusive"
+              | Some ((who, _), finals_ms) ->
+                  let other_ms =
+                    List.find_map paired ~f:(fun ((w, _), rs) ->
+                        if Poly.equal w who then None else List.min_elt rs ~compare:Float.compare)
+                    |> Option.value ~default:Float.nan
+                  in
+                  `Finals (Poly.equal who `Challenger, finals_ms, other_ms))
+          in
           (* gh-ocannl-1138: the running composite. A single timed with every other segment on its
              preset measures the routine around a backdrop that can be ten times the composite it
              would join (gh-ocannl-1166: 23.2 ms around a 2.4 ms composite on gpt2_mini/CUDA), so
@@ -10484,8 +10662,11 @@ let tune_in_stream_scope ~timing_state ~defer ~substituted ?name ?search ?beam_w
              ran against (for the playoff), and the sweep of one key, which returns that key's
              results in its own backdrop. [single key staff choice] is the candidate; [describe]
              names a choice for the log. Keys compare by [equal_key] and choices structurally. *)
-          let sweeper ?seeded_cut ~equal_key ~keys ~single ~describe ~fallbacks () =
+          let sweeper ?seeded_cut ~finals ~equal_key ~keys ~single ~describe ~fallbacks () =
             let running = ref [] and running_ms = ref None and swept_against = ref [] in
+            (* The schedule whose window took [running_ms], with the digest it timed when known: the
+               incumbent a staffed join's finals re-times. *)
+            let running_src = ref None in
             (* gh-ocannl-1697: a seeded sweep's singles are whole seeded routines, each cut as
                hopeless against [seeded_cut] of the running composite's reading. *)
             let try_single spec =
@@ -10519,6 +10700,8 @@ let tune_in_stream_scope ~timing_state ~defer ~substituted ?name ?search ?beam_w
                 | Some q -> q :: List.filter ps ~f:(fun p -> not (Poly.equal p q))
                 | None -> ps
               in
+              (* Each result carries the schedule its reading was taken on ([running_src]'s
+                 form). *)
               let results =
                 List.filter_map ps ~f:(fun p ->
                     match (current, !running_ms) with
@@ -10526,55 +10709,109 @@ let tune_in_stream_scope ~timing_state ~defer ~substituted ?name ?search ?beam_w
                         (* The running composite itself, timed already: not compiled again, and
                            proof the staff is compatible with the key (Codex P2 on PR #1215). *)
                         staff_admitted := true;
-                        Some (p, ms)
+                        Some (p, ms, !running_src)
                     | _ -> (
-                        match try_single (single key staff p) with
-                        | Some ((_, ms) as r) ->
+                        let spec = single key staff p in
+                        match try_single spec with
+                        | Some (((c : compiled), ms) as r) ->
                             admit r;
                             staff_admitted := true;
-                            Some (p, ms)
+                            Some (p, ms, Some (spec, Some c.digest_after))
                         | None -> (
                             match !last_attempt with
                             | `Dedup (Some ms) ->
                                 staff_admitted := true;
-                                Some (p, ms)
+                                Some (p, ms, Some (spec, None))
                             | `Declined when (not (List.is_empty staff)) && not !staff_admitted ->
                                 Int.incr fallbacks;
                                 logf "%s: refused with its staff; retrying it bare"
-                                  (spec_label (single key staff p));
-                                (match try_single (single key [] p) with
-                                | Some ((_, ms) as r) ->
+                                  (spec_label spec);
+                                let bare_spec = single key [] p in
+                                (match try_single bare_spec with
+                                | Some (((c : compiled), ms) as r) ->
                                     admit r;
-                                    bare := (p, ms) :: !bare
+                                    bare := (p, ms, Some (bare_spec, Some c.digest_after)) :: !bare
                                 | None -> (
                                     (* A bare twin already timed under its digest still ranks (Codex
                                        P2 on PR #1215). *)
                                     match !last_attempt with
-                                    | `Dedup (Some ms) -> bare := (p, ms) :: !bare
+                                    | `Dedup (Some ms) ->
+                                        bare := (p, ms, Some (bare_spec, None)) :: !bare
                                     | _ -> ()));
                                 None
                             | _ -> None)))
               in
-              let by_time (_, a) (_, b) = Float.compare a b in
+              let by_time (_, a, _) (_, b, _) = Float.compare a b in
+              (* gh-ocannl-1698: whether [challenger] (read [ms] on [src]) beats the incumbent (read
+                 [incumbent_ms] on [incumbent_src]). Their readings come from different windows --
+                 the incumbent's usually from an earlier key's sweep -- so, in a staffed sweep, a
+                 near tie of the two is settled by a finals ([finals_settle]); a seeded sweep's
+                 joins, and a pair whose schedules are unknown, compare the readings. Returns the
+                 verdict and the log's note on how it was reached. *)
+              let beats ~challenger ~ms ~src ~incumbent_ms ~incumbent_src =
+                match (finals, incumbent_src, src) with
+                | true, Some (i_spec, i_digest), Some (c_spec, c_digest) -> (
+                    match
+                      finals_settle ~what:"staffed finals" ~counted:n_staffed_finals
+                        ~timed:n_staffed_finals_timed ~admitted:n_staffed_finals_admitted
+                        ~incumbent:(lazy (finals_contender i_spec i_digest), incumbent_ms)
+                        ~challenger:(lazy (finals_contender c_spec c_digest), ms)
+                    with
+                    | `Readings (wins, why) -> (wins, why)
+                    | `Finals (wins, finals_ms, other_ms) ->
+                        let challenger_finals, incumbent_finals =
+                          if wins then (finals_ms, other_ms) else (other_ms, finals_ms)
+                        in
+                        let note =
+                          Printf.sprintf "; in shared windows %.4f ms against %.4f ms"
+                            challenger_finals incumbent_finals
+                        in
+                        if not wins then
+                          logf "staffed: %s stays out of the running composite (%.4f ms, %.4f ms%s)"
+                            challenger ms incumbent_ms note;
+                        (wins, note))
+                | _ -> (Float.(ms < incumbent_ms), "")
+              in
               (* The incumbent in this backdrop: the composite's own choice for the key as timed
                  here, or else the running composite itself, timed whole -- for a key with no
                  choice, the key on its preset (Codex P1 on PR #1215: a key whose every single was
                  slower than its preset used to join anyway, and later keys were swept around the
                  slower composite). *)
-              let current_ms =
-                Option.bind current ~f:(fun q -> List.Assoc.find results ~equal:Poly.equal q)
+              let current_result =
+                Option.bind current ~f:(fun q ->
+                    List.find results ~f:(fun (p, _, _) -> Poly.equal p q))
               in
-              let incumbent_ms = Option.first_some current_ms !running_ms in
+              let incumbent =
+                match current_result with
+                | Some (_, ms, src) -> Some (ms, src)
+                | None -> Option.map !running_ms ~f:(fun ms -> (ms, !running_src))
+              in
               (match List.min_elt results ~compare:by_time with
-              | Some (p, ms) ->
-                  (* The fastest in this backdrop replaces the incumbent only by being faster; a tie
-                     keeps it. *)
-                  if Option.for_all incumbent_ms ~f:(fun i -> Float.(ms < i)) then (
+              | Some (p, ms, src) ->
+                  (* The fastest in this backdrop replaces the incumbent only by beating it: by
+                     being faster, or in a near tie by winning their finals; a tie keeps it. The
+                     incumbent's own choice is no challenger. *)
+                  let joins, note =
+                    if Option.exists current ~f:(Poly.equal p) then (false, "")
+                    else
+                      match incumbent with
+                      | None -> (true, "")
+                      | Some (incumbent_ms, incumbent_src) ->
+                          let wins, note =
+                            beats ~challenger:(describe key p) ~ms ~src ~incumbent_ms ~incumbent_src
+                          in
+                          (wins, Printf.sprintf " against %.4f ms%s" incumbent_ms note)
+                  in
+                  if joins then (
                     logf "staffed: %s joins the running composite (%.4f ms%s)" (describe key p) ms
-                      (Option.value_map incumbent_ms ~default:"" ~f:(Printf.sprintf " < %.4f ms"));
+                      note;
                     running := in_key_order ((key, p) :: without key !running);
-                    running_ms := Some ms)
-                  else Option.iter current_ms ~f:(fun q_ms -> running_ms := Some q_ms)
+                    running_ms := Some ms;
+                    running_src := src)
+                  else
+                    Option.iter current_result ~f:(fun (_, q_ms, q_src) ->
+                        running_ms := Some q_ms;
+                        running_src := q_src)
               | None -> (
                   (* Every staffed single of the key was refused, and some of its bare retries were
                      admitted (Codex P1 on PR #1215): the key cannot join this staff, since the
@@ -10583,17 +10820,34 @@ let tune_in_stream_scope ~timing_state ~defer ~substituted ?name ?search ?beam_w
                      faster of the two carries on; a running composite never timed as a whole
                      yields. *)
                   match List.min_elt !bare ~compare:by_time with
-                  | Some (p, ms)
-                    when Option.value_map !running_ms ~default:true ~f:(fun r -> Float.(ms < r)) ->
-                      logf "staffed: %s replaces the running composite, refused with it (%.4f ms%s)"
-                        (describe key p) ms
-                        (Option.value_map !running_ms ~default:"" ~f:(Printf.sprintf " < %.4f ms"));
-                      running := [ (key, p) ];
-                      running_ms := Some ms
-                  | Some _ | None -> ()));
+                  | Some (p, ms, src) -> (
+                      let replaces =
+                        match !running_ms with
+                        | None -> Some ""
+                        | Some incumbent_ms ->
+                            let wins, note =
+                              beats ~challenger:(describe key p) ~ms ~src ~incumbent_ms
+                                ~incumbent_src:!running_src
+                            in
+                            Option.some_if wins
+                              (Printf.sprintf " against %.4f ms%s" incumbent_ms note)
+                      in
+                      match replaces with
+                      | Some note ->
+                          logf
+                            "staffed: %s replaces the running composite, refused with it (%.4f \
+                             ms%s)"
+                            (describe key p) ms note;
+                          running := [ (key, p) ];
+                          running_ms := Some ms;
+                          running_src := src
+                      | None -> ())
+                  | None -> ()));
               (* What the key's sweep timed in one backdrop: its staffed singles, or failing those
                  its bare retries. *)
-              if List.is_empty results then List.rev !bare else results
+              List.map
+                (if List.is_empty results then List.rev !bare else results)
+                ~f:(fun (p, ms, _) -> (p, ms))
             in
             let start choices = running := in_key_order choices in
             (running, running_ms, swept_against, start, sweep_key)
@@ -10631,7 +10885,7 @@ let tune_in_stream_scope ~timing_state ~defer ~substituted ?name ?search ?beam_w
           (* A segmentation's sketch sweeper, its keys in [heaviest_first] order. *)
           let sketch_sweeper ~plan ~fine ~keys =
             let running, running_ms, swept_against, start, sweep_key =
-              sweeper ~equal_key:equal_seg_key ~keys ~fallbacks:n_backdrop_fallbacks
+              sweeper ~finals:true ~equal_key:equal_seg_key ~keys ~fallbacks:n_backdrop_fallbacks
                 ~single:(fun key staff p ->
                   Fiss (F_sketch { plan; entries = [ (key, p) ]; staff; fine }))
                 ~describe:(fun key p ->
@@ -10696,7 +10950,7 @@ let tune_in_stream_scope ~timing_state ~defer ~substituted ?name ?search ?beam_w
           in
           let seeded_sweep_run ~start_ms plan entries pre =
             let running, running_ms, _, _, sweep_key =
-              sweeper ~seeded_cut:seeded_cut_reference ~equal_key:equal_seg_key
+              sweeper ~seeded_cut:seeded_cut_reference ~finals:false ~equal_key:equal_seg_key
                 ~keys:(List.map entries ~f:fst) ~fallbacks:n_seeded_single_fallbacks
                 ~single:(fun key staff p -> Fiss (F_swap { plan; entries = [ (key, p) ]; staff }))
                 ~describe:(fun key p ->
@@ -10828,7 +11082,8 @@ let tune_in_stream_scope ~timing_state ~defer ~substituted ?name ?search ?beam_w
              on the pristine lowering, would match the search's only by target and extents. *)
           let same_site a b = Idx.equal_symbol a.sr_axis b.sr_axis in
           let sr_running, sr_running_ms, _, _, sr_sweep_key =
-            sweeper ~equal_key:same_site ~keys:sr_sites ~fallbacks:n_sr_backdrop_fallbacks
+            sweeper ~finals:true ~equal_key:same_site ~keys:sr_sites
+              ~fallbacks:n_sr_backdrop_fallbacks
               ~single:(fun s staff b -> Fiss (F_split { sites = [ (s, b) ]; staff }))
               ~describe:(fun s b -> "split site " ^ split_site_label (s, b))
               ()
@@ -11014,114 +11269,6 @@ let tune_in_stream_scope ~timing_state ~defer ~substituted ?name ?search ?beam_w
           if eligible_now then
             if staffed && Option.is_some !sr_running_ms then sr_composite_timed := true
             else Option.iter (try_spec (Fiss (F_split { sites = recombined; staff = [] }))) ~f:admit;
-          (* gh-ocannl-1635/1665: the finals' windows, the one mechanism behind every near-tie crown
-             -- the beam finals' (after the rounds) and the composite playoff's (below).
-             [contenders], in contender order, each with the label its windows are timed under, the
-             spec it is recompiled from and the digest that recompile must reproduce ([None]: the
-             first finals recompile's, for a contender whose window timed it under another spec -- a
-             staffed single's running composite). The windows follow [finals_order], one compile PER
-             WINDOW and one resident at a time, each under the contender's label and digest and
-             after the timing-state restore every window starts from (gh-ocannl-1621). A compile per
-             window, even for the adjacent pair in the middle of the order, because that restore
-             covers only the nodes [search_ctx] holds: the buffers a compile allocates afresh (an
-             optimizer's state before its first step, say) are reset only by the next compile, so a
-             reused compile's second window would start from state the first one trained -- every
-             window starts as a search candidate's single window does. A refused or failed finals
-             window is the finals' own: it is not a candidate refusal or decline, so it neither
-             enters [timings_contended] nor makes the search uncacheable; the contender is left with
-             fewer readings, none making the finals inconclusive ([finals_crown]). Under a budget,
-             each recompile starts only while the elapsed time plus the projected compile cost
-             ([projected_compile_s]) stays within it -- the projection a candidate attempt is held
-             to -- and once one may not start, no later one of this finals does; a window stops once
-             the budget passes. Neither marks the search as cut. Returns each contender's admitted
-             readings, in contender order; [timed] and [admitted] count the windows. *)
-          let finals_stop () =
-            match budget with Some b -> Float.(budget_clock () > b) | None -> false
-          in
-          let budget_allows_finals () =
-            match budget with
-            | None -> true
-            | Some b ->
-                (not !budget_spent) && Float.(budget_clock () +. projected_compile_s () <= b)
-          in
-          let finals_readings ~what ~timed ~admitted contenders =
-            let readings = Array.create ~len:(List.length contenders) [] in
-            let digests = Array.of_list (List.map contenders ~f:(fun (_, _, d) -> d)) in
-            let cut = ref false in
-            List.iter
-              (finals_order (List.mapi contenders ~f:(fun i c -> (i, c))))
-              ~f:(fun (i, (label, spec, _)) ->
-                if !cut || not (budget_allows_finals ()) then (
-                  if not !cut then
-                    logf "%s: the budget allows no further recompile, from %s on" what label;
-                  cut := true)
-                else
-                  match
-                    timed_into progress_compile_s (fun () ->
-                        budget_compile (fun () -> compile_spec spec))
-                  with
-                  | Error (Outcome.Fatal fatal) -> emit_partial_and_raise fatal
-                  | Error (Outcome.Classified classified) ->
-                      logf "%s: %s: recompile FAILED at %s %s" what label
-                        (phase_label classified.phase)
-                        (Outcome.detail_of_cause classified.cause)
-                  | Ok c
-                    when Option.exists digests.(i) ~f:(fun d -> not (String.equal c.digest_after d))
-                    ->
-                      logf "%s: %s: recompiled to digest %s, not %s: not re-timed" what label
-                        (dshort c.digest_after)
-                        (dshort (Option.value_exn digests.(i)));
-                      release_quietly ~what:(what ^ " contender " ^ label) c.cctx
-                  | Ok c -> (
-                      digests.(i) <- Some c.digest_after;
-                      pending := Some c;
-                      Int.incr timed;
-                      match timing_window ~label ~stop:finals_stop c with
-                      | Ok (`Timed timing_result) -> (
-                          match admitted_timing_ms timing_result with
-                          | Some ms ->
-                              Int.incr admitted;
-                              readings.(i) <- ms :: readings.(i);
-                              logf "%s: %s: %.4f ms (digest %s)" what label ms
-                                (dshort c.digest_after);
-                              release_candidate c
-                          | None ->
-                              logf "%s: %s: NOT TIMED, %s (digest %s)" what label
-                                (refusal_reason (timing_admission timing_result))
-                                (dshort c.digest_after);
-                              release_candidate c)
-                      | Ok `Stopped ->
-                          cut := true;
-                          logf "%s: %s: NOT TIMED, the budget passed during its timing" what label;
-                          release_candidate c
-                      | Ok (`Hopeless _) ->
-                          (* Unreachable: a finals window is timed in full. *)
-                          logf "%s: %s: NOT TIMED, cut as hopeless" what label;
-                          release_candidate c
-                      | Error (Outcome.Classified classified) -> (
-                          logf "%s: %s: RUN FAILED at %s %s" what label
-                            (phase_label classified.phase)
-                            (Outcome.detail_of_cause classified.cause);
-                          (* As a candidate's run failure (see [try_spec]): one that wrote nothing
-                             withdraws its executed claim; one that may have written condemns the
-                             lineage. *)
-                          match classified.execution_effect with
-                          | Outcome.No_device_writes ->
-                              Context.rollback_execution c.cctx c.routine.Context.routine_id;
-                              release_candidate c
-                          | Outcome.Writes_may_have_occurred ->
-                              Context.poison_lineage c.cctx ~routine_name:c.routine.Context.name
-                                (Outcome.exception_of_cause classified.cause);
-                              release_candidate c;
-                              emit_partial_and_raise
-                                (Outcome.fatal_of_classified ~candidate:label classified))
-                      | Error (Outcome.Fatal fatal) ->
-                          Context.poison_lineage c.cctx ~routine_name:c.routine.Context.name
-                            fatal.Outcome.exn;
-                          release_candidate c;
-                          emit_partial_and_raise fatal));
-            List.map (Array.to_list readings) ~f:List.rev
-          in
           (* The composite playoff (gh-ocannl-1166), after every recombination composite so the
              [playoff] progress phase holds only its windows: starting from the faster timed
              composite, each key in turn tries its near-tie singles in the composite's place, and an
@@ -11166,60 +11313,30 @@ let tune_in_stream_scope ~timing_state ~defer ~substituted ?name ?search ?beam_w
              [incumbent_ms]), each with the digest its window timed when known. *)
           let playoff_swaps ~fine ~key ~incumbent ~incumbent_ms ~incumbent_digest ~alternate ~alt_ms
               ~alt_digest =
-            let by_readings ~why =
-              let swap = Float.(alt_ms < incumbent_ms) in
-              logf "playoff: segment %s: %s (%.4f ms %s %.4f ms%s)" (seg_key_tag key)
-                (if swap then "the alternate replaces the incumbent" else "the incumbent stays")
-                alt_ms
-                (if swap then "<" else ">=")
-                incumbent_ms why;
-              swap
+            let contender entries digest =
+              lazy (finals_contender (composite_spec ~fine entries) digest)
             in
-            let near =
-              finals_contenders ~margin:finals_margin ~width:2
-                [ (`Incumbent, incumbent_ms); (`Alternate, alt_ms) ]
-            in
-            if List.is_empty near then by_readings ~why:""
-            else if not (budget_allows_finals ()) then
-              by_readings ~why:", a near tie the budget leaves no finals for"
-            else (
-              Int.incr n_playoff_finals;
-              let contender who =
-                let entries, digest =
-                  match who with
-                  | `Incumbent -> (incumbent, incumbent_digest)
-                  | `Alternate -> (alternate, alt_digest)
-                in
-                let spec = composite_spec ~fine entries in
-                let label =
-                  Option.value
-                    (Option.bind digest ~f:(Hashtbl.find label_by_digest))
-                    ~default:(spec_label spec)
-                in
-                (label, spec, digest)
-              in
-              let readings =
-                finals_readings ~what:"playoff finals" ~timed:n_playoff_finals_timed
-                  ~admitted:n_playoff_finals_admitted
-                  (List.map near ~f:(fun (who, _) -> contender who))
-              in
-              match finals_crown (List.zip_exn near readings) with
-              | None -> by_readings ~why:", a near tie whose finals were inconclusive"
-              | Some ((who, _), finals_ms) ->
-                  let swap = Poly.equal who `Alternate in
-                  let other_ms =
-                    List.zip_exn near readings
-                    |> List.find_map ~f:(fun ((w, _), rs) ->
-                        if Poly.equal w who then None else List.min_elt rs ~compare:Float.compare)
-                    |> Option.value ~default:Float.nan
-                  in
-                  logf
-                    "playoff: segment %s: %s in shared windows (%.4f ms against %.4f ms; %.4f ms \
-                     and %.4f ms in the search)"
-                    (seg_key_tag key)
-                    (if swap then "the alternate replaces the incumbent" else "the incumbent stays")
-                    finals_ms other_ms alt_ms incumbent_ms;
-                  swap)
+            match
+              finals_settle ~what:"playoff finals" ~counted:n_playoff_finals
+                ~timed:n_playoff_finals_timed ~admitted:n_playoff_finals_admitted
+                ~incumbent:(contender incumbent incumbent_digest, incumbent_ms)
+                ~challenger:(contender alternate alt_digest, alt_ms)
+            with
+            | `Readings (swap, why) ->
+                logf "playoff: segment %s: %s (%.4f ms %s %.4f ms%s)" (seg_key_tag key)
+                  (if swap then "the alternate replaces the incumbent" else "the incumbent stays")
+                  alt_ms
+                  (if swap then "<" else ">=")
+                  incumbent_ms why;
+                swap
+            | `Finals (swap, finals_ms, other_ms) ->
+                logf
+                  "playoff: segment %s: %s in shared windows (%.4f ms against %.4f ms; %.4f ms and \
+                   %.4f ms in the search)"
+                  (seg_key_tag key)
+                  (if swap then "the alternate replaces the incumbent" else "the incumbent stays")
+                  finals_ms other_ms alt_ms incumbent_ms;
+                swap
           in
           (* With width 0 the playoff, its progress phase included, is skipped outright: the search
              times exactly what it timed before the playoff existed (gh-ocannl-1259). *)
@@ -11649,6 +11766,9 @@ let tune_in_stream_scope ~timing_state ~defer ~substituted ?name ?search ?beam_w
               fiss_sketch_playoff_finals_admitted = !n_playoff_finals_admitted;
               fiss_sketch_staffed_timed = !n_staffed_timed;
               fiss_sketch_backdrop_fallbacks = !n_backdrop_fallbacks;
+              staffed_finals = !n_staffed_finals;
+              staffed_finals_timed = !n_staffed_finals_timed;
+              staffed_finals_admitted = !n_staffed_finals_admitted;
               seeded_single_candidates = !n_seeded_single_candidates;
               seeded_single_timed = !n_seeded_single_timed;
               seeded_single_joins = !n_seeded_single_joins;

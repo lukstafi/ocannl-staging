@@ -797,8 +797,10 @@
 # alternate composite reading within this margin of the incumbent it challenges is re-timed with it
 # in four adjacent windows, and replaces it only by winning those -- one segment's swap almost
 # always reads that close, so nearly every playoff alternate costs four more compiles and windows.
-# 0 or less turns both off: the crown is then the entry that read fastest, and an alternate replaces
-# the incumbent by reading faster, as before. It shapes which timed candidate is crowned, not what a
+# So do the staffed sweeps' joins (`autotune_staffed_singles`, gh-ocannl-1698): a key's fastest
+# single reading within this margin of its incumbent joins the running composite only by winning
+# such a finals, at most one per key. 0 or less turns all three off: the crown is then the entry
+# that read fastest, and an alternate or a single beats its incumbent by reading faster, as before. It shapes which timed candidate is crowned, not what a
 # crowned schedule means, so a warm schedule cache replays its winner whatever the margin. No
 # profile sets it.
 #autotune_finals_margin=0.1
@@ -811,7 +813,9 @@
 # the best improves while the search seeds instead of only at the recombination composites it times
 # last, and a single's backdrop is the composite it would join (on gpt2_mini/CUDA the preset
 # backdrop was about ten times the composite's time). Times are compared only within one segment's
-# sweep, where the backdrop is the same; a staffed single that is refused is retried once without
+# sweep, where the backdrop is the same, and a near tie with the segment's incumbent, read in an
+# earlier window, is settled in a finals (`autotune_finals_margin`); a staffed single that is
+# refused is retried once without
 # its staff. The split-reduce sites are swept the same way, each site's split staffed with the
 # others'. Off by default: on gpt2_mini/CUDA it brought the first gain forward from the end of the
 # search to its start, but at about 30% more search time for the same crown (gh-ocannl-1138). On

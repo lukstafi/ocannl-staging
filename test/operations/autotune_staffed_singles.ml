@@ -46,6 +46,9 @@
    [ties] runs the playoff over a staffed search whose singles tie within each key: the last key's
    sweep ran inside the crowned composite already, so only the first key's alternates play.
 
+   [contended] decides a key's join in shared windows (gh-ocannl-1698): a near tie between the key's
+   fastest single and its incumbent, read in different windows, is settled by a finals of the two.
+
    Pinned to cc: the scripted ranking is backend-independent, and cc is always available. *)
 open Base
 open Ocannl
@@ -112,9 +115,9 @@ let finals_off = ("autotune_finals_margin", "0")
    [autotune_staffed_singles] and [autotune_composite_playoff_width] for this search only, and
    [~finals:true] leaves the finals at their default margin; [?start] gives the running composite
    its start; [?refuse] refuses (at pre-dispatch validation, a contained decline) every attempt
-   whose label it holds for. *)
+   whose label it holds for; [?offset] adds to a window's scripted reading (a contended window). *)
 let search ?(staffed = true) ?(finals = false) ?(log = false) ?(progress = false) ?keyed ?width
-    ?start ?refuse ?(cache_dir = "") ?chain ~tag ~cost () =
+    ?start ?refuse ?(offset = fun _ -> 0.) ?(cache_dir = "") ?chain ~tag ~cost () =
   let qg, comp = match chain with Some c -> c | None -> Fissioned_chain.chain_with_output () in
   let current = ref "" in
   let settings =
@@ -133,7 +136,7 @@ let search ?(staffed = true) ?(finals = false) ?(log = false) ?(progress = false
         match start with Some f -> f ~menu | None -> seeded)
     @@ fun () ->
     Scripted_search.search ~settings ~output:qg ~cache_dir ~log ~progress ~tag
-      ~measure:(fun w -> routine_ms ?keyed ~cost w.label)
+      ~measure:(fun w -> routine_ms ?keyed ~cost w.label +. offset w)
       comp
   in
   let report = o.report in
@@ -636,6 +639,109 @@ let () =
     (List.filter o.measured ~f:is_composite) ~f:(fun l ->
       not (List.mem alternates l ~equal:String.equal));
   p "ties finals: a tie keeps the running composite" (r.Autotune.fiss_sketch_playoff_swaps = 0)
+
+(* --- contended: a staffed join decided in shared windows (gh-ocannl-1698) --- *)
+
+(* Both keys start with a choice, as in [start]: the first key's [a0], the fastest of its key, and
+   the second key's [b0], which its sweep keeps (every other single of the second key is far
+   slower). The first key's sweep times [a0] first, staffed with [b0], and that FIRST window reads
+   0.3 ms slow, a contended window; its later windows read true. One other single of the first key,
+   [a1], reads near [a0]: 0.2 ms slower, so [a0] stays the key's true fastest; the rest read far
+   slower. A single joins by beating its incumbent, whose reading another window took.
+
+   With the finals off ([off]) [a1]'s reading undercuts [a0]'s contended one, and [a1] joins: every
+   single of the second key is staffed with it, the wrong join. With the default margin ([on]) the
+   two read within it, so a finals of the two decides: the palindrome a1 a0 a0 a1 (faster first
+   reading first) runs right after the first key's singles, [a0] wins it, and every single of the
+   second key is staffed with [a0]. [faster] is the control on the finals' direction: [a1] reads 0.1
+   ms FASTER than [a0], wins the same finals and joins. The playoff is off, so no other finals runs
+   before the beam's. *)
+let () =
+  let run ~finals ~a1_cost ~tag =
+    let a0 = ref "" and a1 = ref "" and b0 = ref "" in
+    let start ~menu =
+      match menu with
+      | [ (k1, ps1); (k2, ps2) ] ->
+          a0 := entry_of k1 (List.last_exn ps1);
+          a1 := entry_of k1 (List.hd_exn ps1);
+          b0 := entry_of k2 (List.last_exn ps2);
+          [ (k1, List.last_exn ps1); (k2, List.last_exn ps2) ]
+      | _ -> []
+    in
+    let cost entry =
+      if String.equal entry !a0 then 1.
+      else if String.equal entry !a1 then a1_cost
+      else if String.equal entry !b0 then 5.
+      else 20.
+    in
+    let seen = Hash_set.create (module String) in
+    let offset (w : Scripted_search.window) =
+      let first = not (Hash_set.mem seen w.label) in
+      Hash_set.add seen w.label;
+      if first && is_sketch w.label && List.equal String.equal (focus w.label) [ !a0 ] then 0.3
+      else 0.
+    in
+    let o = search ~finals ~width:0 ~start ~offset ~tag ~cost () in
+    let r = o.report in
+    Stdio.eprintf "%s (not part of the golden): staffed finals %d (%d windows, %d admitted)\n%!" tag
+      r.Autotune.staffed_finals r.Autotune.staffed_finals_timed r.Autotune.staffed_finals_admitted;
+    (o, !a0, !a1, !b0)
+  in
+  let off, a0, a1, b0 = run ~finals:false ~a1_cost:1.2 ~tag:"contended off" in
+  let on, a0', a1', b0' = run ~finals:true ~a1_cost:1.2 ~tag:"contended on" in
+  let faster, a0'', a1'', _ = run ~finals:true ~a1_cost:0.9 ~tag:"contended faster" in
+  p "contended: the seam gave both keys a choice, the first key a near-tie challenger"
+    ((not (String.is_empty a0))
+    && (not (String.is_empty a1))
+    && (not (String.equal a0 a1))
+    && String.equal a0 a0' && String.equal a0 a0'' && String.equal a1 a1' && String.equal a1 a1''
+    && String.equal b0 b0');
+  (* The singles of the key swept second, and the windows before its first one. *)
+  let second_key (o : observed) =
+    match keys o.measured with
+    | [ first; second ] when String.equal first (key_of a0) ->
+        let before =
+          List.take_while o.measured ~f:(fun l ->
+              not (is_single l && String.equal (key_of (List.hd_exn (focus l))) second))
+        in
+        Some (singles_of second o.measured, before)
+    | _ -> None
+  in
+  let staffed_with entry (o : observed) =
+    Option.exists (second_key o) ~f:(fun (seconds, _) ->
+        (not (List.is_empty seconds))
+        && List.for_all seconds ~f:(fun l -> List.equal String.equal (staff l) [ entry ]))
+  in
+  (* The flaw: [a1] read against [a0]'s contended window. *)
+  p "contended off: no staffed finals ran" (off.report.Autotune.staffed_finals = 0);
+  p
+    "contended off: a1 joined, read against a0's contended window: the second key is staffed with \
+     a1"
+    (staffed_with a1 off);
+  (* The fix. *)
+  p "contended on: one staffed finals, four windows, all admitted"
+    (on.report.Autotune.staffed_finals = 1
+    && on.report.Autotune.staffed_finals_timed = 4
+    && on.report.Autotune.staffed_finals_admitted = 4);
+  p
+    "contended on: the finals is the palindrome of a1 and a0, staffed with b0, before the second \
+     key"
+    (Option.exists (second_key on) ~f:(fun (_, before) ->
+         let last4 = List.drop before (List.length before - 4) in
+         List.length last4 = 4
+         && List.equal (List.equal String.equal) (List.map last4 ~f:focus)
+              [ [ a1 ]; [ a0 ]; [ a0 ]; [ a1 ] ]
+         && List.for_all last4 ~f:(fun l -> List.equal String.equal (staff l) [ b0 ])));
+  p "contended on: a0 won its finals and stayed: the second key is staffed with a0"
+    (staffed_with a0 on);
+  p "contended on: the finals' windows are not candidate or staffed windows"
+    (on.report.Autotune.candidates_timed = off.report.Autotune.candidates_timed
+    && on.report.Autotune.fiss_sketch_staffed_timed = off.report.Autotune.fiss_sketch_staffed_timed
+    );
+  (* The control: the finals decide by their readings, not for the incumbent. *)
+  p "contended faster: one staffed finals" (faster.report.Autotune.staffed_finals = 1);
+  p "contended faster: a1 won its finals and joined: the second key is staffed with a1"
+    (staffed_with a1 faster)
 
 (* --- heavy: the keys are swept heaviest first --- *)
 

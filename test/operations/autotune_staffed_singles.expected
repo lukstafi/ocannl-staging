@@ -50,6 +50,15 @@ ties finals: the same playoff alternates as with the finals off: true
 ties finals: every alternate was decided by a finals, four windows each, all admitted: true
 ties finals: the running composite was re-timed as an explicit composite, no alternate: true
 ties finals: a tie keeps the running composite: true
+contended: the seam gave both keys a choice, the first key a near-tie challenger: true
+contended off: no staffed finals ran: true
+contended off: a1 joined, read against a0's contended window: the second key is staffed with a1: true
+contended on: one staffed finals, four windows, all admitted: true
+contended on: the finals is the palindrome of a1 and a0, staffed with b0, before the second key: true
+contended on: a0 won its finals and stayed: the second key is staffed with a0: true
+contended on: the finals' windows are not candidate or staffed windows: true
+contended faster: one staffed finals: true
+contended faster: a1 won its finals and joined: the second key is staffed with a1: true
 heavy: the model weighs the second enumerated key the heavier: true
 heavy: the keys are swept heaviest first: true
 split: the first site is swept bare: true
