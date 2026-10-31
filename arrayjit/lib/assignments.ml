@@ -153,11 +153,7 @@ let buffers_of_accum_rhs : accum_rhs -> buffer list = function
     [Accum_op]'s [lhs] is read. *)
 let is_rev_sides = function Rev_sides _ -> true | _ -> false
 
-(** Folds [f] over the LEAF statements ([Accum_op], [Set_vec_unop], [Fetch]) in execution order,
-    skipping the [Noop] / [Seq] / [Block_comment] scaffolding. Descending is what the queries below
-    used to each write for themselves, and forgetting to descend through a [Block_comment] loses
-    statements silently -- so the recursion is written once. [f] still matches on {!t} (the leaf
-    kinds mean different things to different queries), and its scaffolding arm is unreachable. *)
+(* Documented in the interface: the queries below and the tests' finders share it. *)
 let fold_leaves (asgns : t) ~init ~f =
   let rec loop acc = function
     | Noop -> acc
@@ -167,7 +163,6 @@ let fold_leaves (asgns : t) ~init ~f =
   in
   loop init asgns
 
-(** {!fold_leaves} for a [f] that only has effects. *)
 let iter_leaves (asgns : t) ~f = fold_leaves asgns ~init:() ~f:(fun () leaf -> f leaf)
 
 let can_skip_accumulation ~projections =

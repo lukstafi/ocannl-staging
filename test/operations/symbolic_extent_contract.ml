@@ -42,11 +42,12 @@ let range = 4
 let width = 3
 let extents = [ 0; 2; range ]
 
-let rec find_accum ?(f = fun _ -> true) = function
-  | Asgns.Accum_op { rhs; _ } as a when f rhs -> Some a
-  | Asgns.Seq (a, b) -> Option.first_some (find_accum ~f a) (find_accum ~f b)
-  | Asgns.Block_comment (_, body) -> find_accum ~f body
-  | Asgns.Accum_op _ | Asgns.Noop | Asgns.Set_vec_unop _ | Asgns.Fetch _ -> None
+let find_accum ?(f = fun _ -> true) asgns =
+  Asgns.fold_leaves asgns ~init:None ~f:(fun found leaf ->
+      match leaf with
+      | Asgns.Accum_op { rhs; _ } when f rhs -> Option.first_some found (Some leaf)
+      | Asgns.Accum_op _ | Asgns.Set_vec_unop _ | Asgns.Fetch _ -> found
+      | Asgns.Noop | Asgns.Seq _ | Asgns.Block_comment _ -> found)
 
 let accum_of t = Option.value_exn ~here:[%here] (find_accum (Train.forward t).Asgns.asgns)
 

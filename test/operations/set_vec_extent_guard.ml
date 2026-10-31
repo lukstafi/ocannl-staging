@@ -24,17 +24,20 @@ let rejection f =
 let says rejection substring =
   Option.value_map rejection ~default:false ~f:(String.is_substring ~substring)
 
-let rec find_set_vec = function
-  | Asgns.Set_vec_unop { op; lhs; rhs; projections; _ } -> Some (op, lhs, rhs, projections)
-  | Seq (a, b) -> Option.first_some (find_set_vec a) (find_set_vec b)
-  | Block_comment (_, body) -> find_set_vec body
-  | Noop | Accum_op _ | Fetch _ -> None
+let find_set_vec asgns =
+  Asgns.fold_leaves asgns ~init:None ~f:(fun found leaf ->
+      match leaf with
+      | Asgns.Set_vec_unop { op; lhs; rhs; projections; _ } ->
+          Option.first_some found (Some (op, lhs, rhs, projections))
+      | Accum_op _ | Fetch _ -> found
+      | Noop | Seq _ | Block_comment _ -> found)
 
-let rec find_accum_projections = function
-  | Asgns.Accum_op { projections; _ } -> Some projections
-  | Seq (a, b) -> Option.first_some (find_accum_projections a) (find_accum_projections b)
-  | Block_comment (_, body) -> find_accum_projections body
-  | Noop | Set_vec_unop _ | Fetch _ -> None
+let find_accum_projections asgns =
+  Asgns.fold_leaves asgns ~init:None ~f:(fun found leaf ->
+      match leaf with
+      | Asgns.Accum_op { projections; _ } -> Option.first_some found (Some projections)
+      | Set_vec_unop _ | Fetch _ -> found
+      | Noop | Seq _ | Block_comment _ -> found)
 
 let () =
   Tensor.unsafe_reinitialize ();

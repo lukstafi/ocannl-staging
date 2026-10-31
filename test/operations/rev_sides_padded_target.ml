@@ -44,11 +44,12 @@ let cols = 4
 let extra = 2
 let kernel_vals = [| 1.; 2.; 4. |]
 
-let rec find_rev_sides = function
-  | Asgns.Accum_op { rhs = Asgns.Rev_sides _; _ } as a -> Some a
-  | Asgns.Seq (a, b) -> Option.first_some (find_rev_sides a) (find_rev_sides b)
-  | Asgns.Block_comment (_, body) -> find_rev_sides body
-  | Asgns.Accum_op _ | Asgns.Noop | Asgns.Set_vec_unop _ | Asgns.Fetch _ -> None
+let find_rev_sides asgns =
+  Asgns.fold_leaves asgns ~init:None ~f:(fun found leaf ->
+      match leaf with
+      | Asgns.Accum_op { rhs = Asgns.Rev_sides _; _ } -> Option.first_some found (Some leaf)
+      | Asgns.Accum_op _ | Asgns.Set_vec_unop _ | Asgns.Fetch _ -> found
+      | Asgns.Noop | Asgns.Seq _ | Asgns.Block_comment _ -> found)
 
 let ndarray ~grad dims values =
   Tensor.ndarray

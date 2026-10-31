@@ -54,6 +54,17 @@ type t =
   | Fetch of { array : Tnode.t; fetch_op : fetch_op; dims : int array Utils.Lazy.t }
 [@@deriving sexp_of]
 
+val fold_leaves : t -> init:'a -> f:('a -> t -> 'a) -> 'a
+(** Folds [f] over the LEAF statements ([Accum_op], [Set_vec_unop], [Fetch]) in execution order,
+    skipping the [Noop] / [Seq] / [Block_comment] scaffolding. Descending is what this module's
+    queries and the tests' finders used to each write for themselves, and forgetting to descend
+    through a [Block_comment] loses statements silently -- so the recursion is written once. [f]
+    still matches on {!t} (the leaf kinds mean different things to different queries), and its
+    scaffolding arm is unreachable (gh-ocannl-818 would give the leaves a type of their own). *)
+
+val iter_leaves : t -> f:(t -> unit) -> unit
+(** {!fold_leaves} for a [f] that only has effects. *)
+
 type side = Fwd | Bprop [@@deriving sexp, compare, equal]
 
 (** A code fragment generated from a tensor, identified by its owner node and side (gh-ocannl-1724):
