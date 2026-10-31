@@ -446,6 +446,43 @@ let run_unary_gradients () =
       Shape.set_dim k 3;
       r)
 
+(* gh-ocannl-1734: the binary route re-elaborates the spec with fresh variables in the same two
+   places as the one-operand route -- [derive_projections]' local solve (through
+   [Shape.einsum_n_constraints]) and, for a max-family backward, the [*_pspace] gate proxy -- so a
+   captured kernel that neither operand carries needs the same capture tie there. The second operand
+   is a one-cell constant over [s]: 1 under a sum, 0 under a max, so each form is the one-operand
+   window above. *)
+let run_uncarried_kernel_binary () =
+  let win = { stride = 2; offset = 1; dilation = 1 } in
+  executes "binary padded sum 2*o=+1+k; s, kernel 3 on neither operand" ~dims:[| 1; 4 |]
+    ~want:(padded_window win (ramp 8) (ones 3))
+    (fun () ->
+      let x = computed [ 1; 8 ] (ramp 8) in
+      let y = ndarray [ 1 ] [| 1. |] in
+      let%op r = x +* "s, 2*o=+1+k; s => s, o" [ "k" ] y in
+      Shape.set_dim k 3;
+      r);
+  executes "binary padded max 2*o=+1+k; s, kernel 3 on neither operand" ~dims:[| 1; 4 |]
+    ~want:(padded_window ~reduce:`Max win (ramp 8) (zeros 3))
+    (fun () ->
+      let x = computed [ 1; 8 ] (ramp 8) in
+      let y = ndarray [ 1 ] [| 0. |] in
+      let%op r = x @^+ "s, 2*o=+1+k; s => s, o" [ "k" ] y in
+      Shape.set_dim k 3;
+      r);
+  unary_gradient "gradient of binary padded sum 2*o=+1+k; s, kernel on neither operand" win ~n:8
+    ~kk:3 (fun x ->
+      let y = ndarray [ 1 ] [| 1. |] in
+      let%op r = x +* "s, 2*o=+1+k; s => s, o" [ "k" ] y in
+      Shape.set_dim k 3;
+      r);
+  unary_gradient ~reduce:`Max "gradient of binary padded max 2*o=+1+k; s, kernel on neither operand"
+    win ~n:8 ~kk:3 (fun x ->
+      let y = ndarray [ 1 ] [| 0. |] in
+      let%op r = x @^+ "s, 2*o=+1+k; s => s, o" [ "k" ] y in
+      Shape.set_dim k 3;
+      r)
+
 (* {2 Refused coefficients} *)
 
 type outcome = Refused_at_construction of string | Refused_later of string | Ran
@@ -571,5 +608,6 @@ let () =
   run_gradients ();
   run_unary_forms ();
   run_unary_gradients ();
+  run_uncarried_kernel_binary ();
   run_unsized_kernels ();
   run_refusals ()

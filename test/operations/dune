@@ -651,6 +651,15 @@
   (pps ppx_here)))
 
 (test
+ ; ocannl-backend: none -- builds a projection environment by hand through Row.solve_proj_equations
+ ; and indexes window axes with Row.get_dim_index; there is no lowering and no context in the run.
+ (name affine_dim_index_kernel)
+ (package neural_nets_lib)
+ (deps ocannl_config)
+ (modules affine_dim_index_kernel)
+ (libraries base ocannl stdio arrayjit.verdict))
+
+(test
  ; ocannl-backend: none -- hand-built Dim_ineq/Dim_eq through Row.solve_inequalities; the solver
  ; runs before any backend is chosen.
  (name test_concat_dim_solver)
