@@ -312,7 +312,11 @@ type round_moves = {
 }
 
 (* gh-ocannl-1635: how the beam finals decided the crown. See the interface. *)
-type finals_outcome = Finals_not_run | Finals_kept | Finals_swapped | Finals_inconclusive
+type finals_outcome = SC.finals_outcome =
+  | Finals_not_run
+  | Finals_kept
+  | Finals_swapped
+  | Finals_inconclusive
 
 let finals_outcome_name = function
   | Finals_not_run -> "not run"
@@ -320,7 +324,7 @@ let finals_outcome_name = function
   | Finals_swapped -> "swapped"
   | Finals_inconclusive -> "inconclusive"
 
-type finals_contender = {
+type finals_contender = SC.finals_contender = {
   contender_label : string;
   contender_search_ms : float;
   contender_finals_ms : float option;
@@ -8702,10 +8706,17 @@ let tune_in_stream_scope ~timing_state ~defer ~substituted ?name ?search ?beam_w
                     cache_replay_refusal = None;
                     rounds_run = 0;
                     round_moves = [];
-                    finals = [];
+                    (* gh-ocannl-1725: facts about the crown, like [best_ms], so the replay explains
+                       its own times as the storing search's report did; the finals' window counts
+                       describe this call, which timed none. An entry older than the record replays
+                       as finals that did not run. *)
+                    finals =
+                      Option.value_map entry.SC.finals ~default:[] ~f:(fun f -> f.SC.contenders);
                     finals_timed = 0;
                     finals_admitted = 0;
-                    finals_outcome = Finals_not_run;
+                    finals_outcome =
+                      Option.value_map entry.SC.finals ~default:Finals_not_run ~f:(fun f ->
+                          f.SC.outcome);
                     (* A fact about the crown, like [best_ms] (gh-ocannl-1409). *)
                     budget_cut = entry.SC.budget_cut;
                     budget_s;
@@ -11269,6 +11280,9 @@ let tune_in_stream_scope ~timing_state ~defer ~substituted ?name ?search ?beam_w
                      Some
                        { SC.search_shape = Lazy.force search_shape; steps = List.rev !best_steps };
                    budget_cut = !budget_cut;
+                   (* gh-ocannl-1725: what explains [best_ms] against the other readings above, so
+                      the replay can explain it too. *)
+                   finals = Some { SC.outcome = !finals_outcome; contenders = !finals_record };
                  });
           (* Diagnostic control (config [autotune_log], or [tune]'s [?log]): compile and time the
              UNTUNED default pipeline in this very process, on the search context — discriminates a

@@ -303,6 +303,26 @@ val segmentation_of : saved_segment list -> Schedule.segmentation
 (** The segmentation saved segments record: what a replay passes to {!Schedule.fission_segmented}.
 *)
 
+(** How the beam finals decided a crown (gh-ocannl-1635): defined here so that a cache entry can
+    carry it (gh-ocannl-1725), and re-exported as [Autotune.finals_outcome], whose documentation
+    owns its meaning. *)
+type finals_outcome = Finals_not_run | Finals_kept | Finals_swapped | Finals_inconclusive
+[@@deriving sexp, equal]
+
+type finals_contender = {
+  contender_label : string;  (** The label the contender was timed under in the search. *)
+  contender_search_ms : float;  (** Its reading in the search, the one the beam ranked it by. *)
+  contender_finals_ms : float option; [@sexp.option]
+      (** The least of its admitted finals readings; [None] when none was admitted. *)
+}
+[@@deriving sexp, equal]
+(** One beam-finals contender (gh-ocannl-1635), re-exported as [Autotune.finals_contender]. *)
+
+type finals_record = { outcome : finals_outcome; contenders : finals_contender list }
+[@@deriving sexp, equal]
+(** A search's beam finals as its cache entry keeps them (gh-ocannl-1725): the outcome and the
+    contenders, in the order [Autotune.report.finals] lists them. *)
+
 type entry = {
   version : int;
   backend : string;
@@ -371,6 +391,15 @@ type entry = {
           [Autotune.tune] replays such an entry only for a call that has a budget too; a call
           without one searches in full and overwrites it. Serialized only when set ([@sexp.bool]),
           so entries written before the field read as uncut, which they are. *)
+  finals : finals_record option; [@sexp.option]
+      (** The storing search's beam finals (gh-ocannl-1725): its [Autotune.report.finals_outcome]
+          and [finals], which [Autotune.tune] replays beside [best_ms], so a replayed report
+          explains its own times -- a [best_ms] above another entry's stored reading -- as the
+          storing search's report did ([Autotune.finals_outranked]). Every entry stores one,
+          [Finals_not_run] with no contenders included, so [None] means only an entry written before
+          the field, which reads as "no finals record" and replays as finals that did not run.
+          Unlike the optional measurements above, its arrival bumped {!entry_version}: an entry
+          without it would replay a crown whose times nothing explains. *)
 }
 [@@deriving sexp]
 

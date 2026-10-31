@@ -1327,12 +1327,16 @@ type round_moves = {
     the finals crowned the entry the search's own readings put first. [Finals_swapped]: they crowned
     another. [Finals_inconclusive]: some contender has no admitted finals reading (a refused, failed
     or budget-stopped window), so the crown is the search's readings' head, as without finals. *)
-type finals_outcome = Finals_not_run | Finals_kept | Finals_swapped | Finals_inconclusive
+type finals_outcome = Ir.Schedule_cache.finals_outcome =
+  | Finals_not_run
+  | Finals_kept
+  | Finals_swapped
+  | Finals_inconclusive
 
 val finals_outcome_name : finals_outcome -> string
 (** ["not run"], ["kept"], ["swapped"] or ["inconclusive"]. *)
 
-type finals_contender = {
+type finals_contender = Ir.Schedule_cache.finals_contender = {
   contender_label : string;  (** The label the contender was timed under in the search. *)
   contender_search_ms : float;  (** Its reading in the search, the one the beam ranked it by. *)
   contender_finals_ms : float option;
@@ -1360,7 +1364,10 @@ val finals_contenders : margin:float -> width:int -> ('a * float) list -> ('a * 
     faster than every contender: each such entry was evicted from a beam (or a round's accumulator)
     by [beam_width] faster ones, all in the pool. So a report's [best_ms] -- the crown's SEARCH
     reading -- exceeds such an entry's reading only when the entry was a contender that the finals
-    ranked behind the crown ({!finals_outranked}). A beam of one holds no finals. *)
+    ranked behind the crown ({!finals_outranked}). A beam of one holds no finals. The composite
+    playoff's windows are such entries, ranked by their search readings like any candidate's: its
+    swaps choose which composites are built and timed next, never the crown, so the same holds for a
+    fissioned crown, and a playoff swap needs no record of its own (gh-ocannl-1725). *)
 
 val finals_order : 'a list -> 'a list
 (** The finals' windows, in order: the contenders, then the same in reverse, so each is timed twice
@@ -1564,7 +1571,10 @@ type report = {
           search-disabled calls, and for [~rounds:0]. *)
   finals : finals_contender list;
       (** The entries the beam finals re-timed together, with their readings (gh-ocannl-1635,
-          {!finals_contenders}): empty when they did not run. *)
+          {!finals_contenders}): empty when they did not run. On a {!Cache_replay} they are the
+          storing search's, replayed from its entry ([finals] of {!Ir.Schedule_cache.entry},
+          gh-ocannl-1725) beside [best_ms]: like the times, a fact about the crown, so a replayed
+          report explains its own times ({!finals_outranked}) as the searched one did. *)
   finals_timed : int;
       (** The finals' windows that ran, admitted or not: twice the contenders unless a recompile
           failed or the budget stopped one. Counted here and NOT in [candidates_timed], nor among
@@ -1575,7 +1585,9 @@ type report = {
       (** Whether the finals ran, and whether their crown is the search readings' head. [best_ms],
           [best_label] and [best_spread] describe the crown either way, [best_ms] being the crown's
           reading in the search, not in the finals (the [autotune_log] line [finals: ...] has both).
-      *)
+          On a {!Cache_replay}, the storing search's, as [finals] is, while [finals_timed] and
+          [finals_admitted] count this call's windows (none); [Finals_not_run] for an entry that
+          carries no finals record. *)
   budget_cut : bool;
       (** The crown comes from a search that stopped proposing candidates because its wall-clock
           budget (config [autotune_budget_seconds], gh-ocannl-1409, or its [call_share_s] of an

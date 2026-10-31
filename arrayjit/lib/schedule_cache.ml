@@ -685,6 +685,22 @@ let save_segments ?static_indices segmentation tuples =
 
 let segmentation_of segs = List.map segs ~f:(fun s -> (s.seg_kind, s.seg_units))
 
+(* gh-ocannl-1635: how the beam finals decided a crown, re-exported as [Autotune.finals_outcome];
+   defined here so a cache entry can carry it (gh-ocannl-1725). See the interface. *)
+type finals_outcome = Finals_not_run | Finals_kept | Finals_swapped | Finals_inconclusive
+[@@deriving sexp, equal]
+
+type finals_contender = {
+  contender_label : string;
+  contender_search_ms : float;
+  contender_finals_ms : float option; [@sexp.option]
+}
+[@@deriving sexp, equal]
+
+(* gh-ocannl-1725: the storing search's beam finals, as its entry keeps them. See the interface. *)
+type finals_record = { outcome : finals_outcome; contenders : finals_contender list }
+[@@deriving sexp, equal]
+
 type entry = {
   version : int;
   backend : string;
@@ -752,6 +768,11 @@ type entry = {
           [Autotune.tune] replays such an entry only for a call that has a budget too; a call
           without one searches in full and overwrites it. Serialized only when set ([@sexp.bool]),
           so entries written before the field read as uncut, which they are. *)
+  finals : finals_record option; [@sexp.option]
+      (** The storing search's beam finals ([Autotune.report.finals] and [finals_outcome],
+          gh-ocannl-1725), so a replay explains its own times as the searched report does. Absent
+          for entries written before the field, which read as "no finals record". See the interface.
+      *)
 }
 [@@deriving sexp]
 
@@ -759,7 +780,10 @@ type entry = {
    stored crown is the best of the menu that searched it; once the menu offers a candidate the search
    never timed, the entry is still a sound schedule but no longer the answer the key asks for, and a
    warm cache would replay it forever. Non-current entries read as misses, so the next search
-   re-tunes and overwrites. A bump appends its own line to the history below, which
+   re-tunes and overwrites. An added optional field needs no bump -- older entries read it as
+   absent -- unless every replay must carry it to keep a contract the searched report keeps: the
+   finals record (gh-ocannl-1725), without which a replayed [best_ms] above another stored reading
+   would be unexplained. A bump appends its own line to the history below, which
    [test/operations/cache_version_history] holds to the constant: two parallel bumps then conflict
    in git rather than merging onto one number. A gap is a value claimed by a change that landed
    under a later one; a retired value keeps its line, since entries stored under it may still be on
@@ -784,8 +808,9 @@ type entry = {
    19: gh-ocannl-1397 -- a strided 1x1 conv's GEMM row is the taller of b and ow: new seeds at b 2-8
    20: gh-ocannl-1459 -- the contraction-coalesced menu grows a 64x64 block, tensorized and fused leaves
    21: gh-ocannl-1664 -- per-segment singles timed inside the seeded plan, where one is seeded
+   22: gh-ocannl-1725 -- the storing search's beam finals record, so every replay explains its times
 *)
-let entry_version = 21
+let entry_version = 22
 
 let sanitize name =
   String.map name ~f:(fun c ->

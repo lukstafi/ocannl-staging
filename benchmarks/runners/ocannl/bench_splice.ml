@@ -419,6 +419,7 @@ let arm_entry plan arm key (c : SC.entry) =
             mma_best_ms = None;
             best_steps = None;
             budget_cut = false;
+            finals = None;
             segments =
               Some
                 (List.map2_exn rows ts ~f:(fun r (t : SC.saved_segment) ->

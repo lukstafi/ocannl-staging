@@ -64,6 +64,7 @@ open Base
 open Ocannl
 open Ocannl.Operation.DSL_modules
 open Verdict.Claims
+module Cache_plant = Test_utils.Cache_plant
 
 let is_single = Fissioned_chain.is_single
 let is_composite = Fissioned_chain.is_composite
@@ -434,7 +435,7 @@ let () =
    as with the finals off; those refusals count neither as candidate refusals nor as playoff
    windows. *)
 let () =
-  let search ?(refuse_r_finals = false) ~finals_margin ~tag () =
+  let search ?(refuse_r_finals = false) ?(lucky_r = false) ?cache_dir ~finals_margin ~tag () =
     let r = ref None and windows_of = Hashtbl.create (module String) and calls = ref [] in
     let composite (w : Scripted_search.window) =
       let k = Option.value (Hashtbl.find windows_of w.label) ~default:0 in
@@ -442,7 +443,7 @@ let () =
       if Option.is_none !r then r := Some w.label;
       let r = Option.value_exn !r in
       if String.equal w.label r then
-        if k = 0 then 10.5 else if refuse_r_finals then Float.nan else 10.
+        if k = 0 then if lucky_r then 9.5 else 10.5 else if refuse_r_finals then Float.nan else 10.
       else
         let r = entries r and e = entries w.label in
         if List.length r <> List.length e then 1000.
@@ -457,7 +458,7 @@ let () =
       Autotune.with_timing_call_observer
         (fun c -> calls := c :: !calls)
         (fun () ->
-          Scripted_search.search ~settings ~log:false ~tag
+          Scripted_search.search ~settings ?cache_dir ~log:false ~tag
             ~measure:(fun w ->
               if is_single w.label then 100.
               else if is_composite w.label then composite w
@@ -532,4 +533,94 @@ let () =
     (match changed r_refused (crown refused) with 0 :: _ -> true | _ -> false);
   p "refused: the finals' refusals are not the search's"
     (refused.report.Autotune.timings_contended = off.report.Autotune.timings_contended
-    && refused.report.Autotune.timings_unreadable = off.report.Autotune.timings_unreadable)
+    && refused.report.Autotune.timings_unreadable = off.report.Autotune.timings_unreadable);
+  (* gh-ocannl-1725: a fissioned crown whose search reading sits above a reading the playoff ranked,
+     explained by the record the report carries -- on the search, and on its replay. R's first
+     window reads 9.5 ms, lucky, below the true best's 9.7 ms; its later windows read its true 10
+     ms. The playoff's finals keep R against the first segment's alternates and swap the true best
+     in at the second, but the playoff only chooses which composites are built next: every playoff
+     window enters the beam by its search reading, so the beam's head is still R. The beam finals
+     then re-time R against the true best and crown the true best at its search reading, 9.7 ms,
+     above R's 9.5 -- which the finals record explains ([Autotune.finals_outranked]), so the claim
+     "every candidate's search reading is no faster than the crown's, or was outranked" holds for a
+     fissioned crown the playoff swapped in, with no record of the playoff's own. The search stores
+     its entry; a replay of it carries the same record and explains its own times, and the same
+     entry stripped of the record -- the shape of an entry written before the record existed --
+     replays as finals that did not run, leaving R's reading unexplained. *)
+  let cache_dir = "autotune_cache_playoff_lucky" in
+  Scripted_search.clear_cache_dir cache_dir;
+  let lucky, r_lucky, _ =
+    search ~lucky_r:true ~cache_dir ~finals_margin:None ~tag:"contended lucky" ()
+  in
+  (* Every candidate's search reading: its first admitted window, the one the beam ranked it by. A
+     later window of the same label is a finals window. *)
+  let search_readings (o : Scripted_search.observed) =
+    List.fold o.windows ~init:[] ~f:(fun acc ((w : Scripted_search.window), ms) ->
+        if List.Assoc.mem acc ~equal:String.equal w.label then acc else (w.label, ms) :: acc)
+    |> List.rev
+  in
+  let readings = search_readings lucky in
+  let r_ms = List.Assoc.find readings ~equal:String.equal r_lucky in
+  (* Seed-only ([~rounds:0]), so no rejected round's band applies. *)
+  let explained (r : Autotune.report) ms =
+    Float.(r.Autotune.best_ms <= ms) || Autotune.finals_outranked r ~search_ms:ms
+  in
+  let unrecorded (r : Autotune.report) =
+    { r with Autotune.finals_outcome = Autotune.Finals_not_run; finals = [] }
+  in
+  p "lucky: R's first window is the fastest search reading"
+    (Option.exists r_ms ~f:(fun r_ms ->
+         Float.equal r_ms 9.5 && List.for_all readings ~f:(fun (_, ms) -> Float.(ms >= r_ms))));
+  p "lucky: the playoff swapped only the true best in, and the beam finals crowned it over R"
+    (lucky.report.Autotune.fiss_sketch_playoff_swaps = 1
+    && true_best ~r:r_lucky (crown lucky)
+    && Poly.equal lucky.report.Autotune.finals_outcome Autotune.Finals_swapped
+    && Float.equal lucky.report.Autotune.best_ms 9.7);
+  p_all
+    "lucky: every candidate's search reading is no faster than the crown's, or was outranked in \
+     the beam finals"
+    readings ~f:(fun (_, ms) -> explained lucky.report ms);
+  p "lucky control: without the finals record, R's reading under the crown's is unexplained"
+    (Option.exists r_ms ~f:(fun r_ms -> not (explained (unrecorded lucky.report) r_ms)));
+  let replay ~tag =
+    Scripted_search.search ~cache_dir ~log:false ~tag
+      ~measure:(fun _ -> 1000.)
+      (Fissioned_chain.chain ())
+  in
+  let replayed (o : Scripted_search.observed) =
+    match o.report.Autotune.outcome with Autotune.Cache_replay -> true | _ -> false
+  in
+  let warm = replay ~tag:"contended lucky replay" in
+  Cache_plant.unless_unkeyed_or_refused ~identity:warm.identity (lucky.ios @ warm.ios)
+    "lucky replay: the replay carries the storing search's finals and times, and explains them"
+    (replayed warm
+    && Poly.equal warm.report.Autotune.finals_outcome lucky.report.Autotune.finals_outcome
+    && List.equal Ir.Schedule_cache.equal_finals_contender warm.report.Autotune.finals
+         lucky.report.Autotune.finals
+    && Float.equal warm.report.Autotune.best_ms lucky.report.Autotune.best_ms
+    && warm.report.Autotune.finals_timed = 0
+    && List.for_all readings ~f:(fun (_, ms) -> explained warm.report ms));
+  (* The stored entry, re-stored without its record. *)
+  let stored_key =
+    List.find_map lucky.ios ~f:(fun (io : Ir.Schedule_cache.cache_io) ->
+        match io.op with
+        | Ir.Schedule_cache.Store when Option.is_none io.refusal -> Some io.key
+        | _ -> None)
+  in
+  let stripped, strip_ios =
+    Ir.Schedule_cache.recording_cache_io (fun () ->
+        Option.bind stored_key ~f:(fun key ->
+            Option.map (Ir.Schedule_cache.lookup ~dir:cache_dir ~key:(Some key)) ~f:(fun entry ->
+                Ir.Schedule_cache.store ~dir:cache_dir ~key:(Some key) { entry with finals = None };
+                Option.is_some entry.Ir.Schedule_cache.finals)))
+  in
+  let legacy = replay ~tag:"contended lucky legacy replay" in
+  Cache_plant.unless_unkeyed_or_refused ~identity:legacy.identity
+    (lucky.ios @ strip_ios @ legacy.ios)
+    "lucky legacy: an entry without the record replays as finals that did not run, leaving R's \
+     reading unexplained"
+    (Option.equal Bool.equal stripped (Some true)
+    && replayed legacy
+    && Poly.equal legacy.report.Autotune.finals_outcome Autotune.Finals_not_run
+    && List.is_empty legacy.report.Autotune.finals
+    && Option.exists r_ms ~f:(fun r_ms -> not (explained legacy.report r_ms)))
