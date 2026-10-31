@@ -3,22 +3,27 @@
 
    - A lineage the caller releases, leaves first, gives back its buffers: the pool table's working
    pools and the device's used-memory gauge return to the baseline (on cc a GC finalizer frees the
-   host buffer once the table lets go of it, so there the gauge is the GC's own witness), the
-   driver's free bytes come back where the backend has a driver reading (CUDA, HIP), and the graph's
-   nodes and the parameter's host-init array are reclaimed. Before gh-ocannl-1747 the device's
-   writer-event table ([updating_for]) held every node a routine or an upload ever wrote, for the
-   life of the device, so no dropped graph's nodes -- nor, through them, its host-init data -- were
-   ever collected. - The negative control: an unreleased lineage keeps its pools in the pool table,
-   bytes the driver confirms are gone (gh-ocannl-550: release is the only path back), though no
-   longer its nodes. - Two retentions deferred to gh-ocannl-1762, pinned as they stand so that its
-   fix flips them: [Train.forward_once]'s initialization context, which the caller never holds,
-   keeps the parameter's pool after the returned context is released; and a fresh graph's host
-   literal keeps a device-wide constant pool, and its node, until device teardown.
+   host buffer once the table lets go of it, so there the gauge is the GC's own witness), every pool
+   the window allocated is counted freed, and the graph's nodes and the parameter's host-init array
+   are reclaimed. Before gh-ocannl-1747 the device's writer-event table ([updating_for]) held every
+   node a routine or an upload ever wrote, for the life of the device, so no dropped graph's nodes
+   -- nor, through them, its host-init data -- were ever collected. - The negative control: an
+   unreleased lineage keeps its pools in the pool table, exactly their bytes and nothing else
+   (gh-ocannl-550: release is the only path back), though no longer its nodes. - Two retentions
+   deferred to gh-ocannl-1762, pinned as they stand so that its fix flips them:
+   [Train.forward_once]'s initialization context, which the caller never holds, keeps the
+   parameter's pool after the returned context is released; and a fresh graph's host literal keeps a
+   device-wide constant pool, and its node, until device teardown.
 
    Witnesses are [Weak] observers taken in [@inline never] builders that return no other reference
    to the graph; every reading clears the bounded analysis cache and follows [Gc.full_major] twice
    and [Gc.compact]. A graph's writer events are pruned at the next write, so each case runs one
-   more graph before it reads. *)
+   more graph before it reads.
+
+   Every memory claim reads the process's own accounting ([Alloc_census], the backend's used gauge),
+   never the driver's free bytes (gh-ocannl-1798): those are device-wide, so any other process on
+   the GPU -- the suite's concurrent GPU tests included -- moves them between two readings. They are
+   printed on stderr, as information. *)
 open Base
 open Ocannl
 open Nn_blocks.DSL_modules
@@ -45,6 +50,9 @@ type reading = {
   working : int;
   working_bytes : int;
   constant_bytes : int;
+  pool_bytes : int;
+  allocated : int;
+  freed : int;
   used : int;
   free : int option;
 }
@@ -60,25 +68,28 @@ let read () =
     working = c.live_working_pools;
     working_bytes = c.live_working_bytes;
     constant_bytes = c.live_constant_bytes;
+    pool_bytes = Census.live_pool_bytes c;
+    allocated = c.working_pools_allocated + c.constant_pools_allocated;
+    freed = c.pools_freed;
     used = Context.get_used_memory probe;
     free = Option.map (Context.get_free_and_total_memory probe) ~f:fst;
   }
 
 let show name r =
   Stdio.eprintf
-    "%s: working pools %d (%d bytes), constant %d bytes, used %d, driver free %s (not part of the \
-     golden)\n\
+    "%s: working pools %d (%d bytes), constant %d bytes, pools allocated %d freed %d, used %d, \
+     driver free %s (not part of the golden)\n\
      %!"
-    name r.working r.working_bytes r.constant_bytes r.used
+    name r.working r.working_bytes r.constant_bytes r.allocated r.freed r.used
     (Option.value_map r.free ~default:"-" ~f:Int.to_string)
 
-let backend = Context.backend_name (Context.auto ())
-let driver = Option.is_some (Context.get_free_and_total_memory (Context.auto ()))
+(* How far the driver's free bytes moved from [before] to [after]: device-wide, so information
+   only. *)
+let show_driver name ~before ~after =
+  Option.iter (Option.both before.free after.free) ~f:(fun (b, a) ->
+      Stdio.eprintf "%s: driver free bytes moved by %d (not part of the golden)\n%!" name (a - b))
 
-(* The driver's free bytes rose by at least [delta] from [before] to [after] ([delta] may be
-   negative). Read only where [driver] holds. *)
-let free_rose ~before ~after ~delta =
-  match (before.free, after.free) with Some b, Some a -> a - b >= delta | _ -> false
+let backend = Context.backend_name (Context.auto ())
 
 type built = {
   nodes : Stdlib.Obj.t Stdlib.Weak.t list;
@@ -157,15 +168,18 @@ let () =
       p "released: the live working pools are back to the baseline"
         (after.working = before.working && after.working_bytes = before.working_bytes);
       p "released: the device's used-memory gauge is back to the baseline" (after.used = before.used);
-      gated ~when_:driver ~on:backend
-        "released: the driver's free bytes came back (within half a buffer)"
-        (free_rose ~before ~after ~delta:(-(List.hd_exn built).bytes / 2));
+      show_driver "released" ~before ~after;
+      p "released: every pool the window allocated was freed, and the pool bytes are back"
+        (after.allocated > before.allocated
+        && after.freed - before.freed = after.allocated - before.allocated
+        && after.pool_bytes = before.pool_bytes);
       p_all "released: every graph's nodes are reclaimed" built ~f:(fun b ->
           List.for_all b.nodes ~f:reclaimed);
       p_all "released: every parameter's host-init array is reclaimed" built ~f:(fun b ->
           reclaimed b.host_init));
   case "an unreleased lineage keeps its pools, not its graph" (fun () ->
       let before = read () in
+      show "unreleased: before" before;
       let built = builds ~from:11 (lineage ~release:false) in
       one_more 19;
       let after = read () in
@@ -174,10 +188,11 @@ let () =
       p_all "unreleased: every graph computed t = 2 w" built ~f:(fun b -> b.computed);
       p "unreleased: two working pools per graph stay in the pool table (gh-ocannl-550)"
         (after.working - before.working = 2 * graphs
-        && after.working_bytes - before.working_bytes >= 2 * graphs * bytes);
-      gated ~when_:driver ~on:backend
-        "unreleased: the driver's free bytes fell by the pools' bytes (within half a buffer)"
-        (free_rose ~before:after ~after:before ~delta:((2 * graphs * bytes) - (bytes / 2)));
+        && after.working_bytes - before.working_bytes = 2 * graphs * bytes);
+      show_driver "unreleased" ~before ~after;
+      p "unreleased: exactly those pools are left unfreed, and the pool bytes grew by theirs alone"
+        (after.allocated - before.allocated - (after.freed - before.freed) = 2 * graphs
+        && after.pool_bytes - before.pool_bytes = 2 * graphs * bytes);
       p_all "unreleased: every graph's nodes are reclaimed all the same" built ~f:(fun b ->
           List.for_all b.nodes ~f:reclaimed));
   case "gh-ocannl-1762: forward_once's initialization context keeps the parameter's pool" (fun () ->
