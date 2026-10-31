@@ -4,11 +4,13 @@
 # reads READY with exit 0, and each item's gap -- no venv, a failed import, a drifted or missing
 # requirements record, a torch build for the wrong device, a device that refuses, crashes or hangs,
 # no Python.h, drivers resolving another interpreter, no toolchain, an absent or unrecorded
-# fixture -- reads GAP on that item with exit 1. Usage errors exit 2, and every box the checked-in
-# DIGESTS.txt declares has a profile (the relationship, not a copy of the box list).
+# fixture, a fixture name the box has no DIGESTS row for (by name, without the bytes) -- reads GAP on
+# that item with exit 1. Usage errors exit 2, and every box the checked-in DIGESTS.txt declares has
+# a profile (the relationship, not a copy of the box list).
 # gh-ocannl-1433: a fresh worktree's drivers find the box's shared venv (route named, and its
 # absence still a GAP), and the fleet's names for the boxes are taken -- pinned against wake-lab.sh's
-# endpoint map and FLEET_BOXES where this host can read them.
+# endpoint map and FLEET_BOXES where this host can read them; a fleet box that measures nothing
+# (macbook-pro) is on that roster and is refused by name.
 # Usage: benchmarks/test-check-box.sh [--keep|--only REGEX|--help]
 #
 # The subject runs in place against a scratch venv (python3 -m venv, so it has a sys.prefix of
@@ -80,7 +82,8 @@ printf '#!/bin/sh\necho /fake/MacOSX.sdk\n' >"$TMP/bin/xcrun"
 chmod +x "$TMP/bin/"*
 
 # One tiny valid safetensors file under a real workload's name, recorded as rog-nv's bytes in a
-# scratch DIGESTS that declares the real file's boxes.
+# scratch DIGESTS that declares the real file's boxes, and as minix's and m4-max's copies of them --
+# so tuf is the declared box with no row for it (the by-name check's gap).
 python3 - "$TMP/fixtures/mlp_small.safetensors" <<'PY' || exit 2
 import json, struct, sys
 head = json.dumps({"w": {"dtype": "F32", "shape": [1], "data_offsets": [0, 4]},
@@ -90,6 +93,12 @@ PY
 { grep '^# measurement-boxes:' "$here/fixtures/DIGESTS.txt"; echo '#'; } >"$TMP/DIGESTS.txt"
 python3 "$here/fixture_digest.py" --record --origin rog-nv --digests "$TMP/DIGESTS.txt" \
   "$TMP/fixtures/mlp_small.safetensors" >/dev/null || exit 2
+# rog-nv's row alone, for the leg whose DIGESTS stops declaring minix.
+cp "$TMP/DIGESTS.txt" "$TMP/DIGESTS-rog-only.txt"
+for b in minix m4-max; do
+  python3 "$here/fixture_digest.py" --record-matching --origin "$b" --digests "$TMP/DIGESTS.txt" \
+    "$TMP/fixtures/mlp_small.safetensors" >/dev/null || exit 2
+done
 
 export FAKE_FREEZE=$TMP/freeze FAKE_INCLUDEPY=$TMP/include BENCH_VENV_PY=$venv/bin/python
 export PATH="$TMP/bin:$PATH" OCANNL_TOOL_CHECK_BOX_DEVICE_CAP=5
@@ -122,8 +131,10 @@ usage_leg() {
 if harness_leg 'ready box'; then
   check ready --box rog-nv
   if [ "$rc" = 0 ] && ! grep -q 'GAP' "$TMP/runs/ready" &&
-     [ "$(grep -c ': ok -- ' "$TMP/runs/ready")" = 8 ] &&
-     tail -n 1 "$TMP/runs/ready" | grep -qx 'check-box: rog-nv: READY (8 items)'; then
+     [ "$(grep -c ': ok -- ' "$TMP/runs/ready")" = 9 ] &&
+     grep -qx "check-box: fixture-records: ok -- $TMP/DIGESTS.txt has a row of rog-nv's for each of the 1 fixture names checked (by name)" \
+       "$TMP/runs/ready" &&
+     tail -n 1 "$TMP/runs/ready" | grep -qx 'check-box: rog-nv: READY (9 items)'; then
     report 0 'a box meeting every item is READY, exit 0'
   else
     report 1 'a box meeting every item is READY, exit 0' "rc=$rc"
@@ -233,6 +244,23 @@ if harness_leg 'driver path: the shared venv'; then
   grep -q '(route: none)' "$TMP/runs/fresh-bare"
   report $? 'its GAP line says no route resolved'
 fi
+if harness_leg 'fixture records: judged nothing'; then
+  # A by-name check that cannot answer (here: a workload spec it cannot read, which the subject's
+  # own spec listing never parses) exits 2 before any item. Its traceback exits 1, the status of a
+  # name not recorded, so only the missing `not recorded` lines tell the two apart.
+  broken=$TMP/broken/benchmarks
+  mkdir -p "$broken/workloads"
+  cp "$SUBJECT" "$here/bench_venv.py" "$here/fixture_digest.py" "$broken/"
+  cp "$here"/workloads/*.json "$broken/workloads/"
+  printf '{ not json\n' >"$broken/workloads/zz_broken.json"
+  rc=0
+  bash "$broken/check-box.sh" --venv "$venv" --fixture-dir "$TMP/fixtures" --digests "$TMP/DIGESTS.txt" \
+    --box rog-nv >"$TMP/runs/records-broken" 2>&1 || rc=$?
+  usage_leg 'a by-name check that judged nothing exits 2' records-broken \
+    '^check-box: fixture_digest.py --check-names --expect-recorded rog-nv judged nothing \(exit 1\): ValueError: '
+  ! grep -q '^check-box: [a-z-]*: \(ok\|GAP\|skip\) -- ' "$TMP/runs/records-broken"
+  report $? 'and prints no item first'
+fi
 
 if harness_leg 'gap: toolchain'; then
   if [ -e /usr/bin/nvcc ] || [ -e /bin/nvcc ]; then
@@ -257,10 +285,68 @@ if harness_leg 'gap: fixtures'; then
   check mismatch --box rog-nv
   cp "$TMP/mlp_small.orig" "$TMP/fixtures/mlp_small.safetensors"
   gap_leg 'unrecorded bytes are a GAP' mismatch 'fixture mlp_small'
-  check other-origin --box minix --fixture mlp_small
-  if grep -q "^check-box: fixture mlp_small: ok -- .*(not minix's recorded bytes)$" "$TMP/runs/other-origin"; then
-    report 0 "another box's recorded bytes are measurable and say whose"
-  else report 1 "another box's recorded bytes are measurable and say whose"; fi
+  # minix's row records the bytes rog-nv's does; once the file changes, minix's row no longer
+  # describes it, and a new rog-nv row makes it rog-nv's bytes alone (rog-nv's lenet after the
+  # 2026-10-12 copy, in miniature).
+  cp -R "$TMP/fixtures" "$TMP/fixtures-other"
+  cp "$TMP/DIGESTS.txt" "$TMP/DIGESTS-other.txt"
+  python3 - "$TMP/fixtures-other/mlp_small.safetensors" <<'PY2' || exit 2
+import json, struct, sys
+head = json.dumps({"w": {"dtype": "F32", "shape": [1], "data_offsets": [0, 4]},
+                   "__metadata__": {"k": "other"}}).encode()
+open(sys.argv[1], "wb").write(struct.pack("<Q", len(head)) + head + struct.pack("<f", 1.0))
+PY2
+  python3 "$here/fixture_digest.py" --record --origin rog-nv --digests "$TMP/DIGESTS-other.txt" \
+    "$TMP/fixtures-other/mlp_small.safetensors" >/dev/null || exit 2
+  rc=0
+  FAKE_TORCH=hip "$SUBJECT" --venv "$venv" --fixture-dir "$TMP/fixtures-other" \
+    --digests "$TMP/DIGESTS-other.txt" --box minix --fixture mlp_small >"$TMP/runs/other-origin" 2>&1 || rc=$?
+  if [ "$rc" = 0 ] &&
+     grep -q "^check-box: fixture mlp_small: ok -- .*(not minix's recorded bytes)$" "$TMP/runs/other-origin"; then
+    report 0 "another box's recorded bytes, under a name the box has a row for, are measurable and say whose"
+  else
+    report 1 "another box's recorded bytes, under a name the box has a row for, are measurable and say whose" "rc=$rc"
+    sed 's/^/      | /' "$TMP/runs/other-origin"
+  fi
+fi
+if harness_leg 'gap: fixture records'; then
+  # tuf has no row for mlp_small: named with --fixture, it is a fixture-records GAP although its
+  # bytes are measurable (another box's), and the repair is --record-matching.
+  FAKE_TORCH=hip check records-named --box tuf --fixture mlp_small
+  gap_leg 'a named fixture the box has no DIGESTS row for is a fixture-records GAP' records-named fixture-records
+  if grep -qx "check-box: fixture-records: GAP -- $TMP/DIGESTS.txt has no row of tuf's for: mlp_small" \
+       "$TMP/runs/records-named" &&
+     grep -q '^  repair: .*fixture_digest.py --record-matching --origin tuf ' "$TMP/runs/records-named" &&
+     grep -q "^check-box: fixture mlp_small: ok -- .*(not tuf's recorded bytes)$" "$TMP/runs/records-named" &&
+     tail -n 1 "$TMP/runs/records-named" | grep -qx 'check-box: tuf: GAP (1 of 9 items)'; then
+    report 0 'it names the unrecorded fixture and the record-matching repair, and is the only gap'
+  else
+    report 1 'it names the unrecorded fixture and the record-matching repair, and is the only gap'
+    sed 's/^/      | /' "$TMP/runs/records-named"
+  fi
+  # Without --fixture, the required fixtures are the box's recorded names; a workload's fixture in
+  # the store that the box has no row for (a copy that landed, never recorded) is the gap.
+  cp "$TMP/fixtures/mlp_small.safetensors" "$TMP/fixtures/mlp_wide.safetensors"
+  check records-store --box rog-nv
+  rm -f "$TMP/fixtures/mlp_wide.safetensors"
+  gap_leg "a store copy the box has no row for is a fixture-records GAP, without --fixture" records-store fixture-records
+  if grep -qx "check-box: fixture-records: GAP -- $TMP/DIGESTS.txt has no row of rog-nv's for: mlp_wide" \
+       "$TMP/runs/records-store" && ! grep -q '^check-box: fixture mlp_wide:' "$TMP/runs/records-store"; then
+    report 0 'it names the store copy, which is no required fixture of its own'
+  else
+    report 1 'it names the store copy, which is no required fixture of its own'
+    sed 's/^/      | /' "$TMP/runs/records-store"
+  fi
+  # The by-name check reads names, never bytes: a named fixture with no row anywhere and no file is
+  # both gaps, each on its own item.
+  check records-absent --box rog-nv --fixture mlp_small --fixture lenet
+  if grep -q '^check-box: fixture-records: GAP -- .* for: lenet$' "$TMP/runs/records-absent" &&
+     grep -q '^check-box: fixture lenet: GAP -- absent' "$TMP/runs/records-absent"; then
+    report 0 'a named fixture with neither bytes nor a row is both gaps'
+  else
+    report 1 'a named fixture with neither bytes nor a row is both gaps'
+    sed 's/^/      | /' "$TMP/runs/records-absent"
+  fi
 fi
 
 if harness_leg 'usage'; then
@@ -284,20 +370,28 @@ if harness_leg 'fleet names'; then
   check fleet-rog --box rog-nv-linux
   if [ "$rc" = 0 ] && head -n 1 "$TMP/runs/fleet-rog" |
        grep -qx "check-box: --box rog-nv-linux is the fleet's name for measurement box rog-nv" &&
-     tail -n 1 "$TMP/runs/fleet-rog" | grep -qx 'check-box: rog-nv: READY (8 items)'; then
+     tail -n 1 "$TMP/runs/fleet-rog" | grep -qx 'check-box: rog-nv: READY (9 items)'; then
     report 0 "the fleet's name for a box is that box, said before the items, and the verdict names the box"
   else
     report 1 "the fleet's name for a box is that box, said before the items, and the verdict names the box" "rc=$rc"
     sed 's/^/      | /' "$TMP/runs/fleet-rog"
   fi
   FAKE_TORCH=hip check fleet-minix --box minix-amd-linux --fixture mlp_small
-  [ "$rc" = 0 ] && tail -n 1 "$TMP/runs/fleet-minix" | grep -qx 'check-box: minix: READY (8 items)'
+  [ "$rc" = 0 ] && tail -n 1 "$TMP/runs/fleet-minix" | grep -qx 'check-box: minix: READY (9 items)'
   report $? "minix-amd-linux is minix, a hip box" "rc=$rc"
+  check fleet-macbook --box macbook-pro
+  usage_leg 'a fleet box that measures nothing is refused by name, as no measurement box' fleet-macbook \
+    "^check-box: 'macbook-pro' is a fleet box that measures nothing, so not a measurement box: there is nothing to check"
+  ! grep -q '^check-box: [a-z-]*: \(ok\|GAP\|skip\) -- ' "$TMP/runs/fleet-macbook"
+  report $? 'and nothing is judged for it'
+  got=$("$SUBJECT" --canonical-box macbook-pro)
+  [ "$got" = macbook-pro ]
+  report $? 'a driver given it records the name it was given, which check-box refuses' "got $got"
   check fleet-wsl --box rog-nv-wsl
   usage_leg 'a WSL alias is no measurement box, and the refusal lists the fleet names' fleet-wsl \
     "nor the fleet's name for one \(mac-studio rog-nv-linux"
-  # The scratch DIGESTS records rog-nv's bytes, so it can stop declaring minix but not rog-nv.
-  sed 's/^# measurement-boxes: .*/# measurement-boxes: rog-nv/' "$TMP/DIGESTS.txt" >"$TMP/DIGESTS-rog.txt"
+  # rog-nv's row alone, so the file can stop declaring minix but not rog-nv.
+  sed 's/^# measurement-boxes: .*/# measurement-boxes: rog-nv/' "$TMP/DIGESTS-rog-only.txt" >"$TMP/DIGESTS-rog.txt"
   rc=0
   "$SUBJECT" --venv "$venv" --fixture-dir "$TMP/fixtures" --digests "$TMP/DIGESTS-rog.txt" \
     --box minix-amd-linux >"$TMP/runs/fleet-undeclared" 2>&1 || rc=$?
@@ -324,6 +418,14 @@ if harness_leg 'fleet names: the relationships'; then
   declared_boxes=$(python3 "$here/fixture_digest.py" --list-declared-measurement-boxes)
   while read -r name box; do
     [ -n "$name" ] || continue
+    if [ "$box" = - ]; then
+      # A fleet box that measures nothing: refused by name, and no declared box goes by its name.
+      check "fleet-$name" --box "$name" --fixture mlp_small
+      { [ "$rc" = 2 ] && grep -q 'measures nothing, so not a measurement box' "$TMP/runs/fleet-$name"; } ||
+        bad="$bad $name(non-measuring-not-refused)"
+      ! grep -qxF -- "$name" <<<"$declared_boxes" || bad="$bad $name(is-itself-declared)"
+      continue
+    fi
     check "fleet-$name" --box "$name" --fixture mlp_small
     [ "$rc" != 2 ] || bad="$bad $name"
     grep -qxF -- "$box" <<<"$declared_boxes" || bad="$bad $name->$box(undeclared)"
@@ -334,7 +436,7 @@ if harness_leg 'fleet names: the relationships'; then
     awk -v b="$box" '$2 == b { f = 1 } END { exit !f }' <<<"$fleet" || bad="$bad $box(no-fleet-name)"
   done <<<"$declared_boxes"
   [ -z "$bad" ]
-  report $? "every fleet name is a declared box with a profile, and every declared box has one" "refused:$bad"
+  report $? "every fleet name is a declared box with a profile or a refused non-measuring box, and every declared box has one" "refused:$bad"
   # The map's native boots are the fleet's Linux names: each `-linux` alias on a row of wake-lab.sh's
   # endpoint map is a fleet name here, and each `-linux` fleet name is an alias on the map.
   wake_lab=${OCANNL_TOOL_SWEEP_WAKE_LAB:-$HOME/bin/wake-lab.sh}

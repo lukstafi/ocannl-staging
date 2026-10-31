@@ -3,7 +3,8 @@
 #
 #   benchmarks/check-box.sh --box BOX [--fixture NAME]... [--fixture-dir DIR] [--venv DIR]
 #                           [--digests FILE] [--box-only]
-#   benchmarks/check-box.sh --fleet-names    # the fleet names --box takes, `<name> <box>` lines
+#   benchmarks/check-box.sh --fleet-names    # the fleet's box names, `<name> <box>` lines, and
+#                                            # `<name> -` for a fleet box that measures nothing
 #   benchmarks/check-box.sh --canonical-box NAME  # NAME's measurement box if NAME is a fleet
 #                                                 # name, else NAME itself (box-gate's reading)
 #
@@ -21,8 +22,9 @@
 #   - BOX: a measurement box declared in the DIGESTS file's `# measurement-boxes:` header AND
 #     listed in box_profile below, which names the device torch must reach and the toolchain
 #     the box's drivers compile with. A declared box missing here is refused, not defaulted.
-#     Or the fleet's name for one (`rog-nv-linux` for rog-nv; fleet_box below, gh-ocannl-1433),
-#     which a line before the items resolves to its box; the verdict names the box.
+#     Or the fleet's name for one (`rog-nv-linux` for rog-nv; fleet_row below, gh-ocannl-1433),
+#     which a line before the items resolves to its box; the verdict names the box. A fleet box
+#     that measures nothing (macbook-pro) is refused by name, as no measurement box.
 #   - NAME: the stem of a spec in benchmarks/workloads/*.json (`gpt2_mini_train`, not the file
 #     name). Without --fixture, every fixture DIGESTS records under BOX's origin is required.
 #   - DIR, FILE: paths; --venv defaults to ~/.venvs/ocannl-bench, the box's shared venv,
@@ -39,12 +41,16 @@
 # line names the route that resolved: BENCH_VENV_PY, benchmarks/.venv, or the shared venv a fresh
 # worktree falls back to; --box-only
 # skips it, since a sweep worktree is no measurement checkout), toolchain (nvcc, hipcc, or the
-# macOS SDK the Metal bindings build against), and one `fixture <name>` item per required fixture
-# (present, and fixture_digest.py --check MATCHes it against DIGESTS).
+# macOS SDK the Metal bindings build against), fixture-records (fixture_digest.py --check-names
+# --expect-recorded BOX: DIGESTS has a row of BOX's for every fixture name the check covers --
+# the required ones and, without --fixture, every workload's fixture the store holds -- read by
+# name, so a copy that landed in the store but was never recorded as BOX's is a GAP whose repair is
+# --record-matching), and one `fixture <name>` item per required fixture (present, and
+# fixture_digest.py --check MATCHes it against DIGESTS).
 #
-# What it does not judge: whether a fixture is THIS box's recorded bytes (the ok line names whose
-# they are; reports carry the same origin), the speed of anything, or a driver's own arms
-# (torch.compile, tinygrad's GPU device) beyond their imports.
+# What it does not judge: whether a fixture is THIS box's recorded bytes when BOX has a row for it
+# (the ok line names whose they are; reports carry the same origin), the speed of anything, or a
+# driver's own arms (torch.compile, tinygrad's GPU device) beyond their imports.
 
 set -u
 
@@ -70,20 +76,31 @@ box_profile() {
 # Linux boot's ssh alias in wake-lab.sh's endpoint map, and the Mac's own name), while DIGESTS.txt
 # and the reports name the box, so a worker given a fleet box passed the fleet's name and was
 # refused. The table is here, not derived at run time from wake-lab.sh's map: the far boxes this
-# check runs on have no wake-lab.sh, the map has no row for the Mac, and its box names (`rog`) are
+# check runs on have no wake-lab.sh, the map has no row for the Macs, and its box names (`rog`) are
 # not the measurement IDs (`rog-nv`) either. benchmarks/test-check-box.sh pins it against the map,
 # and against FLEET_BOXES, wherever those can be read. Only the native boots: no box measures from
-# a WSL guest or from Windows.
-fleet_box() {
+# a WSL guest or from Windows. A fleet box that measures nothing maps to `-`: it is on the roster
+# (so the pin holds wherever FLEET_BOXES names it), and --box refuses it by name.
+fleet_row() {
   case $1 in
     mac-studio) echo m4-max ;;
     rog-nv-linux) echo rog-nv ;;
     minix-amd-linux) echo minix ;;
     tuf-amd-linux) echo tuf ;;
+    macbook-pro) echo - ;; # the M4 Pro MacBook: Metal correctness runs, no published measurement
     *) return 1 ;;
   esac
 }
-fleet_names="mac-studio rog-nv-linux minix-amd-linux tuf-amd-linux" # fleet_box's domain
+fleet_names="mac-studio rog-nv-linux minix-amd-linux tuf-amd-linux macbook-pro" # fleet_row's domain
+# The measurement box a fleet name stands for; fails for a non-fleet name and a non-measuring box.
+fleet_box() {
+  local b
+  b=$(fleet_row "$1") && [ "$b" != - ] && printf '%s\n' "$b"
+}
+measuring_names=
+for name in $fleet_names; do
+  [ "$(fleet_row "$name")" = - ] || measuring_names="${measuring_names:+$measuring_names }$name"
+done
 
 box= venv=$HOME/.venvs/ocannl-bench fixture_dir=$here/fixtures digests= box_only=0
 fixtures=()
@@ -103,7 +120,7 @@ while [ $# -gt 0 ]; do
     --box-only) box_only=1; shift ;;
     --fleet-names)
       [ $# -eq 1 ] || die "--fleet-names takes nothing else"
-      for name in $fleet_names; do printf '%s %s\n' "$name" "$(fleet_box "$name")"; done
+      for name in $fleet_names; do printf '%s %s\n' "$name" "$(fleet_row "$name")"; done
       exit 0
       ;;
     --canonical-box)
@@ -130,8 +147,10 @@ declared=$(python3 "$here/fixture_digest.py" --list-declared-measurement-boxes -
   die "cannot read the declared measurement boxes of $digests"
 if ! printf '%s\n' "$declared" | grep -qxF -- "$box"; then
   fleet_name=$box
+  [ "$(fleet_row "$fleet_name")" != - ] ||
+    die "'$fleet_name' is a fleet box that measures nothing, so not a measurement box: there is nothing to check (the measurement boxes: $(printf '%s' "$declared" | tr '\n' ' '); the fleet's names for them: $measuring_names)"
   box=$(fleet_box "$fleet_name") ||
-    die "'$fleet_name' is not a measurement box declared by $digests (declared: $(printf '%s' "$declared" | tr '\n' ' ')), nor the fleet's name for one ($fleet_names)"
+    die "'$fleet_name' is not a measurement box declared by $digests (declared: $(printf '%s' "$declared" | tr '\n' ' ')), nor the fleet's name for one ($measuring_names)"
   printf '%s\n' "$declared" | grep -qxF -- "$box" ||
     die "'$fleet_name' is the fleet's name for $box, which $digests does not declare (declared: $(printf '%s' "$declared" | tr '\n' ' '))"
   echo "check-box: --box $fleet_name is the fleet's name for measurement box $box"
@@ -149,7 +168,8 @@ done
 [ ${#workloads[@]} -gt 0 ] || die "no workload specs under $here/workloads"
 # Without --fixture: every fixture DIGESTS records bytes for under this box's origin -- the ones
 # the box has measured on -- read through fixture_digest.py, the one parser of that file.
-if [ ${#fixtures[@]} -eq 0 ]; then
+fixtures_given=${#fixtures[@]}
+if [ "$fixtures_given" = 0 ]; then
   recorded=$(cd "$here" && python3 -c '
 import sys, fixture_digest
 for name, rows in sorted(fixture_digest.read_digests(sys.argv[1]).items()):
@@ -165,6 +185,33 @@ else
     [ "$found" = 1 ] || die "--fixture '$name' names no spec in $here/workloads (give the stem: gpt2_mini_train)"
   done
 fi
+
+# The by-name completeness check (gh-ocannl-1356's --check-names): which of the names covered have
+# no row of this box's in DIGESTS, whatever bytes are on disk. Covered: the required fixtures and,
+# without --fixture, every workload's fixture the store holds -- the required ones are this box's
+# recorded names then, so the store is what can hold a copy nobody recorded as this box's. Run
+# here, before any item prints, so a check that judged nothing exits 2 with nothing judged.
+named=("${fixtures[@]}")
+if [ "$fixtures_given" = 0 ]; then
+  for w in "${workloads[@]}"; do
+    [ -e "$fixture_dir/$w.safetensors" ] || continue
+    dup=0
+    for n in "${named[@]}"; do [ "$n" = "$w" ] && dup=1; done
+    [ "$dup" = 1 ] || named+=("$w")
+  done
+fi
+names_rc=0
+names_out=$(python3 "$here/fixture_digest.py" --check-names --expect-recorded "$box" \
+  --digests "$digests" --workloads-dir "$here/workloads" "${named[@]}" 2>&1) || names_rc=$?
+# `<file>: <rows>` per name, then `    not recorded for <boxes> (--expect-recorded)` under each
+# name this box has no row for; the exit status and the lines must agree, or nothing was read.
+unrecorded=$(printf '%s\n' "$names_out" | awk '
+  /^[^ ].*: / { name = substr($0, 1, index($0, ": ") - 1); sub(/\.safetensors$/, "", name) }
+  /^    not recorded for .* \(--expect-recorded\)$/ { print name }')
+case $names_rc:${unrecorded:+some} in
+  0: | 1:some) ;;
+  *) die "fixture_digest.py --check-names --expect-recorded $box judged nothing (exit $names_rc): $(printf '%s\n' "$names_out" | tail -n 1)" ;;
+esac
 
 items=0 gaps=0
 item() { # item status detail [repair]
@@ -308,6 +355,13 @@ case $toolchain in
     fi
     ;;
 esac
+
+if [ -z "$unrecorded" ]; then
+  item fixture-records ok "$digests has a row of $box's for each of the ${#named[@]} fixture names checked (by name)"
+else
+  item fixture-records GAP "$digests has no row of $box's for: $(printf '%s' "$unrecorded" | tr '\n' ' ')" \
+    "record a copy of recorded bytes as $box's (python3 benchmarks/fixture_digest.py --record-matching --origin $box --digests $digests <its file>; it refuses bytes no row records) and land the row, or take the file out of $fixture_dir -- never regenerate to pass"
+fi
 
 for name in "${fixtures[@]}"; do
   path=$fixture_dir/$name.safetensors
