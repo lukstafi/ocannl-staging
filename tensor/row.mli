@@ -123,6 +123,7 @@ val globals_differences : globals -> globals -> string list
 (** The components that differ between two captures (physically), by name: a diagnostic. *)
 
 val sym_dim_extent_exn : sym_dim -> int
+
 (** The maximum extent of a symbolic dimension: the declared range of its static symbol. *)
 
 val dim_to_int_exn : dim -> int
@@ -387,3 +388,42 @@ val proj_to_iterator_exn : proj_env -> proj_id -> Ir.Indexing.symbol
 
 val product_dim_iterators : proj_env -> (proj_id * int * Ir.Indexing.symbol) list
 (** Iterated projections, including concat components with dim 1. *)
+
+(** {2 Shape-scheme support (gh-ocannl-404)}
+
+    What [Shape.Scheme] needs to carry a trace's constraints past its rewind and rename them per
+    application. Dimension and row variables share one monotonic counter. *)
+
+val var_mark : unit -> int
+(** The id of the most recently minted variable: a variable with a larger id was minted since. *)
+
+val dim_var_id : dim_var -> int
+val row_var_id : row_var -> int
+val discardable_vars : environment -> dim_var_set
+
+type renaming = { rn_dim : dim_var -> dim_var; rn_row : row_var -> row_var }
+
+val rename_dim : renaming -> dim -> dim
+val rename_row : renaming -> t -> t
+
+val rename_constraint : renaming -> constraint_ -> constraint_
+(** Every variable position of every constructor; static symbols stay rigid. *)
+
+val constraint_vars : constraint_ -> dim_var list * row_var list
+val row_vars : t -> dim_var list * row_var list
+
+val add_constraint_origin : constraint_origin -> constraint_ -> constraint_
+(** Prepends a provenance entry. *)
+
+val has_lazy_coefficient : constraint_ -> bool
+(** Whether the constraint holds a [Strided_var] total, whose coefficient is a lazy over a node's
+    precision. *)
+
+type marks
+(** The additions to the per-variable policy sets (and the pending symbol-role claims) since a
+    {!capture_globals}. *)
+
+val marks_since : globals -> marks
+
+val add_marks : renaming -> marks -> unit
+(** Re-adds the marks through the sets' writers, renaming the variables. *)

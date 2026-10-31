@@ -306,8 +306,15 @@ let open_refs : int list ref = ref []
 let discarded_refs : (int, string) Hashtbl.t = Hashtbl.create (module Int)
 [@@mutation_serial.kept "a registry of what rewinds discarded: rewinds extend it, never restore it"]
 
+(* The references touched while a shape-scheme trace runs (gh-ocannl-404), when one does: [None]
+   otherwise. [open_refs] lists a reference once per inference, so it cannot tell a trace's touch of
+   a reference touched before it. *)
+let trace_touches : int list option ref = ref None
+[@@mutation_serial.exempt "the shape-scheme trace's own record, saved and restored by the trace"]
+
 let touch_ref uid =
   Row.note_mutation ();
+  Option.iter !trace_touches ~f:(fun l -> trace_touches := Some (uid :: l));
   if not (List.mem !open_refs uid ~equal:Int.equal) then open_refs := uid :: !open_refs
 
 (* Unbound references to which {!set_equal} handed a number across a row reference -- the row's
@@ -2163,6 +2170,21 @@ let construction_depth = ref 0
 let active_update_steps = ref [] [@@mutation_serial.fingerprinted]
 let active_constraints = ref [] [@@mutation_serial.fingerprinted]
 
+(* gh-ocannl-404: an applied shape scheme registers no update step -- there is no computation to
+   project -- so the closure learns of it here: its boundary (and anchored) shapes get the solution
+   applied and are closed, and their rows, with the scheme's renamed internal rows, join the update
+   steps' rows at the [Shape_row] stage. Session state like the steps: captured by checkpoints,
+   cleared by closures and resets. *)
+type scheme_instance = { inst_shapes : t list; inst_rows : (Row.t * Row.constraint_origin) list }
+
+let active_instances : scheme_instance list ref = ref [] [@@mutation_serial.fingerprinted]
+
+(* The labels of the shape-scheme traces in progress, innermost first: [finish_inference] refuses
+   while one runs, before it commits anything (a closure would end the trace's checkpoint). *)
+let tracing : string list ref = ref []
+[@@mutation_serial.exempt
+  "the shape-scheme traces in progress, restored by the trace's own finally"]
+
 (** {3 Session consistency (gh-ocannl-1301)}
 
     [finish_inference] is the session's only commit point. A construction that fails after mutating
@@ -2207,6 +2229,7 @@ type fingerprint = {
   fp_state : Row.environment;
   fp_steps : update_step list;
   fp_constraints : Row.constraint_ list;
+  fp_instances : scheme_instance list;
 }
 
 let fingerprint () =
@@ -2215,13 +2238,15 @@ let fingerprint () =
     fp_state = !state;
     fp_steps = !active_update_steps;
     fp_constraints = !active_constraints;
+    fp_instances = !active_instances;
   }
 
 let mutated_since fp =
   fp.fp_serial <> Row.mutation_serial ()
   || (not (phys_equal fp.fp_state !state))
   || (not (phys_equal fp.fp_steps !active_update_steps))
-  || not (phys_equal fp.fp_constraints !active_constraints)
+  || (not (phys_equal fp.fp_constraints !active_constraints))
+  || not (phys_equal fp.fp_instances !active_instances)
 
 let exn_summary = function
   | Row.Shape_error (msg, _) -> msg
@@ -2282,6 +2307,7 @@ type globals = {
   g_state : Row.environment;
   g_active_update_steps : update_step list;
   g_active_constraints : Row.constraint_ list;
+  g_active_instances : scheme_instance list;
   g_unused_shapes : Set.M(Int).t;
   g_open_refs : int list;
   g_row_numbered_refs : (int * string) list;
@@ -2292,6 +2318,7 @@ let capture_globals () =
     g_state = !state;
     g_active_update_steps = !active_update_steps;
     g_active_constraints = !active_constraints;
+    g_active_instances = !active_instances;
     g_unused_shapes = !unused_shapes;
     g_open_refs = !open_refs;
     g_row_numbered_refs = !row_numbered_refs;
@@ -2302,6 +2329,7 @@ let restore_globals
       g_state;
       g_active_update_steps;
       g_active_constraints;
+      g_active_instances;
       g_unused_shapes;
       g_open_refs;
       g_row_numbered_refs;
@@ -2309,6 +2337,7 @@ let restore_globals
   state := g_state;
   active_update_steps := g_active_update_steps;
   active_constraints := g_active_constraints;
+  active_instances := g_active_instances;
   unused_shapes := g_unused_shapes;
   open_refs := g_open_refs;
   row_numbered_refs := g_row_numbered_refs
@@ -2319,6 +2348,7 @@ let globals_differences
       g_state = a1;
       g_active_update_steps = a2;
       g_active_constraints = a3;
+      g_active_instances = a7;
       g_unused_shapes = a4;
       g_open_refs = a5;
       g_row_numbered_refs = a6;
@@ -2327,6 +2357,7 @@ let globals_differences
       g_state = b1;
       g_active_update_steps = b2;
       g_active_constraints = b3;
+      g_active_instances = b7;
       g_unused_shapes = b4;
       g_open_refs = b5;
       g_row_numbered_refs = b6;
@@ -2336,6 +2367,7 @@ let globals_differences
       ("Shape.state", phys_equal a1 b1);
       ("Shape.active_update_steps", phys_equal a2 b2);
       ("Shape.active_constraints", phys_equal a3 b3);
+      ("Shape.active_instances", phys_equal a7 b7);
       ("Shape.unused_shapes", phys_equal a4 b4);
       ("Shape.open_refs", phys_equal a5 b5);
       ("Shape.row_numbered_refs", phys_equal a6 b6);
@@ -2392,16 +2424,19 @@ module Checkpoint = struct
 
   (* The open shapes, each once (physically): [dealias_operands]' copies share an id, but are never
      registered. *)
-  let open_shapes steps =
+  let open_shapes ?(instances = []) steps =
     let seen = Hashtbl.create (module Int) in
-    List.concat_map steps ~f:(fun step ->
-        let acc = ref [] in
-        iter_shapes step ~f:(fun sh ->
-            let same = Hashtbl.find_multi seen sh.id in
-            if not (List.mem same sh ~equal:phys_equal) then (
-              Hashtbl.add_multi seen ~key:sh.id ~data:sh;
-              acc := sh :: !acc));
-        List.rev !acc)
+    let acc = ref [] in
+    let visit (sh : Shape_record.t) =
+      let same = Hashtbl.find_multi seen sh.id in
+      if not (List.mem same sh ~equal:phys_equal) then (
+        Hashtbl.add_multi seen ~key:sh.id ~data:sh;
+        acc := sh :: !acc)
+    in
+    List.iter steps ~f:(fun step -> iter_shapes step ~f:visit);
+    (* gh-ocannl-404: an applied scheme's boundary shapes are open objects no step may hold. *)
+    List.iter instances ~f:(fun inst -> List.iter inst.inst_shapes ~f:visit);
+    List.rev !acc
 
   let take ~closure ~label ~id_mark =
     let seq =
@@ -2424,7 +2459,7 @@ module Checkpoint = struct
       update_mark = !update_uid;
       globals = capture_globals ();
       row_globals = Row.capture_globals ();
-      shapes = List.map (open_shapes steps) ~f:Shape_record.snapshot;
+      shapes = List.map (open_shapes ~instances:!active_instances steps) ~f:Shape_record.snapshot;
       steps = List.map steps ~f:Update_step_record.snapshot;
       refs;
       ref_uids = Set.of_list (module Int) (List.map refs ~f:Delayed_ref.snapshot_uid);
@@ -2498,9 +2533,8 @@ module Checkpoint = struct
     if not (skip "stale marking") then (
       (* The window's own shapes -- in some active step, open, not in the frontier -- become stale
          handles, like its tensors. *)
-      List.iter !active_update_steps ~f:(fun step ->
-          iter_shapes step ~f:(fun sh ->
-              if not (in_frontier ck sh) then mark_discarded sh ~provenance));
+      List.iter (open_shapes ~instances:!active_instances !active_update_steps) ~f:(fun sh ->
+          if not (in_frontier ck sh) then mark_discarded sh ~provenance);
       if !update_uid > ck.update_mark then
         discarded_updates := (ck.update_mark, !update_uid, provenance) :: !discarded_updates;
       (* The references the window bound or set that the checkpoint holds no snapshot of: made in
@@ -3244,6 +3278,8 @@ let unsafe_reinitialize () =
   state := Row.empty_env;
   active_update_steps := [];
   active_constraints := [];
+  active_instances := [];
+  tracing := [];
   construction_depth := 0;
   taint := None;
   discarded_updates := [];
@@ -3975,6 +4011,7 @@ let%debug4_sexp finish_inference_body (() : unit) : unit =
   let unsolved, env = Row.solve_inequalities ~stage:Stage3 unsolved env in
   let all_update_rows =
     List.concat_map ~f:all_rows_w_origin !active_update_steps
+    @ List.concat_map !active_instances ~f:(fun inst -> inst.inst_rows)
     |> List.map ~f:(fun (r, o) -> (Row.subst_row env r, o))
     |> List.dedup_and_sort ~compare:(fun (r1, _) (r2, _) -> Row.compare r1 r2)
   in
@@ -3988,6 +4025,7 @@ let%debug4_sexp finish_inference_body (() : unit) : unit =
   refuse_unsolved ~where:"finish_inference" unsolved;
   let _active_update_steps : update_step list = !active_update_steps in
   List.iter ~f:(apply_env_step env) !active_update_steps;
+  List.iter !active_instances ~f:(fun inst -> List.iter inst.inst_shapes ~f:(apply_env_t env));
   let _applied_update_steps : update_step list = !active_update_steps in
   (* Derive projections for all active update_steps, setting their unsafe_projections field. This
      must happen before clearing active_update_steps. *)
@@ -3996,6 +4034,7 @@ let%debug4_sexp finish_inference_body (() : unit) : unit =
   (* The commit: every shape of the applied steps is closed, and the role claims of the open work
      reach their symbols. *)
   List.iter !active_update_steps ~f:(fun update_step -> iter_shapes update_step ~f:close);
+  List.iter !active_instances ~f:(fun inst -> List.iter inst.inst_shapes ~f:close);
   Row.commit_symbol_roles ~commit:(Ir.Indexing.commit_role shape_writer);
   open_refs := [];
   Int.incr closure_count;
@@ -4003,6 +4042,7 @@ let%debug4_sexp finish_inference_body (() : unit) : unit =
   failed_reads := [];
   active_constraints := [];
   active_update_steps := [];
+  active_instances := [];
   (* There should not be any shape variables remaining in any inference-undergoing update steps. *)
   state := Row.empty_env;
   !on_closure ()
@@ -4010,6 +4050,17 @@ let%debug4_sexp finish_inference_body (() : unit) : unit =
   "the commit point: finish_inference taints the session on any failure of this body"]
 
 let finish_inference (() : unit) : unit =
+  (match !tracing with
+  | [] -> ()
+  | label :: _ ->
+      raise
+      @@ Row.Shape_error
+           ( [%string
+               "finish_inference: shape inference was finalized while tracing the shape scheme \
+                %{label} (via Shape.to_dims, Shape.to_padding or a projections handle) -- not \
+                supported: a closure would commit the trace's work, which the trace must leave \
+                undone. Do not force dims or projections inside a traced function."],
+             [] ));
   if !construction_depth > 0 then
     raise
     @@ Row.Shape_error
@@ -4351,3 +4402,367 @@ let parse_n5_layout priorities =
   in
   let p_labels = Einsum_parser.(axis_labels @@ axis_labels_of_spec priorities) in
   axis_map_to_dims_index p_labels |> Array.map ~f
+
+(** {2 Shape schemes (gh-ocannl-404)}
+
+    A scheme is read off the open session at the end of a trace (inside [Tensor.with_rewind]): the
+    constraints the traced function registered, in registration order, and the solution equations of
+    their variables under the trace's final environment. The equations matter: the solver mints
+    variables while solving and writes them into shapes, and later constraints mention them, so a
+    renamed replay of the constraints alone would come apart. Everything else -- the boundary rows,
+    the internal rows closure finalizes, the rows of the pre-existing shapes the trace used -- is
+    exported substituted under that environment, so it holds only unsolved variables, which the
+    equations relate. Variables minted since the trace began are renamed per application
+    (generalized); older ones stay (fixed), and the anchors re-tie them to their shapes' current
+    rows, which keeps them valid across a closure. *)
+module Scheme = struct
+  type shape = t
+  type rows = { r_batch : Row.t; r_input : Row.t; r_output : Row.t }
+
+  type sabotage =
+    | No_generalization
+    | Sever_shared
+    | No_marks
+    | No_internal_rows
+    | No_end_validation
+
+  type nonrec t = {
+    label : string;
+    mark : int;  (** Variables with larger ids were minted by the trace: generalized. *)
+    constraints : Row.constraint_ list;
+        (** The trace's constraints, oldest first, then the solution equations. *)
+    arg_rows : rows list;
+    result_rows : rows list;
+    internal_rows : (Row.t * Row.constraint_origin) list;
+        (** The rows of every shape the trace's steps (and the schemes it applied) held: closure's
+            [Shape_row] stage finalizes non-terminal variables, an intermediate's too. *)
+    anchors : (shape * rows) list;
+        (** Pre-existing open shapes the trace used, with their rows at the end of the trace. *)
+    marks : Row.marks;
+    discardable : Row.dim_var list;
+    unmarked_unused : int list;
+    closure_bound : string option;
+        (** Fixed variables no anchor covers: the scheme cannot be instantiated after a closure. *)
+    closure_at_trace : int;
+  }
+
+  let label s = s.label
+  let arity s = List.length s.arg_rows
+  let num_results s = List.length s.result_rows
+
+  let rows_of env (sh : shape) =
+    {
+      r_batch = Row.subst_row env sh.batch;
+      r_input = Row.subst_row env sh.input;
+      r_output = Row.subst_row env sh.output;
+    }
+
+  let rows_vars { r_batch; r_input; r_output } =
+    List.map [ r_batch; r_input; r_output ] ~f:Row.row_vars
+
+  (* The elements of [l] in front of its physical suffix [mark], in [l]'s (newest-first) order. *)
+  let window ~mark l =
+    let rec go acc = function
+      | l when phys_equal l mark -> List.rev acc
+      | [] -> List.rev acc
+      | x :: rest -> go (x :: acc) rest
+    in
+    go [] l
+
+  let dedup_shapes shapes =
+    List.fold shapes ~init:[] ~f:(fun acc sh ->
+        if List.mem acc sh ~equal:phys_equal then acc else sh :: acc)
+    |> List.rev
+
+  let trace ?sabotage ~var_mark ~label ~(args : shape list) (f : unit -> shape list) =
+    let sabotaged x = Option.exists sabotage ~f:(fun y -> Poly.equal x y) in
+    let constraints_mark = !active_constraints in
+    let steps_mark = !active_update_steps in
+    let instances_mark = !active_instances in
+    let row_globals = Row.capture_globals () in
+    let env_start = !state in
+    let unused_start = !unused_shapes in
+    let refs_mark = !ref_uid in
+    let outer_touches = !trace_touches in
+    let frontier = Hashtbl.create (module Int) in
+    List.iter (Checkpoint.open_shapes ~instances:!active_instances !active_update_steps)
+      ~f:(fun (sh : shape) -> Hashtbl.add_multi frontier ~key:sh.id ~data:sh);
+    let pre_existing (sh : shape) =
+      (not sh.closed)
+      && List.mem (Hashtbl.find_multi frontier sh.id) sh ~equal:phys_equal
+      && not (List.mem args sh ~equal:phys_equal)
+    in
+    let refuse msg = raise @@ Row.Shape_error (msg, []) in
+    try
+      tracing := label :: !tracing;
+      trace_touches := Some [];
+      let results, touched =
+        Exn.protect
+          ~f:(fun () ->
+            let results = f () in
+            (results, Option.value !trace_touches ~default:[]))
+          ~finally:(fun () ->
+            trace_touches := outer_touches;
+            match !tracing with _ :: rest -> tracing := rest | [] -> ())
+      in
+      let constraints = List.rev (window ~mark:constraints_mark !active_constraints) in
+      if List.exists constraints ~f:Row.has_lazy_coefficient then
+        refuse
+          "the function registers a precision-dependent total-elements constraint (a uint4x32 \
+           conversion, e.g. random number generation): its coefficient is a lazy over the trace's \
+           own nodes, which a scheme cannot carry past the trace -- apply the function inline";
+      if List.exists touched ~f:(fun uid -> uid <= refs_mark) then
+        refuse
+          "the function binds or sets a capture reference made outside it, whose binding a scheme \
+           cannot carry per application -- make the reference inside the function, or apply the \
+           function inline";
+      let marks = Row.marks_since row_globals in
+      (* Validation: the trailing setters ([set_dim], [infer_equal], [set_terminal]) push
+         constraints without solving them, so the whole window is solved once more -- Stage1 only:
+         the closing stages would default the generic arguments. *)
+      let env_end =
+        if sabotaged No_end_validation then !state
+        else snd (Row.solve_inequalities ~stage:Row.Stage1 constraints !state)
+      in
+      let unused_end = !unused_shapes in
+      (* As [finish_inference] filters the terminal rows of shapes still marked unused: the trace's
+         own such shapes can never be used afterwards. *)
+      let own_unused = Set.diff unused_end unused_start in
+      let constraints =
+        List.filter constraints ~f:(function
+          | Row.Shape_row (r, _) | Terminal_row (_, r, _) ->
+              not (List.exists (Row.row_shapes r) ~f:(Set.mem own_unused))
+          | _ -> true)
+      in
+      let solution_origin =
+        Row.
+          {
+            lhs_name = label;
+            lhs_kind = `Output;
+            rhs_name = "(its trace's solution)";
+            rhs_kind = `Output;
+            operation = Some [%string "the trace of the shape scheme %{label}"];
+          }
+      in
+      let dim_vars, row_vars =
+        List.fold constraints
+          ~init:(Set.empty (module Int), [], Set.empty (module Int), [])
+          ~f:(fun acc c ->
+            let ds, rs = Row.constraint_vars c in
+            let add_d (seen, l, rseen, rl) v =
+              let id = Row.dim_var_id v in
+              if Set.mem seen id then (seen, l, rseen, rl) else (Set.add seen id, v :: l, rseen, rl)
+            in
+            let add_r (seen, l, rseen, rl) v =
+              let id = Row.row_var_id v in
+              if Set.mem rseen id then (seen, l, rseen, rl) else (seen, l, Set.add rseen id, v :: rl)
+            in
+            List.fold rs ~init:(List.fold ds ~init:acc ~f:add_d) ~f:add_r)
+        |> fun (_, dl, _, rl) -> (List.rev dl, List.rev rl)
+      in
+      let solutions =
+        List.filter_map dim_vars ~f:(fun v ->
+            Option.map (Row.get_dim_from_env env_end v) ~f:(fun d ->
+                Row.Dim_eq { d1 = Row.Var v; d2 = d; origin = [ solution_origin ] }))
+        @ List.filter_map row_vars ~f:(fun v ->
+            Option.map (Row.get_row_from_env env_end v) ~f:(fun r ->
+                Row.Row_eq
+                  {
+                    r1 = Row.get_row_for_var Row.empty_provenance v;
+                    r2 = r;
+                    origin = [ solution_origin ];
+                  }))
+      in
+      let steps = List.rev (window ~mark:steps_mark !active_update_steps) in
+      (* A scheme the function applied registered no step: its instance holds its boundary and
+         anchored shapes, and its rows. *)
+      let instances = List.rev (window ~mark:instances_mark !active_instances) in
+      let used_shapes =
+        List.concat_map steps ~f:(fun step ->
+            let acc = ref [] in
+            iter_shapes step ~f:(fun sh -> acc := sh :: !acc);
+            List.rev !acc)
+        @ List.concat_map instances ~f:(fun inst -> inst.inst_shapes)
+        @ results
+      in
+      let internal_rows =
+        List.concat_map steps ~f:all_rows_w_origin
+        @ List.concat_map instances ~f:(fun inst -> inst.inst_rows)
+        |> List.map ~f:(fun (r, o) -> (Row.subst_row env_end r, o))
+        |> List.dedup_and_sort ~compare:(fun (r1, _) (r2, _) -> Row.compare r1 r2)
+      in
+      let anchors =
+        List.filter (dedup_shapes used_shapes) ~f:pre_existing
+        |> List.map ~f:(fun sh -> (sh, rows_of env_end sh))
+      in
+      let arg_rows = List.map args ~f:(rows_of env_end) in
+      let result_rows = List.map results ~f:(rows_of env_end) in
+      (* Coverage: a fixed variable left unsolved dies at the next closure; an anchor re-ties it to
+         its shape's closed rows then. One no anchor covers makes the scheme closure-bound. *)
+      let fixed_unsolved =
+        List.concat_map
+          (List.map (constraints @ solutions) ~f:Row.constraint_vars
+          @ List.concat_map (arg_rows @ result_rows) ~f:rows_vars
+          @ List.map internal_rows ~f:(fun (r, _) -> Row.row_vars r))
+          ~f:(fun (ds, rs) ->
+            List.filter_map ds ~f:(fun v ->
+                if Row.dim_var_id v <= var_mark && Option.is_none (Row.get_dim_from_env env_end v)
+                then Some (`Dim (Row.dim_var_id v))
+                else None)
+            @ List.filter_map rs ~f:(fun v ->
+                if Row.row_var_id v <= var_mark && Option.is_none (Row.get_row_from_env env_end v)
+                then Some (`Row (Row.row_var_id v))
+                else None))
+      in
+      let covered =
+        List.concat_map anchors ~f:(fun (_, rows) ->
+            List.concat_map (rows_vars rows) ~f:(fun (ds, rs) ->
+                List.map ds ~f:(fun v -> `Dim (Row.dim_var_id v))
+                @ List.map rs ~f:(fun v -> `Row (Row.row_var_id v))))
+      in
+      let uncovered =
+        List.filter fixed_unsolved ~f:(fun v -> not (List.mem covered v ~equal:Poly.equal))
+        |> List.dedup_and_sort ~compare:Poly.compare
+      in
+      let closure_bound =
+        if List.is_empty uncovered then None
+        else
+          Some
+            (String.concat ~sep:", "
+               (List.map uncovered ~f:(function
+                 | `Dim id -> "dimension variable $" ^ Int.to_string id
+                 | `Row id -> "row variable $" ^ Int.to_string id)))
+      in
+      {
+        label;
+        mark = var_mark;
+        constraints = constraints @ solutions;
+        arg_rows;
+        result_rows;
+        internal_rows;
+        anchors;
+        marks;
+        discardable =
+          Set.to_list (Set.diff (Row.discardable_vars env_end) (Row.discardable_vars env_start));
+        unmarked_unused = Set.to_list (Set.diff unused_start unused_end);
+        closure_bound;
+        closure_at_trace = !closure_count;
+      }
+    with Row.Shape_error (msg, trace) ->
+      let bt = Stdlib.Printexc.get_raw_backtrace () in
+      Stdlib.Printexc.raise_with_backtrace
+        (Row.Shape_error ([%string "tracing the shape scheme %{label}: %{msg}"], trace))
+        bt
+
+  let instantiate ?sabotage s ~application ~(args : shape list) ~(results : shape list) =
+    check_untainted ();
+    let sabotaged x = Option.exists sabotage ~f:(fun y -> Poly.equal x y) in
+    let prefix = [%string "applying the shape scheme %{s.label} to %{application}: "] in
+    let fail msg = raise @@ Row.Shape_error (prefix ^ msg, []) in
+    let check_count what expected got =
+      if expected <> got then
+        fail [%string "the scheme has %{expected#Int} %{what}, the application gives %{got#Int}"]
+    in
+    check_count "arguments" (arity s) (List.length args);
+    check_count "results" (num_results s) (List.length results);
+    List.iter
+      (args @ results @ List.map s.anchors ~f:fst)
+      ~f:(fun (sh : shape) ->
+        Option.iter sh.discarded_by ~f:(fun provenance ->
+            fail
+              [%string
+                "the shape of #%{sh.id#Int} %{sh.debug_name} was discarded by the rewind after \
+                 %{provenance}"]));
+    if !closure_count <> s.closure_at_trace then
+      Option.iter s.closure_bound ~f:(fun vars ->
+          fail
+            [%string
+              "inference closed since the trace, and the scheme depends on open state no shape it \
+               used holds (%{vars}) -- trace it again after the closure"]);
+    let generalize id =
+      if sabotaged No_generalization then false else sabotaged Sever_shared || id > s.mark
+    in
+    let dim_tbl = Hashtbl.create (module Int) and row_tbl = Hashtbl.create (module Int) in
+    let rn =
+      Row.
+        {
+          rn_dim =
+            (fun v ->
+              let id = Row.dim_var_id v in
+              if generalize id then
+                Hashtbl.find_or_add dim_tbl id ~default:(fun () -> Row.get_var ())
+              else v);
+          rn_row =
+            (fun v ->
+              let id = Row.row_var_id v in
+              if generalize id then Hashtbl.find_or_add row_tbl id ~default:Row.get_row_var else v);
+        }
+    in
+    let origin =
+      Row.
+        {
+          lhs_name = s.label;
+          lhs_kind = `Output;
+          rhs_name = application;
+          rhs_kind = `Output;
+          operation = Some [%string "the shape scheme %{s.label} applied to %{application}"];
+        }
+    in
+    let equate rows (sh : shape) =
+      List.map
+        [
+          (`Batch, rows.r_batch, sh.batch);
+          (`Input, rows.r_input, sh.input);
+          (`Output, rows.r_output, sh.output);
+        ]
+        ~f:(fun (kind, r, actual) ->
+          Row.Row_eq
+            {
+              r1 = Row.rename_row rn r;
+              r2 = actual;
+              origin =
+                [ { origin with lhs_kind = kind; rhs_kind = kind; rhs_name = sh.debug_name } ];
+            })
+    in
+    let constraints =
+      List.map s.constraints ~f:(fun c ->
+          Row.add_constraint_origin origin (Row.rename_constraint rn c))
+    in
+    let boundary =
+      List.concat (List.map2_exn s.arg_rows args ~f:equate)
+      @ List.concat (List.map2_exn s.result_rows results ~f:equate)
+    in
+    let anchors =
+      if sabotaged Sever_shared then []
+      else List.concat_map s.anchors ~f:(fun (sh, r) -> equate r sh)
+    in
+    let all = constraints @ boundary @ anchors in
+    (* The anchored shapes too: a trace that applies this scheme must see them as used. *)
+    let inst_shapes = dedup_shapes (args @ results @ List.map s.anchors ~f:fst) in
+    let inst_rows =
+      (if sabotaged No_internal_rows then []
+       else List.map s.internal_rows ~f:(fun (r, o) -> (Row.rename_row rn r, o)))
+      @ List.concat_map inst_shapes ~f:(fun (sh : shape) ->
+          List.map
+            [ (`Batch, sh.batch); (`Input, sh.input); (`Output, sh.output) ]
+            ~f:(fun (kind, r) -> (r, { origin with lhs_kind = kind; rhs_kind = kind })))
+    in
+    let discardable_vars =
+      List.fold s.discardable ~init:Row.dim_var_set_empty ~f:(fun acc v ->
+          Set.add acc (rn.rn_dim v))
+    in
+    try
+      with_taint_on_failure
+        ~describe:(fun exn -> prefix ^ exn_summary exn)
+        (fun () ->
+          List.iter s.unmarked_unused ~f:unmark_unused;
+          if not (sabotaged No_marks) then Row.add_marks rn s.marks;
+          active_constraints := List.rev_append all !active_constraints;
+          active_instances := { inst_shapes; inst_rows } :: !active_instances;
+          let _, env = Row.solve_inequalities ~stage:Row.Stage1 ~discardable_vars all !state in
+          state := env;
+          List.iter inst_shapes ~f:(apply_env_t env))
+    with Row.Shape_error (msg, trace) ->
+      let bt = Stdlib.Printexc.get_raw_backtrace () in
+      Stdlib.Printexc.raise_with_backtrace (Row.Shape_error (prefix ^ msg, trace)) bt
+end

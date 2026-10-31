@@ -18,6 +18,7 @@ tensor/row.ml: boundary restore_globals -- part of a rewind: puts back the solve
 tensor/shape.ml: ref_uid (ref) -- exempt: a fresh-id counter: ids are never reused, so a rewind need not restore it
 tensor/shape.ml: open_refs (ref) -- accounted: every write noted or at a boundary; captured by capture_globals
 tensor/shape.ml: discarded_refs (Hashtbl) -- accounted; kept by rewinds: a registry of what rewinds discarded: rewinds extend it, never restore it
+tensor/shape.ml: trace_touches (ref) -- exempt: the shape-scheme trace's own record, saved and restored by the trace
 tensor/shape.ml: row_numbered_refs (ref) -- accounted: every write noted or at a boundary; captured by capture_globals
 tensor/shape.ml: update_uid (ref) -- exempt: a fresh-id counter: ids are never reused, so a rewind need not restore it
 tensor/shape.ml: with_error_trace (ref) -- accounted; kept by rewinds: user configuration of error messages, not inference state
@@ -26,6 +27,8 @@ tensor/shape.ml: state (ref) -- fingerprinted by mutated_since; captured by capt
 tensor/shape.ml: construction_depth (ref) -- exempt: the construction window's depth, restored by the window's own finally
 tensor/shape.ml: active_update_steps (ref) -- fingerprinted by mutated_since; captured by capture_globals
 tensor/shape.ml: active_constraints (ref) -- fingerprinted by mutated_since; captured by capture_globals
+tensor/shape.ml: active_instances (ref) -- fingerprinted by mutated_since; captured by capture_globals
+tensor/shape.ml: tracing (ref) -- exempt: the shape-scheme traces in progress, restored by the trace's own finally
 tensor/shape.ml: taint (ref) -- exempt: the taint itself: a record of the first failure, not inference state
 tensor/shape.ml: discarded_updates (ref) -- accounted; kept by rewinds: a registry of what rewinds discarded: rewinds extend it, never restore it
 tensor/shape.ml: on_closure (ref) -- exempt: a hook Tensor installs once at module initialization, not inference state
@@ -52,6 +55,7 @@ tensor/tensor.ml: default_value_prec (ref) -- exempt: user configuration read wh
 tensor/tensor.ml: default_grad_prec (ref) -- exempt: user configuration read when a tensor is built, not inference state
 tensor/tensor.ml: max_sublabel_length (ref) -- exempt: user configuration of label printing, not inference state
 tensor/tensor.ml: param_postprocess (ref) -- exempt: a user-installed hook applied to new parameters, not inference state
+tensor/tensor.ml: applications (unread state) -- exempt
 tensor/tensor.ml: boundary note_external_handout -- a closed-world act: records that work left the session, so a rewind does not resurrect it; not open inference state
 tensor/tensor.ml: boundary record_checkpoint -- the closure's record: run at the commit of a successful finish_inference, and to re-anchor after a rewind or a session reset
 tensor/tensor.ml: boundary finally -- a scoped restore: puts back the roots saved at entry, on return and on a raise alike

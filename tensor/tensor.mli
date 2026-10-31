@@ -386,9 +386,69 @@ val with_rewind : ?label:string -> (unit -> 'a) -> 'a
     no longer be rewound to, the rewind's [Session_error] is raised; when [f] raises, [f]'s
     exception wins, as in {!with_checkpoint}. *)
 
+(** {2 Shape schemes (gh-ocannl-404)}
+
+    The low-level, explicit layer of shape schemes, which the [%op] integration (gh-ocannl-1751)
+    wraps. A scheme is the shape constraints a tensor function imposes, inferred once by a trace and
+    instantiated at each application:
+
+    - a shape error inside the function that does not depend on its arguments' shapes is raised by
+      {!Scheme.trace}, at the definition;
+    - {!Scheme.instantiate} adds the scheme's constraints, renamed, relating it to given argument
+      and result shapes, without running the function: the shapes close as an inline application of
+      the function would have closed them.
+
+    What is shared and what is per-application follows ML's value restriction: the dimensions of a
+    tensor created before the trace -- a shared parameter, lifted to the function's unit-parameter
+    scope -- stay fixed across applications, and everything the function creates (its intermediates,
+    a parameter created inside it, a capture reference made inside it) is fresh per application. So
+    create the shared parameters before {!Scheme.trace}. The design note is the gh-ocannl-404
+    issue's reconciled-plan comment; [docs/shape_inference.md] has the summary. *)
+module Scheme : sig
+  type tensor := t
+  type t
+
+  val label : t -> string
+  val arity : t -> int
+  val num_results : t -> int
+
+  val trace : label:string -> int -> (tensor list -> tensor list) -> t
+  (** [trace ~label n f] applies [f] to [n] tracing tensors whose shapes are fresh row variables,
+      inside {!with_rewind}, and returns the scheme of the constraints it registered over them and
+      over its results (a flat list: flatten a structure). The trace leaves nothing in the session.
+      Raises [Row.Shape_error] prefixed ["tracing the shape scheme <label>: "] on a shape error in
+      [f] (including one only the end-of-trace check of [f]'s trailing [Shape.set_dim] and the like
+      finds), when [f] forces dims or projections (inference cannot close during a trace), and for
+      what a scheme cannot carry: a precision-dependent total-elements constraint (random number
+      generation inside [f]), or a capture reference made outside [f] and bound or set by it. *)
+
+  val instantiate : ?application:string -> t -> args:Shape.t list -> results:Shape.t list -> unit
+  (** [instantiate s ~args ~results] adds [s]'s constraints for one application of its function to
+      [args] with [results] (fresh, inferred shapes, or the shapes of tensors computing the
+      results), without running the function. An argument-dependent shape error raises
+      [Row.Shape_error] prefixed ["applying the shape scheme <label> to <application>: "] and taints
+      the session, as a failed construction does; the constraints carry the application's name, so a
+      failure at the closure names it too. The next closure applies the solution to [args] and
+      [results] and closes them. Valid across closures, unless the scheme depends on open state no
+      shape it used holds (then refused after a closure: trace again). *)
+end
+
 (** Diagnostics and negative controls for the checkpoint machinery's tests. *)
 module For_testing : sig
   val restore_categories : string list
+
+  val trace_scheme :
+    sabotage:Shape.Scheme.sabotage -> label:string -> int -> (t list -> t list) -> Scheme.t
+  (** {!Scheme.trace} with one part of the mechanism disabled: negative controls. *)
+
+  val instantiate_scheme :
+    sabotage:Shape.Scheme.sabotage ->
+    ?application:string ->
+    Scheme.t ->
+    args:Shape.t list ->
+    results:Shape.t list ->
+    unit
+  (** {!Scheme.instantiate} with one part of the mechanism disabled: negative controls. *)
 
   val rewind_omitting : omit:string -> checkpoint -> unit
   (** {!rewind} skipping one restore category: to show a test's oracle notices it. *)

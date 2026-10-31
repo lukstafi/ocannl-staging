@@ -270,3 +270,10 @@ files.
   (`Tensor.For_testing.rewind_omitting`): `test/operations/checkpoint_rewind.ml`. A window op that
   rewrites an older shape's rows in place needs an equation: pointwise ops only add broadcasting
   inequalities, an einsum (`+*`) equates.
+- Shape schemes (gh-ocannl-404, `Shape.Scheme`): replaying a trace's constraints with renamed
+  variables is unsound alone. The solver mints variables mid-solve (row flank splits, the template
+  rule's `more_dims`), `apply_env_step` writes them into shapes, and LATER constraints mention them,
+  so the scheme also carries each constraint variable's solution under the trace's final
+  environment. Export everything else substituted under that environment, so it holds only unsolved
+  variables. A reference made before the trace may already be in `open_refs`, which lists each once
+  per inference: the trace records its own touches (`trace_touches`).
