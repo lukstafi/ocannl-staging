@@ -2097,17 +2097,17 @@ let reduce_solved_basis (solved : solved_dim list) : string option =
    guessed minimal instead (e.g. a learning-rate expression's axis meeting a single parameter shape
    closes to 1 rather than widening to it). [At_least_dim] variables keep GLB closing regardless:
    direct indexing is a dim-carrying use. *)
-let resolve_at_use_dim = Hash_set.create (module Dim_var)
+let resolve_at_use_dim = ref (Set.empty (module Dim_var))
 
 (* Writes to the module-level inference sets count as session mutations (gh-ocannl-1301): they steer
    later guessing and resolution of open variables, so a construction that failed after one must
    taint. *)
 let add_resolve_at_use_dim v =
-  if not (Hash_set.mem resolve_at_use_dim v) then (
+  if not (Set.mem !resolve_at_use_dim v) then (
     note_mutation ();
-    Hash_set.add resolve_at_use_dim v)
+    resolve_at_use_dim := Set.add !resolve_at_use_dim v)
 
-let is_resolve_at_use_dim v = Hash_set.mem resolve_at_use_dim v
+let is_resolve_at_use_dim v = Set.mem !resolve_at_use_dim v
 
 let%track6_sexp rec unify_dim ~stage origin (eq : dim * dim) env : constraint_ list * _ =
   let dim1 : dim = subst_dim env @@ fst eq and dim2 : dim = subst_dim env @@ snd eq in
@@ -2595,39 +2595,39 @@ let%track6_sexp rec unify_dim ~stage origin (eq : dim * dim) env : constraint_ l
 
 let drop_from_end l n = List.rev @@ List.drop (List.rev l) n
 let take_from_end (l : dim list) (n : int) : dim list = List.rev @@ List.take (List.rev l) n
-let safe_to_guess = Hash_set.create (module Row_var)
+let safe_to_guess = ref (Set.empty (module Row_var))
 
 let add_safe_to_guess v =
-  if not (Hash_set.mem safe_to_guess v) then (
+  if not (Set.mem !safe_to_guess v) then (
     note_mutation ();
-    Hash_set.add safe_to_guess v)
+    safe_to_guess := Set.add !safe_to_guess v)
 
-let used_in_spec_or_compose = Hash_set.create (module Row_var)
-let used_in_pointwise = Hash_set.create (module Row_var)
+let used_in_spec_or_compose = ref (Set.empty (module Row_var))
+let used_in_pointwise = ref (Set.empty (module Row_var))
 
 let add_used_in_spec_or_compose v =
-  if not (Hash_set.mem used_in_spec_or_compose v) then (
+  if not (Set.mem !used_in_spec_or_compose v) then (
     note_mutation ();
-    Hash_set.add used_in_spec_or_compose v)
+    used_in_spec_or_compose := Set.add !used_in_spec_or_compose v)
 
 let add_used_in_pointwise v =
-  if not (Hash_set.mem used_in_pointwise v) then (
+  if not (Set.mem !used_in_pointwise v) then (
     note_mutation ();
-    Hash_set.add used_in_pointwise v)
+    used_in_pointwise := Set.add !used_in_pointwise v)
 
 (* gh-ocannl-1656: dimension variables naming a component of a concatenated einsum axis. Closure
    never guesses one to dimension 1: an unsized component is a real segment, not a broadcast, and a
    guess silently picks which elements an extraction ([p^o => o]) or replacement ([a => a^b])
    touches. A discardable component (a block spec's, guessed to 0) is exempt. *)
-let concat_component_vars = Hash_set.create (module Dim_var)
+let concat_component_vars = ref (Set.empty (module Dim_var))
 
 let add_concat_component v =
-  if not (Hash_set.mem concat_component_vars v) then (
+  if not (Set.mem !concat_component_vars v) then (
     note_mutation ();
-    Hash_set.add concat_component_vars v)
+    concat_component_vars := Set.add !concat_component_vars v)
 
 let refuse_concat_component_guess env v =
-  if Hash_set.mem concat_component_vars v && not (Set.mem env.discardable_vars v) then
+  if Set.mem !concat_component_vars v && not (Set.mem env.discardable_vars v) then
     raise
     @@ Shape_error
          ( [%string
@@ -2645,14 +2645,14 @@ let refuse_concat_component_guess env v =
    (leaf tensors and parameters, from the [Terminal_row] dispatch), for parameter-initialization
    cones ([Tensor.param] via [Shape.set_resolve_at_use]: the init expression's job is to fill the
    parameter's shape, so its intermediates widen to it), and for explicit [stretch] wrappers. *)
-let resolve_at_use = Hash_set.create (module Row_var)
+let resolve_at_use = ref (Set.empty (module Row_var))
 
 let add_resolve_at_use v =
-  if not (Hash_set.mem resolve_at_use v) then (
+  if not (Set.mem !resolve_at_use v) then (
     note_mutation ();
-    Hash_set.add resolve_at_use v)
+    resolve_at_use := Set.add !resolve_at_use v)
 
-let is_resolve_at_use v = Hash_set.mem resolve_at_use v
+let is_resolve_at_use v = Set.mem !resolve_at_use v
 
 (* Persistent rank-relation graph, global like [global_template_cache] (row variable ids are never
    reused, so entries from unrelated inference problems are unreachable). An edge [v -> (w, k)] with
@@ -2662,7 +2662,7 @@ let is_resolve_at_use v = Hash_set.mem resolve_at_use v
    [Bounds_row] res/opnd adjacency lists which drop entries when a variable is substituted away —
    mutually-growing row variables ping-pong between the store and the in-flight constraint list, so
    divergence detection needs this side table. *)
-let global_rank_edges = Hashtbl.create (module Row_var)
+let global_rank_edges : (row_var * int) list Map.M(Row_var).t ref = ref (Map.empty (module Row_var))
 
 (* Would adding [rank v >= rank w + k] close a cycle of positive total weight? A path [w ~> v] of
    total weight [s] entails [rank v >= rank v + s + k]: contradiction iff [s + k > 0]. Stored
@@ -2678,7 +2678,7 @@ let closes_positive_rank_cycle ~src:v ~dst:w k =
     (not (Hash_set.mem visited u))
     &&
     (Hash_set.add visited u;
-     List.exists (Hashtbl.find_multi global_rank_edges u) ~f:(fun (u', k') ->
+     List.exists (Map.find_multi !global_rank_edges u) ~f:(fun (u', k') ->
          dfs u' (need_positive && k' = 0)))
   in
   dfs w (k = 0)
@@ -2695,11 +2695,11 @@ let add_rank_edge ~rows v w k =
     @@ Shape_error
          ("Infinite number of axes by rank cycle among row variables", [ Row_mismatch rows ])
   else
-    let edges = Hashtbl.find_multi global_rank_edges v in
+    let edges = Map.find_multi !global_rank_edges v in
     if not (List.mem edges (w, k) ~equal:(fun (w1, k1) (w2, k2) -> equal_row_var w1 w2 && k1 = k2))
     then (
       note_mutation ();
-      Hashtbl.add_multi global_rank_edges ~key:v ~data:(w, k))
+      global_rank_edges := Map.add_multi !global_rank_edges ~key:v ~data:(w, k))
 
 (* Equate two rows, no broadcasting. Does not resolve inequalities. *)
 let%debug5_sexp rec unify_row ~stage origin (eq : t * t) env : constraint_ list * _ =
@@ -2799,12 +2799,12 @@ let%debug5_sexp rec unify_row ~stage origin (eq : t * t) env : constraint_ list 
           match r2.bcast with
           | Row_var v2 ->
               let beg_dims2 = r2.beg_dims in
-              if Hash_set.mem safe_to_guess v2 then add_safe_to_guess v;
-              if Hash_set.mem used_in_spec_or_compose v2 then add_used_in_spec_or_compose v;
-              if Hash_set.mem used_in_pointwise v2 then add_used_in_pointwise v;
-              if Hash_set.mem safe_to_guess v then add_safe_to_guess v2;
-              if Hash_set.mem used_in_spec_or_compose v then add_used_in_spec_or_compose v2;
-              if Hash_set.mem used_in_pointwise v then add_used_in_pointwise v2;
+              if Set.mem !safe_to_guess v2 then add_safe_to_guess v;
+              if Set.mem !used_in_spec_or_compose v2 then add_used_in_spec_or_compose v;
+              if Set.mem !used_in_pointwise v2 then add_used_in_pointwise v;
+              if Set.mem !safe_to_guess v then add_safe_to_guess v2;
+              if Set.mem !used_in_spec_or_compose v then add_used_in_spec_or_compose v2;
+              if Set.mem !used_in_pointwise v then add_used_in_pointwise v2;
               (* Unification merges the rows, so use-site resolvability is shared. *)
               if is_resolve_at_use v2 then add_resolve_at_use v;
               if is_resolve_at_use v then add_resolve_at_use v2;
@@ -3451,7 +3451,101 @@ let%track5_sexp solve_dim_ineq ~(stage : stage) origin ~(res : dim) ~(opnd : dim
       raise
       @@ Shape_error ("dimension comparison for axis: mismatch", [ Dim_mismatch [ res; opnd ] ])
 
-let global_template_cache = Hashtbl.Poly.create ()
+let global_template_cache : (row_var * int * int, row_var) Map.Poly.t ref = ref Map.Poly.empty
+
+(* {2 Checkpoint capture (gh-ocannl-903)}
+
+   Every module-level binding above whose writes count as session mutations is a persistent value,
+   so a checkpoint captures it as a pointer and a rewind puts the pointer back. [capture_globals]
+   must capture each such binding (test/operations/mutation_serial_scan holds it to that, unless the
+   binding is [exempt] or [kept]); [restore_globals] destructures the record exhaustively, so a
+   captured field it forgets to restore is an unused-variable error. *)
+type globals = {
+  g_pending_roles : (Ir.Indexing.static_symbol * [ `Extent | `Slice ]) list;
+  g_resolve_at_use_dim : Set.M(Dim_var).t;
+  g_safe_to_guess : Set.M(Row_var).t;
+  g_used_in_spec_or_compose : Set.M(Row_var).t;
+  g_used_in_pointwise : Set.M(Row_var).t;
+  g_concat_component_vars : Set.M(Dim_var).t;
+  g_resolve_at_use : Set.M(Row_var).t;
+  g_rank_edges : (row_var * int) list Map.M(Row_var).t;
+  g_template_cache : (row_var * int * int, row_var) Map.Poly.t;
+}
+
+let capture_globals () =
+  {
+    g_pending_roles = !pending_roles;
+    g_resolve_at_use_dim = !resolve_at_use_dim;
+    g_safe_to_guess = !safe_to_guess;
+    g_used_in_spec_or_compose = !used_in_spec_or_compose;
+    g_used_in_pointwise = !used_in_pointwise;
+    g_concat_component_vars = !concat_component_vars;
+    g_resolve_at_use = !resolve_at_use;
+    g_rank_edges = !global_rank_edges;
+    g_template_cache = !global_template_cache;
+  }
+
+let restore_globals
+    {
+      g_pending_roles;
+      g_resolve_at_use_dim;
+      g_safe_to_guess;
+      g_used_in_spec_or_compose;
+      g_used_in_pointwise;
+      g_concat_component_vars;
+      g_resolve_at_use;
+      g_rank_edges;
+      g_template_cache;
+    } =
+  pending_roles := g_pending_roles;
+  resolve_at_use_dim := g_resolve_at_use_dim;
+  safe_to_guess := g_safe_to_guess;
+  used_in_spec_or_compose := g_used_in_spec_or_compose;
+  used_in_pointwise := g_used_in_pointwise;
+  concat_component_vars := g_concat_component_vars;
+  resolve_at_use := g_resolve_at_use;
+  global_rank_edges := g_rank_edges;
+  global_template_cache := g_template_cache
+[@@mutation_serial.boundary
+  "part of a rewind: puts back the solver's inference sets as a checkpoint captured them"]
+
+(* The components of two captures that differ (physically: each is a persistent value). *)
+let globals_differences
+    {
+      g_pending_roles = a1;
+      g_resolve_at_use_dim = a2;
+      g_safe_to_guess = a3;
+      g_used_in_spec_or_compose = a4;
+      g_used_in_pointwise = a5;
+      g_concat_component_vars = a6;
+      g_resolve_at_use = a7;
+      g_rank_edges = a8;
+      g_template_cache = a9;
+    }
+    {
+      g_pending_roles = b1;
+      g_resolve_at_use_dim = b2;
+      g_safe_to_guess = b3;
+      g_used_in_spec_or_compose = b4;
+      g_used_in_pointwise = b5;
+      g_concat_component_vars = b6;
+      g_resolve_at_use = b7;
+      g_rank_edges = b8;
+      g_template_cache = b9;
+    } =
+  List.filter_map
+    [
+      ("Row.pending_roles", phys_equal a1 b1);
+      ("Row.resolve_at_use_dim", phys_equal a2 b2);
+      ("Row.safe_to_guess", phys_equal a3 b3);
+      ("Row.used_in_spec_or_compose", phys_equal a4 b4);
+      ("Row.used_in_pointwise", phys_equal a5 b5);
+      ("Row.concat_component_vars", phys_equal a6 b6);
+      ("Row.resolve_at_use", phys_equal a7 b7);
+      ("Row.global_rank_edges", phys_equal a8 b8);
+      ("Row.global_template_cache", phys_equal a9 b9);
+    ]
+    ~f:(fun (name, same) -> if same then None else Some name)
 
 let%debug5_sexp solve_row_ineq ~(stage : stage) origin ~(res : t) ~(opnd : t) env :
     constraint_ list * _ =
@@ -3717,9 +3811,13 @@ let%debug5_sexp solve_row_ineq ~(stage : stage) origin ~(res : t) ~(opnd : t) en
         (res_v, opnd_dims_l - res_dims_l, opnd_beg_dims_l - res_beg_dims_l)
       in
       let templ_v : row_var =
-        Hashtbl.find_or_add global_template_cache templ_key ~default:(fun () ->
+        match Map.find !global_template_cache templ_key with
+        | Some v -> v
+        | None ->
             note_mutation ();
-            get_row_var ())
+            let v = get_row_var () in
+            global_template_cache := Map.set !global_template_cache ~key:templ_key ~data:v;
+            v
       in
       if more_dims_l > 0 then add_safe_to_guess templ_v;
       let template : t =
@@ -4055,8 +4153,8 @@ let dim_var_is_in_param v env =
   | _ -> false
 
 let is_safe_to_guess v =
-  Hash_set.mem safe_to_guess v
-  || (Hash_set.mem used_in_pointwise v && not (Hash_set.mem used_in_spec_or_compose v))
+  Set.mem !safe_to_guess v
+  || (Set.mem !used_in_pointwise v && not (Set.mem !used_in_spec_or_compose v))
 
 let%track5_sexp rec eliminate_rows_constraint ~depth stage origin ~glb (rows : row list)
     (constr : row_constraint) env : constraint_ list * environment =

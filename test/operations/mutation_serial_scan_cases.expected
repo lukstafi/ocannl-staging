@@ -91,3 +91,14 @@ without the boundary, the local function's field write is refused: true
 an exported exempt binding is accepted, its exemption used by the export: true
 an exported binding that is not exempt is still refused: true
 a source that does not parse is the input's fault, not the scanner's: true
+a noted ref that capture_globals captures is accepted: true
+a noted ref that capture_globals does not capture is refused: true
+a capture in a record capture_globals does not return does not count: true
+a session module without capture_globals is refused: true
+a noted table cannot be captured as a pointer: true
+a kept binding needs no capture: true
+a kept binding that capture_globals captures anyway is stale: true
+an exempt binding needs no capture: true
+record fields captured as st.f are accepted: true
+an uncaptured record field is refused: true
+the capture rule is off for files that are not session modules: true

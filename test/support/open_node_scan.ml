@@ -1,10 +1,10 @@
 (** The reader behind [test/operations/open_node_scan] (gh-ocannl-1579): every tensor node a module
     of [tensor/] creates reaches [Tensor.note_open_node].
 
-    A rewind discards exactly the nodes the frontend allocated since the last closure, tracked by
-    uid in [Tensor.open_node_uids] (gh-ocannl-1505). A creation site that forgets the call leaves
-    its node alive as a handle across a rewind; the id range the uid list replaced caught such a
-    site by construction. Until this scan the pairing was documentation only.
+    A rewind discards exactly the nodes the frontend allocated since the last closure, tracked in
+    [Tensor.open_nodes] (gh-ocannl-1505). A creation site that forgets the call leaves its node
+    alive as a handle across a rewind; the id range the node list replaced caught such a site by
+    construction. Until this scan the pairing was documentation only.
 
     {1 What it reads}
 

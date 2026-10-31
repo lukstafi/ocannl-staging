@@ -141,16 +141,20 @@ let take_forward_code t =
   t.consumption.fwd <- Taken;
   t.forward
 
-(** {2 Closure checkpoint and rewind (gh-ocannl-1301)}
+(** {2 Checkpoints and rewind (gh-ocannl-1301, gh-ocannl-903)}
 
-    [checkpoint] is recorded at the end of every successful [Shape.finish_inference] (through
-    [Shape.set_on_closure]): the id mark, and the two root maps (persistent values, so a pointer
-    copy). The nodes the frontend allocated since the closure are recorded exactly, by uid, in
-    [open_node_uids]: they are the open work's nodes. [rewind_to_last_closure] discards them into
-    [discarded_nodes], and every use of a discarded tensor or node is refused with the rewind's
-    provenance. Exact rather than an id/uid range (gh-ocannl-1505): a node created in the window by
-    anyone else -- a hand-made [Tn.create], a [Persistence.load] -- may carry an id inside the
-    window's range, and is not open inference work. *)
+    A checkpoint snapshots the open frontier ({!Shape.Checkpoint} holds the shape-inference half):
+    here, the graph's module-level state -- the root maps, the random-seed singleton and the open
+    nodes, persistent values captured as pointers by [capture_globals] -- and every mutable field of
+    each open node ({!Tn.snapshot_open}). A rewind restores them and discards the nodes the window
+    allocated into [discarded_nodes]; every use of a discarded tensor or node is refused with the
+    rewind's provenance. The nodes are tracked exactly rather than by an id/uid range
+    (gh-ocannl-1505): a node created in the window by anyone else -- a hand-made [Tn.create], a
+    [Persistence.load] -- may carry an id inside the window's range, and is not open inference work.
+
+    [last_closure] is recorded at the end of every successful [Shape.finish_inference] (through
+    [Shape.set_on_closure]): with an empty frontier, it is the base checkpoint
+    [rewind_to_last_closure] returns to. *)
 
 (* Global singleton for random seed, used in init_params and random number generation *)
 let random_seed : t option ref = ref None
@@ -160,78 +164,116 @@ let random_seed : t option ref = ref None
    the singleton alone does not say which seeds the session's graphs draw from (gh-ocannl-1727). *)
 let random_seeds_created : t list ref = ref []
 
-type checkpoint = {
-  mutable ck_mark : int;
-  mutable ck_fwd : t Map.M(Int).t;
-  mutable ck_bprop : t Map.M(Int).t;
-  mutable ck_count : int;  (** Closures recorded so far. *)
-  mutable ck_seed : t option;  (** The random-seed singleton at the closure. *)
-}
-
-let checkpoint =
-  {
-    ck_mark = 0;
-    ck_fwd = Map.empty (module Int);
-    ck_bprop = Map.empty (module Int);
-    ck_count = 0;
-    ck_seed = None;
-  }
-
-(* The uids of the nodes the frontend allocated since the last closure, exactly ([note_open_node] at
-   every frontend [Tn.create]). A closure closes every shape of the open work, so it empties
-   this. *)
-let open_node_uids : int list ref = ref []
+(* The nodes the frontend allocated since the last closure, newest first ([note_open_node] at every
+   frontend [Tn.create]). A closure closes every shape of the open work, so it empties this. *)
+let open_nodes : Tn.t list ref = ref []
 [@@mutation_serial.exempt
   "a record of what the open work allocated: an entry left by a failure that did not taint is a \
    node nobody holds, which a later rewind discards and a closure forgets"]
 
-let note_open_node (tn : Tn.t) = open_node_uids := tn.uid :: !open_node_uids
+let note_open_node (tn : Tn.t) = open_nodes := tn :: !open_nodes
+
+(* External handouts since the last closure, by tensor id: code given to a caller
+   ([consume_forward_code], [consume_backprop_code]) is a closed-world act, so a rewind never
+   resurrects a root whose code the caller holds. Embeddings by constructions are not recorded --
+   those constructions are what a rewind discards. *)
+type handouts = {
+  mutable fwd_out : Set.M(Int).t;
+      [@mutation_serial.kept "a record of code given to callers, which no rewind takes back"]
+  mutable bprop_out : Set.M(Int).t;
+      [@mutation_serial.kept "a record of code given to callers, which no rewind takes back"]
+}
+
+let handouts = { fwd_out = Set.empty (module Int); bprop_out = Set.empty (module Int) }
+
+let note_external_handout ~fwd t =
+  if fwd then handouts.fwd_out <- Set.add handouts.fwd_out t.value.id
+  else handouts.bprop_out <- Set.add handouts.bprop_out t.value.id
+[@@mutation_serial.boundary
+  "a closed-world act: records that work left the session, so a rewind does not resurrect it; not \
+   open inference state"]
+
+(* The graph's module-level session state, captured as pointers. Every such binding of this file is
+   captured here, or classified [kept] or [exempt] (test/operations/mutation_serial_scan holds the
+   relationship). *)
+type globals = {
+  g_forward_roots : t Map.M(Int).t;
+  g_backprop_roots : t Map.M(Int).t;
+  g_random_seed : t option;
+  g_random_seeds_created : t list;
+  g_open_nodes : Tn.t list;
+}
+
+let capture_globals () =
+  {
+    g_forward_roots = session_state.forward_roots;
+    g_backprop_roots = session_state.backprop_roots;
+    g_random_seed = !random_seed;
+    g_random_seeds_created = !random_seeds_created;
+    g_open_nodes = !open_nodes;
+  }
+
+type checkpoint = {
+  ck_shape : Shape.Checkpoint.t;
+  ck_globals : globals;
+  ck_nodes : Tn.open_snapshot list;  (** The open nodes' fields; none for a closure's. *)
+}
+
+let take_checkpoint ~closure ~label =
+  let id_mark = session_state.next_id in
+  {
+    ck_shape =
+      (if closure then Shape.closure_checkpoint ~id_mark else Shape.checkpoint ~label ~id_mark);
+    ck_globals = capture_globals ();
+    ck_nodes = (if closure then [] else List.map !open_nodes ~f:Tn.snapshot_open);
+  }
+
+let last_closure = ref (take_checkpoint ~closure:true ~label:"")
+[@@mutation_serial.kept
+  "the last closure's checkpoint: a closure records it, and no rewind restores an older one"]
 
 let record_checkpoint () =
-  checkpoint.ck_mark <- session_state.next_id;
-  open_node_uids := [];
-  checkpoint.ck_fwd <- session_state.forward_roots;
-  checkpoint.ck_bprop <- session_state.backprop_roots;
-  checkpoint.ck_count <- checkpoint.ck_count + 1;
-  checkpoint.ck_seed <- !random_seed
+  open_nodes := [];
+  handouts.fwd_out <- Set.empty (module Int);
+  handouts.bprop_out <- Set.empty (module Int);
+  last_closure := take_checkpoint ~closure:true ~label:""
 [@@mutation_serial.boundary
   "the closure's record: run at the commit of a successful finish_inference, and to re-anchor \
    after a rewind or a session reset"]
 
 let () = Shape.set_on_closure record_checkpoint
 
-(* An external handout of closed work (code given to a caller) is a closed-world act: record it in
-   the checkpoint too, so a rewind never resurrects a root whose code the caller holds. Embeddings
-   by constructions are not recorded -- those constructions are what a rewind discards. *)
-let record_handout_in_checkpoint ~fwd t =
-  if t.value.id < checkpoint.ck_mark then
-    if fwd then checkpoint.ck_fwd <- Map.remove checkpoint.ck_fwd t.value.id
-    else checkpoint.ck_bprop <- Map.remove checkpoint.ck_bprop t.value.id
-[@@mutation_serial.boundary
-  "a closed-world act: records in the closure's record that closed work left the session, so a \
-   rewind does not resurrect it; not open inference state"]
-
 (* The nodes discarded by rewinds, by uid (never reused, across namespaces and reinitializations
    alike), with the provenance of the rewind that discarded each. *)
 let discarded_nodes : (int, string) Hashtbl.t = Hashtbl.create (module Int)
+[@@mutation_serial.kept "a registry of what rewinds discarded: rewinds extend it, never restore it"]
+
 let discarded_by (tn : Tn.t) = Hashtbl.find discarded_nodes tn.uid
 
 let with_unchanged_roots ~f =
   let fwd_roots = session_state.forward_roots in
   let bprop_roots = session_state.backprop_roots in
-  let ck_fwd = checkpoint.ck_fwd and ck_bprop = checkpoint.ck_bprop in
-  let ck_count = checkpoint.ck_count in
+  let fwd_out = handouts.fwd_out and bprop_out = handouts.bprop_out in
+  let closure = !last_closure in
   let finally () =
     session_state.forward_roots <- fwd_roots;
     session_state.backprop_roots <- bprop_roots;
-    (* Handouts inside [f] are undone, so their checkpoint records are too (gh-ocannl-1301); after a
-       closure inside [f], the restored maps are the closed state's roots. *)
-    if checkpoint.ck_count = ck_count then (
-      checkpoint.ck_fwd <- ck_fwd;
-      checkpoint.ck_bprop <- ck_bprop)
-    else (
-      checkpoint.ck_fwd <- fwd_roots;
-      checkpoint.ck_bprop <- bprop_roots);
+    (* Handouts inside [f] are undone, so their records are too (gh-ocannl-1301); after a closure
+       inside [f], the restored maps are the closed state's roots. *)
+    if phys_equal !last_closure closure then (
+      handouts.fwd_out <- fwd_out;
+      handouts.bprop_out <- bprop_out)
+    else
+      last_closure :=
+        {
+          !last_closure with
+          ck_globals =
+            {
+              !last_closure.ck_globals with
+              g_forward_roots = fwd_roots;
+              g_backprop_roots = bprop_roots;
+            };
+        };
     (* A root's code can only have been taken inside [f] if it was a root at entry, and a root is by
        construction not yet taken: restoring the maps restores the markers. *)
     Map.iter fwd_roots ~f:(fun t -> t.consumption.fwd <- Not_handed_out);
@@ -1237,7 +1279,7 @@ let consume_forward_code t =
      roots built since the first handout must neither veto replay nor be consumed by it. *)
   if equal_handout t.consumption.fwd Taken then (
     (* Taken by an embedding (e.g. [%cd]) and now handed out: a handout all the same. *)
-    record_handout_in_checkpoint ~fwd:true t;
+    note_external_handout ~fwd:true t;
     t.forward)
   else (
     if not @@ is_fwd_root t then
@@ -1263,7 +1305,7 @@ let consume_forward_code t =
                {|Tensor.consume_forward_code for %{debug_name t}:
 found conflicting roots with shared non-embedded descendants: %{String.concat ~sep:", " @@ List.map ~f:debug_name conflicting_roots}|}],
              Some t );
-    record_handout_in_checkpoint ~fwd:true t;
+    note_external_handout ~fwd:true t;
     take_forward_code t)
 
 let consume_backprop_code t =
@@ -1278,7 +1320,7 @@ let consume_backprop_code t =
                Some t ))
   in
   if equal_handout t.consumption.bprop Taken then (
-    record_handout_in_checkpoint ~fwd:false t;
+    note_external_handout ~fwd:false t;
     diff.backprop)
   else (
     if not @@ is_bprop_root t then
@@ -1308,7 +1350,7 @@ let consume_backprop_code t =
                {|Tensor.consume_backprop_code for %{debug_grad t}:
 found conflicting roots with shared non-embedded grad descendants: %{String.concat ~sep:", " @@ List.map ~f:debug_grad conflicting_roots}|}],
              Some t );
-    record_handout_in_checkpoint ~fwd:false t;
+    note_external_handout ~fwd:false t;
     remove_bprop_root t;
     t.consumption.bprop <- Taken;
     diff.backprop)
@@ -1334,13 +1376,18 @@ let rec get_random_seed () =
 
 let with_saved_random_seed f =
   let saved = !random_seed in
-  let ck_count = checkpoint.ck_count in
+  let closure = !last_closure in
   Exn.protectx ~f
     ~finally:(fun () ->
       random_seed := saved;
       (* A closure inside [f] checkpointed [f]'s scoped seed: the restored one is the closed state's
          (gh-ocannl-1301). *)
-      if checkpoint.ck_count <> ck_count then checkpoint.ck_seed <- saved)
+      if not (phys_equal !last_closure closure) then
+        last_closure :=
+          {
+            !last_closure with
+            ck_globals = { !last_closure.ck_globals with g_random_seed = saved };
+          })
     ()
 [@@mutation_serial.boundary
   "a scoped restore: puts back the seed saved at entry, on return and on a raise alike"]
@@ -1363,29 +1410,148 @@ let install_validity_check () =
           Option.iter (discarded_by tn) ~f:(fun provenance ->
               raise @@ Session_error (discarded_message tn provenance, None)))
 
+(* Restores the graph half of [ck] and the shape-inference half, discarding what the window
+   allocated. The caller has validated [ck]. [omit] skips one restore category: negative controls
+   only ([For_testing.rewind_omitting]). *)
+let restore_checkpoint ?omit ~provenance ck =
+  let skip c = Option.exists omit ~f:(String.equal c) in
+  let { g_forward_roots; g_backprop_roots; g_random_seed; g_random_seeds_created; g_open_nodes } =
+    ck.ck_globals
+  in
+  if not (skip "node discard") then (
+    (* The nodes allocated since the checkpoint: [open_nodes] grows by consing onto the list the
+       checkpoint captured. *)
+    let rec since acc = function
+      | l when phys_equal l g_open_nodes -> acc
+      | [] -> acc
+      | (tn : Tn.t) :: rest -> since (tn :: acc) rest
+    in
+    List.iter (since [] !open_nodes) ~f:(fun (tn : Tn.t) ->
+        Hashtbl.set discarded_nodes ~key:tn.uid ~data:provenance);
+    install_validity_check ());
+  if not (skip "roots") then (
+    (* The checkpoint's roots, wholesale: a root a discarded construction embedded (via [Tensor.op]
+       or [%cd]'s [take_forward_code]) is a root again, with its handout marker reset -- only a root
+       is ever taken, so these are all the markers the window could have set. External handouts are
+       not taken back. *)
+    let fwd = Map.filter_keys g_forward_roots ~f:(fun id -> not (Set.mem handouts.fwd_out id)) in
+    let bprop =
+      Map.filter_keys g_backprop_roots ~f:(fun id -> not (Set.mem handouts.bprop_out id))
+    in
+    session_state.forward_roots <- fwd;
+    session_state.backprop_roots <- bprop;
+    Map.iter fwd ~f:(fun t -> t.consumption.fwd <- Not_handed_out);
+    Map.iter bprop ~f:(fun t -> t.consumption.bprop <- Not_handed_out));
+  (* The seed singleton as it was at the checkpoint: one created since is dropped, one replaced
+     since ([set_random_seed]) comes back. *)
+  if not (skip "seed") then (
+    random_seed := g_random_seed;
+    random_seeds_created := g_random_seeds_created);
+  open_nodes := g_open_nodes;
+  if not (skip "nodes") then List.iter ck.ck_nodes ~f:Tn.restore_open;
+  Shape.Checkpoint.rewind ?omit ck.ck_shape ~provenance
+[@@mutation_serial.boundary "the rewind: it restores the checkpoint and clears the taint"]
+
+let rewind_provenance ~default reason =
+  match Shape.taint_provenance () with
+  | Some provenance -> provenance
+  | None -> Option.value reason ~default
+
 let rewind_to_last_closure ?reason () =
   Shape.check_can_rewind ();
-  let provenance =
-    match Shape.taint_provenance () with
-    | Some provenance -> provenance
-    | None -> Option.value reason ~default:"an explicit Tensor.rewind_to_last_closure"
-  in
-  if not (List.is_empty !open_node_uids) then (
-    List.iter !open_node_uids ~f:(fun uid -> Hashtbl.set discarded_nodes ~key:uid ~data:provenance);
-    install_validity_check ());
-  (* The closure's roots, wholesale: a root a discarded construction embedded (via [Tensor.op] or
-     [%cd]'s [take_forward_code]) is a root again, with its handout marker reset; external handouts
-     of closed work were recorded in the checkpoint as they happened. *)
-  session_state.forward_roots <- checkpoint.ck_fwd;
-  session_state.backprop_roots <- checkpoint.ck_bprop;
-  Map.iter checkpoint.ck_fwd ~f:(fun t -> t.consumption.fwd <- Not_handed_out);
-  Map.iter checkpoint.ck_bprop ~f:(fun t -> t.consumption.bprop <- Not_handed_out);
-  (* The seed singleton as it was at the closure: one created since is dropped, one replaced since
-     ([set_random_seed]) comes back. *)
-  random_seed := checkpoint.ck_seed;
-  Shape.rewind_open_state ~provenance;
+  let provenance = rewind_provenance ~default:"an explicit Tensor.rewind_to_last_closure" reason in
+  restore_checkpoint ~provenance !last_closure;
   record_checkpoint ()
-[@@mutation_serial.boundary "the rewind: it discards all open state and clears the taint"]
+
+let checkpoint ?label () =
+  Shape.check_can_rewind ~what:"Tensor.checkpoint" ();
+  (* A checkpoint records a consistent session: rewind the failure first. *)
+  Shape.check_untainted ();
+  take_checkpoint ~closure:false ~label:(Option.value label ~default:"")
+
+let checkpoint_refusal ck =
+  match Shape.Checkpoint.refusal ck.ck_shape with
+  | Some reason -> Some reason
+  | None ->
+      List.find_map ck.ck_nodes ~f:(fun s ->
+          if Tn.open_snapshot_settled s then
+            let name = Tn.debug_name (Tn.open_snapshot_node s) in
+            Some
+              [%string
+                "the precision of %{name}, open at the checkpoint, began settling after it; a \
+                 settled precision is memoized and no rewind can reset it -- rewind to the last \
+                 closure instead"]
+          else None)
+
+let rewind_impl ?omit ?reason ck =
+  Shape.check_can_rewind ~what:"Tensor.rewind" ();
+  let name = Shape.Checkpoint.label ck.ck_shape in
+  Option.iter (checkpoint_refusal ck) ~f:(fun why ->
+      raise
+      @@ Session_error
+           ( [%string
+               "Tensor.rewind: cannot rewind to %{name}: %{why}. Tensor.rewind_to_last_closure () \
+                is always available"],
+             None ));
+  let provenance =
+    rewind_provenance ~default:[%string "an explicit Tensor.rewind to %{name}"] reason
+  in
+  restore_checkpoint ?omit ~provenance ck
+
+let rewind ?reason ck = rewind_impl ?reason ck
+
+let with_checkpoint ?label f =
+  let ck = checkpoint ?label () in
+  try f ()
+  with exn ->
+    let bt = Stdlib.Printexc.get_raw_backtrace () in
+    (* [f]'s exception wins: a checkpoint [f] invalidated (by closing inference) cannot be rewound
+       to, and the session keeps whatever taint [f] left, naming its failure. *)
+    (try rewind ck with Session_error _ -> ());
+    Stdlib.Printexc.raise_with_backtrace exn bt
+
+let with_rewind ?label f =
+  let ck = checkpoint ?label () in
+  match f () with
+  | result ->
+      (* Loud on purpose: a trace that cannot be rewound has left its work in the session. *)
+      rewind ck;
+      result
+  | exception exn ->
+      let bt = Stdlib.Printexc.get_raw_backtrace () in
+      (try rewind ck with Session_error _ -> ());
+      Stdlib.Printexc.raise_with_backtrace exn bt
+
+module For_testing = struct
+  let restore_categories =
+    [ "node discard"; "roots"; "seed"; "nodes" ] @ Shape.Checkpoint.categories
+
+  let rewind_omitting ~omit ck =
+    if not (List.mem restore_categories omit ~equal:String.equal) then
+      invalid_arg ("Tensor.For_testing.rewind_omitting: unknown category " ^ omit);
+    rewind_impl ~omit ck
+
+  let checkpoint_differences ck =
+    let { g_forward_roots; g_backprop_roots; g_random_seed; g_random_seeds_created; g_open_nodes } =
+    ck.ck_globals
+  in
+    let now = capture_globals () in
+    List.filter_map
+      [
+        ("Tensor forward roots", phys_equal now.g_forward_roots g_forward_roots);
+        ("Tensor backprop roots", phys_equal now.g_backprop_roots g_backprop_roots);
+        ("Tensor random seed", phys_equal now.g_random_seed g_random_seed);
+        ( "Tensor random seeds created",
+          phys_equal now.g_random_seeds_created g_random_seeds_created );
+        ("Tensor open nodes", phys_equal now.g_open_nodes g_open_nodes);
+      ]
+      ~f:(fun (name, same) -> if same then None else Some name)
+    @ List.concat_map ck.ck_nodes ~f:Tn.open_snapshot_differences
+    @ Shape.Checkpoint.differences ck.ck_shape
+
+  let checkpoint_sizes ck =
+    ("open nodes", List.length ck.ck_globals.g_open_nodes) :: Shape.Checkpoint.sizes ck.ck_shape
+end
 
 let%track5_sexp unsafe_reinitialize ?(namespace = Tn.default_namespace) () : unit =
   Tn.set_current_namespace namespace;

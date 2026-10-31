@@ -585,6 +585,27 @@ let set_solved_sym Shape_writer r s =
         ~wanted:(Sexp.to_string_hum (sexp_of_static_symbol s))
   | None, None -> r.solved_sym <- Some s
 
+(* A checkpoint's record of a reference's solution (gh-ocannl-903): the reference itself and its
+   mutable fields, destructured exhaustively, so a new field of [variable_ref] is a compile error
+   here until the snapshot accounts for it. *)
+type variable_ref_snapshot = {
+  snap_ref : variable_ref;
+  snap_solved_dim : int option;
+  snap_solved_sym : static_symbol option;
+}
+
+let snapshot_variable_ref ({ ref_label = _; solved_dim; solved_sym } as r) =
+  { snap_ref = r; snap_solved_dim = solved_dim; snap_solved_sym = solved_sym }
+
+let restore_variable_ref Shape_writer { snap_ref; snap_solved_dim; snap_solved_sym } =
+  snap_ref.solved_dim <- snap_solved_dim;
+  snap_ref.solved_sym <- snap_solved_sym
+
+let variable_ref_snapshot_changed { snap_ref; snap_solved_dim; snap_solved_sym } =
+  not
+    ([%equal: int option] snap_ref.solved_dim snap_solved_dim
+    && Option.equal phys_equal snap_ref.solved_sym snap_solved_sym)
+
 let commit_role Shape_writer s role =
   let refuse ~held ~wanted =
     raise

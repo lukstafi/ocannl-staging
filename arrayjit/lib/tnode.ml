@@ -124,10 +124,27 @@ module Prec_cell : sig
 
   val update_infer_prec :
     ?only_if:(Ops.prec -> bool) -> name:(unit -> string) -> t -> Ops.prec Lazy.t -> unit
-end = struct
-  type t = { mutable value : delayed_prec; storage : Ops.prec Lazy.t }
 
-  let sexp_of_t { value; storage = _ } = sexp_of_delayed_prec value
+  type snapshot
+  (** The cell's value at a checkpoint, bound to the cell (gh-ocannl-903). *)
+
+  val snapshot : t -> snapshot
+
+  val restore : snapshot -> unit
+  (** Puts the recorded value back, as a counted write. *)
+
+  val settling_began_since : snapshot -> bool
+  (** Whether forcing the cell's storage began after the snapshot -- returned or raised: either way
+      its lazy is memoized, and no rewind can reset it. *)
+
+  val snapshot_changed : snapshot -> bool
+  (** Whether the value differs (physically) from the recorded one: a diagnostic. *)
+end = struct
+  (* [settling] is set as forcing [storage] begins, before the value is read: [Lazy.is_val] alone
+     would miss a force that raised, whose lazy is memoized all the same. *)
+  type t = { mutable value : delayed_prec; storage : Ops.prec Lazy.t; mutable settling : bool }
+
+  let sexp_of_t { value; storage = _; settling = _ } = sexp_of_delayed_prec value
 
   let make value =
     let rec cell =
@@ -135,13 +152,15 @@ end = struct
         value;
         storage =
           lazy
-            (match cell.value with Default prec | Specified prec | Inferred (lazy prec) -> prec);
+            (cell.settling <- true;
+             match cell.value with Default prec | Specified prec | Inferred (lazy prec) -> prec);
+        settling = false;
       }
     in
     cell
 
-  let get { value; storage = _ } = value
-  let storage { value = _; storage } = storage
+  let get { value; storage = _; settling = _ } = value
+  let storage { value = _; storage; settling = _ } = storage
 
   let set cell value =
     !prec_write_hook ();
@@ -223,6 +242,20 @@ end = struct
         | Inferred old_prec, None ->
             set cell
               (Inferred (lazy (Ops.promote_prec (Lazy.force old_prec) (Lazy.force delayed_prec))))
+
+  type snapshot = { snap_cell : t; snap_value : delayed_prec; snap_settling : bool }
+
+  let snapshot ({ value; storage = _; settling } as cell) =
+    { snap_cell = cell; snap_value = value; snap_settling = settling }
+
+  let restore { snap_cell; snap_value; snap_settling = _ } =
+    if not (phys_equal snap_cell.value snap_value) then set snap_cell snap_value
+
+  let settling_began_since { snap_cell; snap_value = _; snap_settling } =
+    snap_cell.settling && not snap_settling
+
+  let snapshot_changed { snap_cell; snap_value; snap_settling = _ } =
+    not (phys_equal snap_cell.value snap_value)
 end
 
 (** Per-tensor scalar value bounds: the interprocedural layer of the interval analysis
@@ -613,6 +646,131 @@ let update_infer_prec ?only_if tn delayed_prec =
 
 let get_specified_prec tn =
   match Prec_cell.get tn.delayed_prec_unsafe with Specified prec -> Some prec | _ -> None
+
+type open_snapshot = {
+  snap_node : t;
+  snap_prec : Prec_cell.snapshot;
+  snap_bounds : bounds_state;
+  snap_memory_mode_intent : (memory_mode * provenance) option;
+  snap_observable : bool;
+  snap_context_owned : bool;
+  snap_host_constant : bool;
+  snap_zero_valid : bool;
+  snap_alias_of : (t * Indexing.static_symbol) option;
+  snap_slice_of : (t * Indexing.static_symbol) option;
+  snap_backend_info : Sexp.t;
+  snap_code_name : string option;
+}
+(** {2 Checkpoint snapshots of open nodes (gh-ocannl-903)}
+
+    A checkpoint records every mutable field of each node the open work allocated, and a rewind puts
+    them back: the precision links, memory-mode intents, ownership and observability a later
+    construction (or [Tensor.param] over an open initializer) wrote. The record is destructured
+    exhaustively, so a new field of {!t} is a compile error here until the snapshot accounts for it.
+    The lazies are not snapshotted: [dims], [padding] and [size_in_bytes] are forced only through
+    shape inference's committed-state reads, which a rewind's validity check watches, and
+    [storage_prec] is the precision cell's, whose settling {!open_snapshot_settled} reports. *)
+
+let snapshot_open
+    ({
+       storage_prec = _;
+       dims = _;
+       padding = _;
+       size_in_bytes = _;
+       id = _;
+       namespace = _;
+       uid = _;
+       label = _;
+       delayed_prec_unsafe;
+       bounds;
+       memory_mode_intent;
+       observable;
+       context_owned;
+       host_constant;
+       zero_valid;
+       alias_of;
+       slice_of;
+       backend_info;
+       code_name;
+     } as tn) =
+  {
+    snap_node = tn;
+    snap_prec = Prec_cell.snapshot delayed_prec_unsafe;
+    snap_bounds = bounds;
+    snap_memory_mode_intent = memory_mode_intent;
+    snap_observable = observable;
+    snap_context_owned = context_owned;
+    snap_host_constant = host_constant;
+    snap_zero_valid = zero_valid;
+    snap_alias_of = alias_of;
+    snap_slice_of = slice_of;
+    snap_backend_info = backend_info;
+    snap_code_name = code_name;
+  }
+
+let open_snapshot_node s = s.snap_node
+
+(** Whether the node's precision began settling after the snapshot: the rewind cannot reset it. *)
+let open_snapshot_settled s = Prec_cell.settling_began_since s.snap_prec
+
+let restore_open
+    {
+      snap_node = tn;
+      snap_prec;
+      snap_bounds;
+      snap_memory_mode_intent;
+      snap_observable;
+      snap_context_owned;
+      snap_host_constant;
+      snap_zero_valid;
+      snap_alias_of;
+      snap_slice_of;
+      snap_backend_info;
+      snap_code_name;
+    } =
+  Prec_cell.restore snap_prec;
+  tn.bounds <- snap_bounds;
+  tn.memory_mode_intent <- snap_memory_mode_intent;
+  tn.observable <- snap_observable;
+  tn.context_owned <- snap_context_owned;
+  tn.host_constant <- snap_host_constant;
+  tn.zero_valid <- snap_zero_valid;
+  tn.alias_of <- snap_alias_of;
+  tn.slice_of <- snap_slice_of;
+  tn.backend_info <- snap_backend_info;
+  tn.code_name <- snap_code_name
+
+(** The fields of the node that differ from the snapshot (physically), by name: a diagnostic. *)
+let open_snapshot_differences
+    {
+      snap_node = tn;
+      snap_prec;
+      snap_bounds;
+      snap_memory_mode_intent;
+      snap_observable;
+      snap_context_owned;
+      snap_host_constant;
+      snap_zero_valid;
+      snap_alias_of;
+      snap_slice_of;
+      snap_backend_info;
+      snap_code_name;
+    } =
+  List.filter_map
+    [
+      ("precision", not (Prec_cell.snapshot_changed snap_prec));
+      ("bounds", phys_equal tn.bounds snap_bounds);
+      ("memory_mode_intent", phys_equal tn.memory_mode_intent snap_memory_mode_intent);
+      ("observable", Bool.equal tn.observable snap_observable);
+      ("context_owned", Bool.equal tn.context_owned snap_context_owned);
+      ("host_constant", Bool.equal tn.host_constant snap_host_constant);
+      ("zero_valid", Bool.equal tn.zero_valid snap_zero_valid);
+      ("alias_of", phys_equal tn.alias_of snap_alias_of);
+      ("slice_of", phys_equal tn.slice_of snap_slice_of);
+      ("backend_info", phys_equal tn.backend_info snap_backend_info);
+      ("code_name", phys_equal tn.code_name snap_code_name);
+    ]
+    ~f:(fun (field, same) -> if same then None else Some (debug_name tn ^ "." ^ field))
 
 (** {2 Value-bounds lifecycle (see {!bounds_state})} *)
 

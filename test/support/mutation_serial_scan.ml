@@ -106,7 +106,10 @@ open Ppxlib
 type binding_class =
   | Plain
   | Exempt of string
-  | Fingerprinted  (** A tracked binding, with its in-place classification. *)
+  | Fingerprinted
+  | Kept of string
+      (** A tracked binding, with its in-place classification. [Kept] is [Plain] for the note
+          obligation, and releases the capture obligation (gh-ocannl-903). *)
 
 type kind =
   | Ref
@@ -371,7 +374,7 @@ let binding_name (vb : value_binding) =
 let line_of (loc : Location.t) = loc.loc_start.pos_lnum
 let is_ours (a : attribute) = String.is_prefix a.attr_name.txt ~prefix:"mutation_serial"
 
-type attr = A_exempt of string | A_fingerprinted | A_boundary of string
+type attr = A_exempt of string | A_fingerprinted | A_boundary of string | A_kept of string
 
 let word_count s =
   List.length
@@ -395,6 +398,7 @@ let parse_attr (a : attribute) =
   match a.attr_name.txt with
   | "mutation_serial.exempt" -> Result.map (reason ()) ~f:(fun s -> A_exempt s)
   | "mutation_serial.boundary" -> Result.map (reason ()) ~f:(fun s -> A_boundary s)
+  | "mutation_serial.kept" -> Result.map (reason ()) ~f:(fun s -> A_kept s)
   | "mutation_serial.fingerprinted" -> (
       match a.attr_payload with
       | PStr [] -> Ok A_fingerprinted
@@ -403,7 +407,7 @@ let parse_attr (a : attribute) =
       Error
         (Printf.sprintf
            "%s is not one of mutation_serial.exempt, mutation_serial.fingerprinted, \
-            mutation_serial.boundary"
+            mutation_serial.boundary, mutation_serial.kept"
            other)
 
 type denotation = [ `Tracked of binding | `Note | `Local ]
@@ -417,7 +421,7 @@ type frame = {
   mutable writes : (binding * int) list;
 }
 
-let scan ~file ?(serial_owner = false) ?interface source =
+let scan ~file ?(serial_owner = false) ?(require_capture = false) ?interface source =
   let findings = ref [] in
   let finding line fmt =
     Printf.ksprintf
@@ -551,6 +555,9 @@ let scan ~file ?(serial_owner = false) ?interface source =
         note_binding := Some vb.pvb_loc.loc_start.pos_cnum
     | _ -> ());
     (match head with
+    | `Unknown _ when Option.is_some exempt ->
+        consume_exempt ();
+        unread_exempt := Option.value name ~default:"<pattern>" :: !unread_exempt
     | `Unknown path ->
         finding line
           "%s is not a constructor the scan reads (the closed list: ref, and create/make of \
@@ -594,7 +601,7 @@ let scan ~file ?(serial_owner = false) ?interface source =
                 in
                 if not (List.is_empty mutable_fields) then (
                   (match cls with
-                  | Some ((A_exempt _ | A_fingerprinted), a) ->
+                  | Some ((A_exempt _ | A_fingerprinted | A_kept _), a) ->
                       consume a;
                       finding line
                         "%s: a record value is classified field by field, by an attribute on \
@@ -610,6 +617,9 @@ let scan ~file ?(serial_owner = false) ?interface source =
                           | Some (A_exempt reason, a) ->
                               consume a;
                               Exempt reason
+                          | Some (A_kept reason, a) ->
+                              consume a;
+                              Kept reason
                           | Some (A_fingerprinted, a) ->
                               consume a;
                               finding fline "%s: a record field cannot be fingerprinted" fname;
@@ -642,6 +652,9 @@ let scan ~file ?(serial_owner = false) ?interface source =
               | Some (A_exempt reason, a) ->
                   consume a;
                   Exempt reason
+              | Some (A_kept reason, a) ->
+                  consume a;
+                  Kept reason
               | Some (A_fingerprinted, a) ->
                   consume a;
                   (match kind with
@@ -685,6 +698,9 @@ let scan ~file ?(serial_owner = false) ?interface source =
      both. *)
   let captured = Hash_set.Poly.create () in
   let compared = Hash_set.Poly.create () in
+  (* Binding keys: what [capture_globals] captures as [{ g = !x }] or [{ g = r.f }]
+     (gh-ocannl-903). *)
+  let snapshotted = Hash_set.create (module Int) in
   let frames : frame list ref = ref [] in
   (* Function literals that own a frame (a let-bound function's own expression), and those passed as
      arguments, by source offset. *)
@@ -701,8 +717,8 @@ let scan ~file ?(serial_owner = false) ?interface source =
         | Fingerprinted -> ()
         | _ when frame.noted -> ()
         | Exempt _ -> Hash_set.add exempt_used b.key
-        | Plain when Option.is_some frame.boundary -> boundary_used := true
-        | Plain ->
+        | (Plain | Kept _) when Option.is_some frame.boundary -> boundary_used := true
+        | Plain | Kept _ ->
             finding line "%s writes %s without note_mutation () (nor a classification)" frame.fname
               b.name);
     match frame.boundary with
@@ -785,6 +801,18 @@ let scan ~file ?(serial_owner = false) ?interface source =
           | _ -> None
         in
         (match e.pexp_desc with
+        | Pexp_record (fields, None) when String.equal root "capture_globals" && returned e ->
+            List.iter fields ~f:(fun (_, value) ->
+                match (deref_of value, (strip value).pexp_desc) with
+                | Some b, _ -> Hash_set.add snapshotted b.key
+                | None, Pexp_field (obj, { txt = label; _ }) -> (
+                    match self#tracked env obj with
+                    | Some ({ kind = Record fields; _ }, _) ->
+                        Option.iter
+                          (List.Assoc.find fields (Longident.last_exn label) ~equal:String.equal)
+                          ~f:(fun fb -> Hash_set.add snapshotted fb.key)
+                    | _ -> ())
+                | None, _ -> ())
         | Pexp_record (fields, _) when String.equal root "fingerprint" && returned e ->
             List.iter fields ~f:(fun ({ txt = label; _ }, value) ->
                 Option.iter (deref_of value) ~f:(fun b ->
@@ -984,6 +1012,45 @@ let scan ~file ?(serial_owner = false) ?interface source =
             "%s is fingerprinted, but mutated_since does not compare !%s through phys_equal" b.name
             b.name
       | _ -> ());
+  (* The capture relationship (gh-ocannl-903): session state a rewind must restore is captured by
+     the file's top-level [capture_globals], as a pointer. Required of the session modules. *)
+  (if require_capture then
+     let defines name =
+       List.exists structure ~f:(fun item ->
+           match item.pstr_desc with
+           | Pstr_value (_, vbs) ->
+               List.exists vbs ~f:(fun vb ->
+                   Option.equal String.equal (binding_name vb) (Some name))
+           | _ -> false)
+     in
+     if not (defines "capture_globals") then
+       finding 1
+         "defines no top-level capture_globals: a checkpoint could not capture this module's \
+          session state");
+  List.iter
+    (if require_capture then bindings else [])
+    ~f:(fun b ->
+      let is_captured = Hash_set.mem snapshotted b.key in
+      match b.cls with
+      | (Plain | Fingerprinted) when not is_captured -> (
+          match b.kind with
+          | Container family ->
+              finding b.line
+                "%s is session state a checkpoint must restore, but a %s cannot be captured as a \
+                 pointer: hold a persistent value in a ref and capture it in capture_globals, or \
+                 classify it [@@mutation_serial.kept \"<reason>\"]"
+                b.name family
+          | Ref | Field | Record _ ->
+              finding b.line
+                "%s is session state a checkpoint must restore: capture it in the file's top-level \
+                 capture_globals ({ g = %s } in the record it returns), or classify it \
+                 [@@mutation_serial.kept \"<reason>\"]"
+                b.name
+                (match b.kind with Ref -> "!" ^ b.name | _ -> b.name))
+      | Kept _ when is_captured ->
+          finding b.line "stale kept on %s: capture_globals captures it -- remove the attribute"
+            b.name
+      | _ -> ());
   Option.iter interface ~f:(fun interface ->
       let lexbuf = Lexing.from_string interface in
       Lexing.set_filename lexbuf (file ^ "i");
@@ -1017,7 +1084,7 @@ let scan ~file ?(serial_owner = false) ?interface source =
           if List.mem exported b.name ~equal:String.equal then
             match b.cls with
             | Exempt _ -> Hash_set.add exempt_used b.key
-            | Plain | Fingerprinted ->
+            | Plain | Fingerprinted | Kept _ ->
                 finding b.line
                   "%s is exported by the interface: its writers outside this file are not read; \
                    export a function instead, or exempt it if its writes need no note"
@@ -1034,7 +1101,9 @@ let scan ~file ?(serial_owner = false) ?interface source =
           (match b.cls with
           | Plain -> "accounted: every write noted or at a boundary"
           | Exempt reason -> "exempt: " ^ reason
-          | Fingerprinted -> "fingerprinted by mutated_since"))
+          | Fingerprinted -> "fingerprinted by mutated_since"
+          | Kept reason -> "accounted; kept by rewinds: " ^ reason)
+        ^ if Hash_set.mem snapshotted b.key then "; captured by capture_globals" else "")
     @ List.map (List.rev !unread_exempt) ~f:(fun name ->
         Printf.sprintf "%s: %s (unread state) -- exempt" file name)
     @ List.rev !boundaries

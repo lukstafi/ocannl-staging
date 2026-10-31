@@ -79,6 +79,21 @@ module Shape_record : sig
 
   val mark_discarded : t -> provenance:string -> unit
   (** Marks an open shape discarded by a rewind; a closed shape is left alone. *)
+
+  type snapshot
+  (** Every mutable field of a shape at a checkpoint, bound to the shape (gh-ocannl-903). The
+      paddings' arrays are copied. *)
+
+  val snapshot : t -> snapshot
+  val snapshot_shape : snapshot -> t
+
+  val restore : snapshot -> unit
+  (** Puts the recorded fields back, bypassing the closed-shape guard: a rewind restores a shape
+      that was open at the checkpoint (a closure since would have invalidated it). *)
+
+  val snapshot_differences : snapshot -> string list
+  (** The fields that differ from the snapshot -- rows and the neutral element physically, paddings
+      by contents: a diagnostic. *)
 end = struct
   type t = {
     mutable batch : Row.t;
@@ -169,6 +184,101 @@ end = struct
 
   let close sh = sh.closed <- true
   let mark_discarded sh ~provenance = if not sh.closed then sh.discarded_by <- Some provenance
+
+  type snapshot = {
+    snap_shape : t;
+    snap_batch : Row.t;
+    snap_input : Row.t;
+    snap_output : Row.t;
+    snap_batch_padding : padding;
+    snap_input_padding : padding;
+    snap_output_padding : padding;
+    snap_padding_elem : float option option;
+    snap_closed : bool;
+    snap_discarded_by : string option;
+  }
+
+  let copy_padding = Option.map ~f:Array.copy
+
+  let snapshot
+      ({
+         batch;
+         input;
+         output;
+         batch_padding;
+         input_padding;
+         output_padding;
+         padding_elem;
+         closed;
+         discarded_by;
+         id = _;
+         debug_name = _;
+       } as sh) =
+    {
+      snap_shape = sh;
+      snap_batch = batch;
+      snap_input = input;
+      snap_output = output;
+      snap_batch_padding = copy_padding batch_padding;
+      snap_input_padding = copy_padding input_padding;
+      snap_output_padding = copy_padding output_padding;
+      snap_padding_elem = padding_elem;
+      snap_closed = closed;
+      snap_discarded_by = discarded_by;
+    }
+
+  let snapshot_shape s = s.snap_shape
+
+  let restore
+      {
+        snap_shape = sh;
+        snap_batch;
+        snap_input;
+        snap_output;
+        snap_batch_padding;
+        snap_input_padding;
+        snap_output_padding;
+        snap_padding_elem;
+        snap_closed;
+        snap_discarded_by;
+      } =
+    sh.batch <- snap_batch;
+    sh.input <- snap_input;
+    sh.output <- snap_output;
+    sh.batch_padding <- copy_padding snap_batch_padding;
+    sh.input_padding <- copy_padding snap_input_padding;
+    sh.output_padding <- copy_padding snap_output_padding;
+    sh.padding_elem <- snap_padding_elem;
+    sh.closed <- snap_closed;
+    sh.discarded_by <- snap_discarded_by
+
+  let snapshot_differences
+      {
+        snap_shape = sh;
+        snap_batch;
+        snap_input;
+        snap_output;
+        snap_batch_padding;
+        snap_input_padding;
+        snap_output_padding;
+        snap_padding_elem;
+        snap_closed;
+        snap_discarded_by;
+      } =
+    List.filter_map
+      [
+        ("batch row", phys_equal sh.batch snap_batch);
+        ("input row", phys_equal sh.input snap_input);
+        ("output row", phys_equal sh.output snap_output);
+        ("batch padding", equal_padding sh.batch_padding snap_batch_padding);
+        ("input padding", equal_padding sh.input_padding snap_input_padding);
+        ("output padding", equal_padding sh.output_padding snap_output_padding);
+        ("padding neutral element", phys_equal sh.padding_elem snap_padding_elem);
+        ("closed", Bool.equal sh.closed snap_closed);
+        ("discarded_by", phys_equal sh.discarded_by snap_discarded_by);
+      ]
+      ~f:(fun (field, same) ->
+        if same then None else Some [%string "shape #%{sh.id#Int} %{sh.debug_name}: %{field}"])
 end
 
 include Shape_record
@@ -190,7 +300,11 @@ let ref_uid = ref 0
   "a fresh-id counter: ids are never reused, so a rewind need not restore it"]
 
 let open_refs : int list ref = ref []
-let discarded_refs : (int * string) list ref = ref []
+
+(* The references discarded by rewinds, by uid, with the rewind's provenance: a registry rewinds
+   extend and never restore. *)
+let discarded_refs : (int, string) Hashtbl.t = Hashtbl.create (module Int)
+[@@mutation_serial.kept "a registry of what rewinds discarded: rewinds extend it, never restore it"]
 
 let touch_ref uid =
   Row.note_mutation ();
@@ -211,7 +325,7 @@ let note_row_numbered uid ~partner =
     row_numbered_refs := (uid, partner) :: !row_numbered_refs
 
 let check_ref_live ~uid ~label =
-  match List.Assoc.find !discarded_refs uid ~equal:Int.equal with
+  match Hashtbl.find discarded_refs uid with
   | None -> ()
   | Some provenance ->
       raise
@@ -252,6 +366,22 @@ module Delayed_ref : sig
   val set_var : t -> [ `Row of Row.row_var | `Dim of Row.dim_var | `Not_set_yet ] -> unit
   val set_solved_dim : t -> int -> unit
   val set_solved_sym : t -> Ir.Indexing.static_symbol -> unit
+
+  type snapshot
+  (** A reference's binding and solution at a checkpoint, bound to the reference (gh-ocannl-903). *)
+
+  val snapshot_live : unit -> snapshot list
+  (** A snapshot of every reference still alive: a caller may hold one that no step reaches -- made
+      by [get_variable_ref], or solved by [set_dim] while unbound -- and the window may bind or
+      solve it. *)
+
+  val snapshot_uid : snapshot -> int
+
+  val restore : snapshot -> unit
+  (** Puts the binding and solution back, unsolving the reference if it was unsolved. *)
+
+  val snapshot_changed : snapshot -> bool
+  (** Whether the reference differs from the snapshot: a diagnostic. *)
 end = struct
   type t = {
     var_ref : Ir.Indexing.variable_ref;
@@ -260,9 +390,24 @@ end = struct
   }
   [@@deriving equal, sexp_of]
 
+  (* Every reference made and still alive, weakly: a checkpoint snapshots them all, since a caller
+     may hold one no step reaches. *)
+  module Live = Stdlib.Weak.Make (struct
+    type nonrec t = t
+
+    let equal r1 r2 = r1.uid = r2.uid
+    let hash r = r.uid
+  end)
+
+  let live = Live.create 64
+  [@@mutation_serial.exempt
+    "a weak registry of the capture references alive, which checkpoints read: not inference state"]
+
   let make ref_label =
     Int.incr ref_uid;
-    { var_ref = Ir.Indexing.variable_ref ref_label; var = `Not_set_yet; uid = !ref_uid }
+    let r = { var_ref = Ir.Indexing.variable_ref ref_label; var = `Not_set_yet; uid = !ref_uid } in
+    Live.add live r;
+    r
 
   let check_live r = check_ref_live ~uid:r.uid ~label:r.var_ref.ref_label
 
@@ -284,6 +429,26 @@ end = struct
     if not ([%equal: Ir.Indexing.static_symbol option] r.var_ref.solved_sym (Some sym)) then (
       Ir.Indexing.set_solved_sym shape_writer r.var_ref sym;
       touch_ref r.uid)
+
+  type snapshot = {
+    snap_ref : t;
+    snap_var : [ `Row of Row.row_var | `Dim of Row.dim_var | `Not_set_yet ];
+    snap_var_ref : Ir.Indexing.variable_ref_snapshot;
+  }
+
+  let snapshot ({ var_ref; var; uid = _ } as r) =
+    { snap_ref = r; snap_var = var; snap_var_ref = Ir.Indexing.snapshot_variable_ref var_ref }
+
+  let snapshot_live () = Live.fold (fun r acc -> snapshot r :: acc) live []
+  let snapshot_uid s = s.snap_ref.uid
+
+  let restore { snap_ref; snap_var; snap_var_ref } =
+    snap_ref.var <- snap_var;
+    Ir.Indexing.restore_variable_ref shape_writer snap_var_ref
+
+  let snapshot_changed { snap_ref; snap_var; snap_var_ref } =
+    (not (phys_equal snap_ref.var snap_var))
+    || Ir.Indexing.variable_ref_snapshot_changed snap_var_ref
 end
 
 type delayed_var_ref = Delayed_ref.t = private {
@@ -439,6 +604,15 @@ module Update_step_record : sig
 
   val set_projections : update_step -> Idx.projections -> unit
   (** Publishes the step's projections; raises if they were already computed. *)
+
+  type snapshot
+  (** The step's mutable fields at a checkpoint, bound to the step (gh-ocannl-903). *)
+
+  val snapshot : update_step -> snapshot
+  val restore : snapshot -> unit
+
+  val snapshot_changed : snapshot -> bool
+  (** Whether the step differs from the snapshot: a diagnostic. *)
 end = struct
   type update_step = {
     shape : t;
@@ -459,6 +633,16 @@ end = struct
       raise
       @@ Utils.User_error "derive_projections: projections already computed for this update_step";
     step.unsafe_projections <- Some projections
+
+  type snapshot = { snap_step : update_step; snap_projections : Idx.projections option }
+
+  let snapshot ({ shape = _; logic = _; id = _; unsafe_projections; neutral_elem = _ } as step) =
+    { snap_step = step; snap_projections = unsafe_projections }
+
+  let restore { snap_step; snap_projections } = snap_step.unsafe_projections <- snap_projections
+
+  let snapshot_changed { snap_step; snap_projections } =
+    not (phys_equal snap_step.unsafe_projections snap_projections)
 end
 
 type update_step = Update_step_record.update_step = private {
@@ -471,7 +655,9 @@ type update_step = Update_step_record.update_step = private {
 [@@deriving sexp_of]
 
 let make_update_step = Update_step_record.make
+
 let with_error_trace = ref true
+[@@mutation_serial.kept "user configuration of error messages, not inference state"]
 
 (** Converts an axes-keyed map into three arrays of values: batch axes, input axes, output axes. If
     the map is incomplete, the result will likely be invalid: gaps in the array are filled with an
@@ -1176,19 +1362,19 @@ let compute_block_discardable_vars ~(this_side_rows : Row.t list)
               if complement_covers_all_shapes then Set.union acc2 component_vars else acc2)
       | _ -> acc)
 
-let unused_shapes = Hash_set.create (module Int)
+let unused_shapes = ref (Set.empty (module Int))
 
 (* Writes to [unused_shapes] count as session mutations (gh-ocannl-1301): it filters which rows
    [finish_inference] closes. *)
 let unmark_unused id =
-  if Hash_set.mem unused_shapes id then (
+  if Set.mem !unused_shapes id then (
     Row.note_mutation ();
-    Hash_set.remove unused_shapes id)
+    unused_shapes := Set.remove !unused_shapes id)
 
 let mark_unused id =
-  if not (Hash_set.mem unused_shapes id) then (
+  if not (Set.mem !unused_shapes id) then (
     Row.note_mutation ();
-    Hash_set.add unused_shapes id)
+    unused_shapes := Set.add !unused_shapes id)
 
 let%debug4_sexp get_inequalities ?(for_projections = false)
     ({ shape = cur_sh; logic; _ } as _upd : update_step) :
@@ -2045,11 +2231,9 @@ let with_taint_on_failure ~describe f =
     if mutated_since fp then taint_session ~provenance:(describe exn);
     Stdlib.Printexc.raise_with_backtrace exn bt
 
-(* The update ids allocated by the last successful closure: steps with a larger id are open. *)
-let update_mark = ref 0
-
 (* Update-id ranges [(lo, hi]] discarded by rewinds, with the rewind's provenance. *)
 let discarded_updates : (int * int * string) list ref = ref []
+[@@mutation_serial.kept "a registry of what rewinds discarded: rewinds extend it, never restore it"]
 
 (* Called after every successful closure; [Tensor] records its checkpoint here. *)
 let on_closure : (unit -> unit) ref = ref (fun () -> ())
@@ -2069,31 +2253,279 @@ let check_step_live (step : update_step) =
                   discarded by the rewind after %{provenance}; re-run its definition"],
                [] ))
 
-let check_can_rewind () =
+let check_can_rewind ?(what = "Tensor.rewind_to_last_closure") () =
   if !construction_depth > 0 then
     raise
     @@ Row.Shape_error
-         ( "Tensor.rewind_to_last_closure: called from within [op_asn], mid-construction of a \
-            tensor operation -- not supported; rewind after the construction returns or raises",
+         ( what
+           ^ ": called from within [op_asn], mid-construction of a tensor operation -- not \
+              supported; rewind after the construction returns or raises",
            [] )
 
-let rewind_open_state ~provenance =
-  check_can_rewind ();
-  (* Every open shape is in some active step (each construction registers one): mark them, so a
-     retained handle cannot bring one back into inference. *)
-  List.iter !active_update_steps ~f:(fun step -> iter_shapes step ~f:(mark_discarded ~provenance));
-  if !update_uid > !update_mark then
-    discarded_updates := (!update_mark, !update_uid, provenance) :: !discarded_updates;
-  update_mark := !update_uid;
-  discarded_refs := List.map !open_refs ~f:(fun uid -> (uid, provenance)) @ !discarded_refs;
-  open_refs := [];
-  state := Row.empty_env;
-  active_update_steps := [];
-  active_constraints := [];
-  Row.reset_transient ();
-  Row.drop_symbol_roles ();
-  taint := None
-[@@mutation_serial.boundary "the rewind: it discards all open state and clears the taint"]
+(** {3 Checkpoints (gh-ocannl-903)}
+
+    A checkpoint snapshots the open frontier: the session's module-level state here and in [Row]
+    (persistent values, captured as pointers by [capture_globals]), and the mutable fields of every
+    open object -- the shapes and steps of the active update steps, and every live capture reference
+    -- each through its sealed owner's exhaustive snapshot. A rewind puts them back and discards
+    what the window created. The last closure is the base checkpoint: its frontier is empty. *)
+
+(* Module-level state whose writes count as session mutations, captured as pointers. Every such
+   binding of this file is captured here, or classified [kept] or [exempt]
+   (test/operations/mutation_serial_scan holds the relationship). *)
+type globals = {
+  g_state : Row.environment;
+  g_active_update_steps : update_step list;
+  g_active_constraints : Row.constraint_ list;
+  g_unused_shapes : Set.M(Int).t;
+  g_open_refs : int list;
+  g_row_numbered_refs : (int * string) list;
+}
+
+let capture_globals () =
+  {
+    g_state = !state;
+    g_active_update_steps = !active_update_steps;
+    g_active_constraints = !active_constraints;
+    g_unused_shapes = !unused_shapes;
+    g_open_refs = !open_refs;
+    g_row_numbered_refs = !row_numbered_refs;
+  }
+
+let restore_globals
+    {
+      g_state;
+      g_active_update_steps;
+      g_active_constraints;
+      g_unused_shapes;
+      g_open_refs;
+      g_row_numbered_refs;
+    } =
+  state := g_state;
+  active_update_steps := g_active_update_steps;
+  active_constraints := g_active_constraints;
+  unused_shapes := g_unused_shapes;
+  open_refs := g_open_refs;
+  row_numbered_refs := g_row_numbered_refs
+[@@mutation_serial.boundary "part of a rewind: puts back the globals a checkpoint captured"]
+
+let globals_differences
+    {
+      g_state = a1;
+      g_active_update_steps = a2;
+      g_active_constraints = a3;
+      g_unused_shapes = a4;
+      g_open_refs = a5;
+      g_row_numbered_refs = a6;
+    }
+    {
+      g_state = b1;
+      g_active_update_steps = b2;
+      g_active_constraints = b3;
+      g_unused_shapes = b4;
+      g_open_refs = b5;
+      g_row_numbered_refs = b6;
+    } =
+  List.filter_map
+    [
+      ("Shape.state", phys_equal a1 b1);
+      ("Shape.active_update_steps", phys_equal a2 b2);
+      ("Shape.active_constraints", phys_equal a3 b3);
+      ("Shape.unused_shapes", phys_equal a4 b4);
+      ("Shape.open_refs", phys_equal a5 b5);
+      ("Shape.row_numbered_refs", phys_equal a6 b6);
+    ]
+    ~f:(fun (name, same) -> if same then None else Some name)
+
+(* Successful closures and session resets so far: a checkpoint taken before the latest one is no
+   longer valid (a closure commits). *)
+let closure_count = ref 0
+[@@mutation_serial.exempt "a count of commits, which only ends checkpoints: never restored"]
+
+(* The explicit checkpoints still valid, newest first, by sequence number: a rewind to [ck] resets
+   it to the list as it stood when [ck] was taken (so [ck] stays valid, and every checkpoint taken
+   after it does not); a closure, a reset or a rewind to the last closure empties it. *)
+let checkpoint_lineage : int list ref = ref []
+[@@mutation_serial.exempt
+  "the lineage of valid checkpoints: bookkeeping of checkpoints, not inference state"]
+
+let checkpoint_seq = ref 0
+[@@mutation_serial.exempt
+  "a fresh-id counter: ids are never reused, so a rewind need not restore it"]
+
+(* Open shapes whose committed-state read ([to_dims], [to_padding], [get_projections]) raised since
+   the last closure, newest first. A lazy over such a read (a node's dims or padding, a projections
+   handle) memoizes the exception, which no rewind can reset: a checkpoint whose frontier holds one
+   of them, read after it was taken, can no longer be rewound to. *)
+let failed_reads : t list ref = ref []
+[@@mutation_serial.exempt
+  "a record of reads that raised, consulted by a rewind's validity check: never restored"]
+
+let note_failed_read sh = if not sh.closed then failed_reads := sh :: !failed_reads
+
+module Checkpoint = struct
+  type nonrec t = {
+    seq : int;  (** 0 for a closure's checkpoint. *)
+    label : string;
+    closure : int;  (** [closure_count] when taken. *)
+    lineage : int list;  (** [checkpoint_lineage] after taking it. *)
+    id_mark : int;  (** The next tensor id when taken. *)
+    update_mark : int;  (** [update_uid] when taken. *)
+    globals : globals;
+    row_globals : Row.globals;
+    shapes : Shape_record.snapshot list;
+    steps : Update_step_record.snapshot list;
+    refs : Delayed_ref.snapshot list;
+    ref_uids : Set.M(Int).t;
+    failed_reads_mark : t list;
+  }
+
+  let label ck = ck.label
+  let is_closure ck = ck.seq = 0
+
+  (* The open shapes, each once (physically): [dealias_operands]' copies share an id, but are never
+     registered. *)
+  let open_shapes steps =
+    let seen = Hashtbl.create (module Int) in
+    List.concat_map steps ~f:(fun step ->
+        let acc = ref [] in
+        iter_shapes step ~f:(fun sh ->
+            let same = Hashtbl.find_multi seen sh.id in
+            if not (List.mem same sh ~equal:phys_equal) then (
+              Hashtbl.add_multi seen ~key:sh.id ~data:sh;
+              acc := sh :: !acc));
+        List.rev !acc)
+
+  let take ~closure ~label ~id_mark =
+    let seq =
+      if closure then 0
+      else (
+        Int.incr checkpoint_seq;
+        checkpoint_lineage := !checkpoint_seq :: !checkpoint_lineage;
+        !checkpoint_seq)
+    in
+    let steps = !active_update_steps in
+    (* A closure's checkpoint snapshots no reference: rewinding to the last closure discards every
+       reference the discarded work bound or set, as gh-ocannl-1301 specifies. *)
+    let refs = if closure then [] else Delayed_ref.snapshot_live () in
+    {
+      seq;
+      label;
+      closure = !closure_count;
+      lineage = !checkpoint_lineage;
+      id_mark;
+      update_mark = !update_uid;
+      globals = capture_globals ();
+      row_globals = Row.capture_globals ();
+      shapes = List.map (open_shapes steps) ~f:Shape_record.snapshot;
+      steps = List.map steps ~f:Update_step_record.snapshot;
+      refs;
+      ref_uids = Set.of_list (module Int) (List.map refs ~f:Delayed_ref.snapshot_uid);
+      failed_reads_mark = !failed_reads;
+    }
+
+  let in_frontier ck sh =
+    List.exists ck.shapes ~f:(fun s -> phys_equal (Shape_record.snapshot_shape s) sh)
+
+  (* Why [ck] can no longer be rewound to, if it cannot. Checked before a rewind writes anything. *)
+  let refusal ck =
+    if ck.closure <> !closure_count then
+      Some
+        "inference closed (a finish_inference committed the open work) after it was taken; a \
+         rewind cannot undo a closure"
+    else if (not (is_closure ck)) && not (List.mem !checkpoint_lineage ck.seq ~equal:Int.equal) then
+      Some
+        "it was abandoned: a rewind to an earlier checkpoint, Tensor.rewind_to_last_closure or \
+         Tensor.unsafe_reinitialize ran since"
+    else
+      let rec since acc = function
+        | l when phys_equal l ck.failed_reads_mark -> acc
+        | [] -> acc
+        | sh :: rest -> since (sh :: acc) rest
+      in
+      let poisoned = List.filter (since [] !failed_reads) ~f:(in_frontier ck) in
+      match poisoned with
+      | sh :: _ when not (is_closure ck) ->
+          Some
+            [%string
+              "a read of the committed shape of #%{sh.id#Int} %{sh.debug_name}, open at the \
+               checkpoint, raised after it (forcing its dims, padding or projections while \
+               inference could not close); the lazy that read it keeps the exception, and no \
+               rewind can reset it -- rewind to the last closure instead"]
+      | _ -> (
+          (* Every shape a step of the window holds is the window's own or was in the frontier: each
+             tensor's shape is registered by its own step, and shapes are written only through the
+             steps that hold them. A shape older than the checkpoint that is neither would have been
+             written without a snapshot to restore. *)
+          let stray =
+            List.find_map !active_update_steps ~f:(fun step ->
+                let found = ref None in
+                iter_shapes step ~f:(fun sh ->
+                    if
+                      Option.is_none !found && (not sh.closed) && sh.id < ck.id_mark
+                      && not (in_frontier ck sh)
+                    then found := Some sh);
+                !found)
+          in
+          match stray with
+          | Some sh when not (is_closure ck) ->
+              Some
+                [%string
+                  "the open shape of #%{sh.id#Int} %{sh.debug_name} predates the checkpoint but \
+                   was not in its frontier (no registered update step held it) -- please report \
+                   this as a bug"]
+          | _ -> None)
+
+  (* Restore categories a test may skip one at a time (negative controls, [Tensor.For_testing]). *)
+  let categories = [ "shapes"; "steps"; "refs"; "shape globals"; "row globals"; "stale marking" ]
+
+  let rewind ?omit ck ~provenance =
+    let skip c = Option.exists omit ~f:(String.equal c) in
+    if not (skip "stale marking") then (
+      (* The window's own shapes -- in some active step, open, not in the frontier -- become stale
+         handles, like its tensors. *)
+      List.iter !active_update_steps ~f:(fun step ->
+          iter_shapes step ~f:(fun sh ->
+              if not (in_frontier ck sh) then mark_discarded sh ~provenance));
+      if !update_uid > ck.update_mark then
+        discarded_updates := (ck.update_mark, !update_uid, provenance) :: !discarded_updates;
+      (* The references the window bound or set that the checkpoint holds no snapshot of: made in
+         the window (or, for the closure's checkpoint, every one touched since). *)
+      List.iter !open_refs ~f:(fun uid ->
+          if not (Set.mem ck.ref_uids uid) then Hashtbl.set discarded_refs ~key:uid ~data:provenance));
+    if not (skip "shapes") then List.iter ck.shapes ~f:Shape_record.restore;
+    if not (skip "steps") then List.iter ck.steps ~f:Update_step_record.restore;
+    if not (skip "refs") then List.iter ck.refs ~f:Delayed_ref.restore;
+    if not (skip "shape globals") then restore_globals ck.globals;
+    if not (skip "row globals") then Row.restore_globals ck.row_globals;
+    Row.reset_transient ();
+    checkpoint_lineage := ck.lineage;
+    taint := None
+  [@@mutation_serial.boundary "the rewind: it restores the checkpoint and clears the taint"]
+
+  (* What differs between the session now and [ck], by component: a diagnostic. *)
+  let differences ck =
+    globals_differences ck.globals (capture_globals ())
+    @ Row.globals_differences ck.row_globals (Row.capture_globals ())
+    @ List.concat_map ck.shapes ~f:Shape_record.snapshot_differences
+    @ List.filter_map ck.steps ~f:(fun s ->
+        if Update_step_record.snapshot_changed s then Some "an update step's projections" else None)
+    @ List.filter_map ck.refs ~f:(fun s ->
+        if Delayed_ref.snapshot_changed s then
+          Some [%string "capture reference uid %{Delayed_ref.snapshot_uid s#Int}"]
+        else None)
+
+  let sizes ck =
+    [
+      ("active update steps", List.length ck.globals.g_active_update_steps);
+      ("active constraints", List.length ck.globals.g_active_constraints);
+      ("open shapes", List.length ck.shapes);
+      ("open references", List.length ck.globals.g_open_refs);
+    ]
+end
+
+let checkpoint ~label ~id_mark = Checkpoint.take ~closure:false ~label ~id_mark
+let closure_checkpoint ~id_mark = Checkpoint.take ~closure:true ~label:"the last closure" ~id_mark
 
 let infer_equal (sh1 : t) (sh2 : t) =
   unmark_unused sh1.id;
@@ -2800,11 +3232,13 @@ let unsafe_reinitialize () =
   active_constraints := [];
   construction_depth := 0;
   taint := None;
-  update_mark := 0;
   discarded_updates := [];
   open_refs := [];
-  discarded_refs := [];
+  Hashtbl.clear discarded_refs;
   row_numbered_refs := [];
+  Int.incr closure_count;
+  checkpoint_lineage := [];
+  failed_reads := [];
   Row.reset_transient ();
   Row.drop_symbol_roles ()
 [@@mutation_serial.boundary "the session reset: it discards all state and clears the taint"]
@@ -3518,7 +3952,7 @@ let%debug4_sexp finish_inference_body (() : unit) : unit =
   let unsolved =
     List.filter !active_constraints ~f:(function
       | Shape_row (r, _) | Terminal_row (_, r, _) ->
-          not (List.exists (Row.row_shapes r) ~f:(Hash_set.mem unused_shapes))
+          not (List.exists (Row.row_shapes r) ~f:(Set.mem !unused_shapes))
       | _ -> true)
   in
   (* TODO: optimize to keep all needed information in unsolved, rather than starting with all
@@ -3550,7 +3984,9 @@ let%debug4_sexp finish_inference_body (() : unit) : unit =
   List.iter !active_update_steps ~f:(fun update_step -> iter_shapes update_step ~f:close);
   Row.commit_symbol_roles ~commit:(Ir.Indexing.commit_role shape_writer);
   open_refs := [];
-  update_mark := !update_uid;
+  Int.incr closure_count;
+  checkpoint_lineage := [];
+  failed_reads := [];
   active_constraints := [];
   active_update_steps := [];
   (* There should not be any shape variables remaining in any inference-undergoing update steps. *)
@@ -3582,12 +4018,22 @@ let finish_inference (() : unit) : unit =
    over a closed tensor (its node's dims, padding, or a committed step's projections) never runs the
    session-global finalizer, and a failed closure of OTHER open work cannot poison it
    (gh-ocannl-1301). *)
+(* A committed-state read of an open shape finalizes; a lazy over it memoizes a failure, so a
+   failure is recorded against the shape for the checkpoints' validity (gh-ocannl-903). *)
+let finish_for_read ?(even_if_closed = false) (sh : t) =
+  if even_if_closed || not sh.closed then (
+    try finish_inference ()
+    with exn ->
+      let bt = Stdlib.Printexc.get_raw_backtrace () in
+      note_failed_read sh;
+      Stdlib.Printexc.raise_with_backtrace exn bt)
+
 let to_dims (sh : t) =
-  if not sh.closed then finish_inference ();
+  finish_for_read sh;
   to_dims_impl sh
 
 let%track4_sexp to_padding (sh : t) : (Ir.Ops.axis_padding array * float) option =
-  if not sh.closed then finish_inference ();
+  finish_for_read sh;
   try
     (* If any row has padding, we need to return padding for all dimensions. Use zero padding for
        rows without explicit padding. *)
@@ -3653,7 +4099,7 @@ let get_projections (update_step : update_step) : Idx.projections =
       (* Committed by an earlier closure. *)
       projections
   | _ -> (
-      finish_inference ();
+      finish_for_read ~even_if_closed:true update_step.shape;
       match update_step.unsafe_projections with
       | Some projections -> projections
       | None ->

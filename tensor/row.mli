@@ -108,6 +108,20 @@ val drop_symbol_roles : unit -> unit
 val reset_transient : unit -> unit
 (** Clears the solver's transient work state between solver calls. *)
 
+type globals
+(** The solver's module-level inference state -- the pending role claims, the safe-to-guess,
+    use-site-resolution and concatenation-component sets, the rank graph and the template cache --
+    as persistent values (gh-ocannl-903). *)
+
+val capture_globals : unit -> globals
+(** A pointer capture, O(1): what a checkpoint records. *)
+
+val restore_globals : globals -> unit
+(** Puts a capture back, as part of a rewind. *)
+
+val globals_differences : globals -> globals -> string list
+(** The components that differ between two captures (physically), by name: a diagnostic. *)
+
 val sym_dim_extent_exn : sym_dim -> int
 (** The maximum extent of a symbolic dimension: the declared range of its static symbol. *)
 

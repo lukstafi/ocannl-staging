@@ -196,6 +196,18 @@ val set_solved_dim : shape_writer -> variable_ref -> int -> unit
 val set_solved_sym : shape_writer -> variable_ref -> static_symbol -> unit
 (** Records a symbolic-extent solution, guarded like {!set_solved_dim}. *)
 
+type variable_ref_snapshot
+(** A reference's solution at a checkpoint, bound to that reference (gh-ocannl-903). *)
+
+val snapshot_variable_ref : variable_ref -> variable_ref_snapshot
+
+val restore_variable_ref : shape_writer -> variable_ref_snapshot -> unit
+(** Puts the recorded solution back on its reference -- unsolving it if it was unsolved: a rewind's
+    write, so it takes the writer. *)
+
+val variable_ref_snapshot_changed : variable_ref_snapshot -> bool
+(** Whether the reference's solution differs from the recorded one: a diagnostic. *)
+
 val commit_role : shape_writer -> static_symbol -> [ `Extent | `Slice ] -> unit
 (** Sets the symbol's role flag. Committing the role it holds is a no-op; the other role raises (a
     binding cannot be validated both inclusively and strictly). [Shape] calls it only from a

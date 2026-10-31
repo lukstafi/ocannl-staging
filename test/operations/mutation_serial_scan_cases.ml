@@ -418,3 +418,88 @@ let () =
     (match Test_utils.Scan_attempt.run (fun () -> Scan.scan ~file:"x.ml" "let = (") with
     | Unparsed _ -> true
     | Scanned _ | Raised _ -> false)
+
+(* gh-ocannl-903: the capture relationship, required of the session modules -- every tracked binding
+   that is neither exempt nor kept is captured, as a pointer, by the file's top-level
+   [capture_globals]. *)
+let captured_findings source =
+  Test_utils.Scan_attempt.attempted ~what:"mutation-serial capture cases"
+    ~name:(String.prefix source 60) ~default:[ "<the scan failed>" ] (fun () ->
+      (Scan.scan ~file:"x.ml" ~serial_owner:true ~require_capture:true ("open Base\n" ^ source))
+        .findings)
+
+let captured_says source fragment =
+  List.exists (captured_findings source) ~f:(fun f -> String.is_substring f ~substring:fragment)
+
+let () =
+  let noted =
+    "let note_mutation () = ()\nlet seen = ref 0\nlet set v =\n  note_mutation ();\n  seen := v\n"
+  in
+  p "a noted ref that capture_globals captures is accepted"
+    (0 = List.length (captured_findings (noted ^ "let capture_globals () = { g_seen = !seen }")));
+  p "a noted ref that capture_globals does not capture is refused"
+    (captured_says
+       (noted ^ "let other = ref 1\nlet capture_globals () = { g_other = !other }")
+       "seen is session state a checkpoint must restore");
+  p "a capture in a record capture_globals does not return does not count"
+    (captured_says
+       (noted ^ "let capture_globals () =\n  let _unused = { g_seen = !seen } in\n  ()")
+       "seen is session state a checkpoint must restore");
+  p "a session module without capture_globals is refused"
+    (captured_says noted "defines no top-level capture_globals");
+  p "a noted table cannot be captured as a pointer"
+    (captured_says
+       "let note_mutation () = ()\n\
+        let seen = Hash_set.create (module Int)\n\
+        let add v =\n\
+       \  note_mutation ();\n\
+       \  Hash_set.add seen v\n\
+        let capture_globals () = { g = 0 }"
+       "a Hash_set cannot be captured as a pointer");
+  p "a kept binding needs no capture"
+    (0
+    = List.length
+        (captured_findings
+           "let note_mutation () = ()\n\
+            let registry = Hash_set.create (module Int) [@@mutation_serial.kept \"a registry \
+            rewinds extend\"]\n\
+            let add v =\n\
+           \  note_mutation ();\n\
+           \  Hash_set.add registry v\n\
+            let capture_globals () = { g = 0 }"));
+  p "a kept binding that capture_globals captures anyway is stale"
+    (captured_says
+       "let note_mutation () = ()\n\
+        let seen = ref 0 [@@mutation_serial.kept \"a registry rewinds extend\"]\n\
+        let set v =\n\
+       \  note_mutation ();\n\
+       \  seen := v\n\
+        let capture_globals () = { g_seen = !seen }"
+       "stale kept on seen");
+  p "an exempt binding needs no capture"
+    (0
+    = List.length
+        (captured_findings
+           "let note_mutation () = ()\n\
+            let uid = ref 0 [@@mutation_serial.exempt \"a fresh-id counter never restored\"]\n\
+            let fresh () = Int.incr uid\n\
+            let capture_globals () = { g = 0 }"));
+  let record =
+    "let note_mutation () = ()\n\
+     type st = { mutable roots : int; mutable count : int }\n\
+     let st = { roots = 0; count = 0 }\n\
+     let set v =\n\
+    \  note_mutation ();\n\
+    \  st.roots <- v;\n\
+    \  st.count <- v\n"
+  in
+  p "record fields captured as st.f are accepted"
+    (0
+    = List.length
+        (captured_findings
+           (record ^ "let capture_globals () = { g_roots = st.roots; g_count = st.count }")));
+  p "an uncaptured record field is refused"
+    (captured_says
+       (record ^ "let capture_globals () = { g_roots = st.roots }")
+       "st.count is session state a checkpoint must restore");
+  p "the capture rule is off for files that are not session modules" (count noted = 0)
