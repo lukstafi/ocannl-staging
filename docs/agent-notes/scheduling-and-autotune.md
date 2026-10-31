@@ -2168,8 +2168,8 @@ files.
   tile, whose own register fragment is in `simdgroup_fragments`, gh-ocannl-1736); a user `{ fragment }` carries the same label head,
   and `workgroup_shared` also holds staged operand tiles. A new fragment-minting site enrolls its
   node in one of the two sets, or the fusion declines there. `schedule_epilogue_fusion`'s forged
-  leg swaps a user `fragment` node into the store-back and pins the refusal, with the enrolled
-  control fusing.
+  leg substitutes a look-alike of the fragment throughout the scheduled program
+  (`Ll_test.substitute_optimized`) and pins the refusal, with the enrolled control fusing.
 - **A masked accumulator persists through a padded scratch tile** (gh-ocannl-1736). The intrinsic
   loads and stores move whole tiles and the masked transfers are not plain copies, so on a staged
   GPU pipeline's loop site the masked tile becomes scratch (`masked_fragments`, workgroup-shared)

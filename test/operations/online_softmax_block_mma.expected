@@ -33,6 +33,10 @@ structural: under the GPU preset at limits advertising f32 MMA units the preset 
 structural: under the GPU preset a grid cap of 1 keeps the scalar fold: no Fold_mma emitted: true
 structural: exactly two written nodes carry a fold tile role, the scores' and the numerator's: true
 structural: a node forged with a tile's namespace, label, precision and shape has no role: true
+structural: the control: substituting the score tile back restores the captured program: true
+structural: with a look-alike substituted for the score tile the GPU preset emits no Fold_mma: true
+structural: the control: substituting the numerator tile back restores the captured program: true
+structural: with a look-alike substituted for the numerator tile the GPU preset emits no Fold_mma: true
 --- leg 3: the training step, the fold forward under the fused backward ---
 the step's fold renders both contractions as intrinsics: true
 a parameter gradient agrees with the composed step within 1e-4 relative: true

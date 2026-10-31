@@ -788,6 +788,103 @@ let walk_scalar ?on_set ?on_get ?on_binop ?on_ternop ?on_scope ?on_if ?on_stmt ?
        ?in_scopes ())
     s
 
+(** {2 Node substitution}
+
+    [substitute ~from ~to_ llc] is [llc] with the tensor node [to_] in place of [from] everywhere
+    the IR names a node: the targets of [Set] / [Set_dynamic] / [Set_from_vec] / [Zero_out], the
+    reads of [Get] / [Get_dynamic] / [Get_merge_buffer], the operands of a [Tile_mma] and its
+    fallback, and every scope id ([Declare_local], [Set_local], [Get_local], [Local_scope], a
+    [Scan_loop]'s carried pair) whose node is [from] -- the scope number is kept, so a scope over
+    [from] becomes the same-numbered scope over [to_]. Everything else is rebuilt unchanged, debug
+    strings included; [Staged_compilation] is opaque source text, so a node it spells is not
+    reached.
+
+    What it is for: an END-TO-END negative control for a recognizer that should know a node by its
+    identity (gh-ocannl-1721, gh-ocannl-1722). Substituting a look-alike -- a node minted with the
+    real one's namespace, label, precision and shape -- for the real node in lowered IR gives a
+    program every public field of which still says "this is the tile", so a recognizer that reads
+    those fields is fooled and one that checks identity is not. A classifier probed on the
+    look-alike alone tests the predicate; this tests the transform that consults it. The records an
+    {!Ir.Low_level.optimized} carries beside the code ([traced_store], the identity sets) are the
+    caller's to carry over or not: leaving them naming [from] is the point of the control. *)
+let substitute ~(from : Tn.t) ~(to_ : Tn.t) (llc : LL.t) : LL.t =
+  let node tn = if Tn.equal tn from then to_ else tn in
+  let scope (id : LL.scope_id) : LL.scope_id = { id with tn = node id.tn } in
+  let rec stmt (llc : LL.t) : LL.t =
+    match llc with
+    | LL.Noop | LL.Comment _ | LL.Staged_compilation _ | LL.Workgroup_barrier -> llc
+    | LL.Seq (a, b) ->
+        let a = stmt a in
+        LL.Seq (a, stmt b)
+    | LL.For_loop f -> LL.For_loop { f with body = stmt f.body }
+    | LL.Scan_loop s ->
+        let carried =
+          List.map s.carried ~f:(fun (c : LL.carried) : LL.carried ->
+              { prev = scope c.prev; next = scope c.next; init = scalar c.init })
+        in
+        LL.Scan_loop { s with carried; body = stmt s.body }
+    | LL.Zero_out tn -> LL.Zero_out (node tn)
+    | LL.Set s -> LL.Set { s with tn = node s.tn; llsc = scalar s.llsc }
+    | LL.Set_dynamic s ->
+        LL.Set_dynamic { s with tn = node s.tn; dyn_value = arg s.dyn_value; llsc = scalar s.llsc }
+    | LL.Set_from_vec s -> LL.Set_from_vec { s with tn = node s.tn; arg = arg s.arg }
+    | LL.Set_local (id, v) -> LL.Set_local (scope id, scalar v)
+    | LL.Declare_local d -> LL.Declare_local { d with id = scope d.id }
+    | LL.If { cond; body } -> LL.If { cond = arg cond; body = stmt body }
+    | LL.Tile_mma t ->
+        let operand (tn, idcs) = (node tn, idcs) in
+        LL.Tile_mma
+          { t with d = operand t.d; a = operand t.a; b = operand t.b; fallback = stmt t.fallback }
+  and scalar (s : LL.scalar_t) : LL.scalar_t =
+    match s with
+    | LL.Constant _ | LL.Constant_bits _ | LL.Embed_index _ -> s
+    | LL.Get_local id -> LL.Get_local (scope id)
+    | LL.Get (tn, idcs) -> LL.Get (node tn, idcs)
+    | LL.Get_merge_buffer (tn, idcs) -> LL.Get_merge_buffer (node tn, idcs)
+    | LL.Get_dynamic g -> LL.Get_dynamic { g with tn = node g.tn; dyn_value = arg g.dyn_value }
+    | LL.Local_scope l -> LL.Local_scope { l with id = scope l.id; body = stmt l.body }
+    | LL.Ternop (op, a, b, c) -> LL.Ternop (op, arg a, arg b, arg c)
+    | LL.Binop (op, a, b) -> LL.Binop (op, arg a, arg b)
+    | LL.Unop (op, a) -> LL.Unop (op, arg a)
+  and arg ((s, prec) : LL.scalar_arg) : LL.scalar_arg = (scalar s, prec) in
+  stmt llc
+
+(** [look_alike ~id tn] is a fresh node with [tn]'s namespace, label, storage precision, unpadded
+    shape and padding, under the caller's [id]: every field a client can pass to [Tn.create], so
+    nothing but its identity (its [uid]) tells it from [tn]. The forgery {!substitute} plants. *)
+let look_alike ~id (tn : Tn.t) =
+  let padding = Lazy.force tn.Tn.padding in
+  let unpadded =
+    match padding with
+    | None -> Lazy.force tn.Tn.dims
+    | Some (margins, _) ->
+        Array.map2_exn (Lazy.force tn.Tn.dims) margins ~f:(fun d (m : Ops.axis_padding) ->
+            d - m.left - m.right)
+  in
+  Tn.create ~namespace:tn.Tn.namespace
+    (Tn.Specified (Lazy.force tn.Tn.storage_prec))
+    ~id ~label:tn.Tn.label
+    ~unpadded_dims:(lazy unpadded)
+    ~padding:(lazy padding)
+    ()
+
+(** [substitute_optimized ~from ~to_ o] is [o] with {!substitute} applied to its code, in a copy
+    that carries [from]'s per-node records over to [to_] as well: its traced-store entry and its
+    placement (both forked first, so [o] is untouched). What a transform reads off those records
+    about the node is then what it read about [from], and the program differs from [o] by the node's
+    IDENTITY alone. The identity sets ([simdgroup_fragments], [masked_fragments], ...) are left
+    naming [from]: they are the records an identity-keyed recognizer consults, so a control enrols
+    [to_] in one explicitly when it wants the positive arm. *)
+let substitute_optimized ~(from : Tn.t) ~(to_ : Tn.t) (o : LL.optimized) : LL.optimized =
+  let traced_store = Hashtbl.copy o.LL.traced_store in
+  Option.iter (Hashtbl.find traced_store from) ~f:(fun traced ->
+      Hashtbl.set traced_store ~key:to_ ~data:traced);
+  let optimize_ctx = LL.copy_optimize_ctx o.LL.optimize_ctx in
+  let placements = optimize_ctx.LL.placements in
+  Option.iter (Tn.Placements.get placements from) ~f:(fun (mode, provenance) ->
+      Tn.Placements.update placements to_ mode provenance);
+  { o with llc = substitute ~from ~to_ o.LL.llc; traced_store; optimize_ctx }
+
 let count f =
   let n = ref 0 in
   f (fun () -> Int.incr n);
