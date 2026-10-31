@@ -1,3 +1,5 @@
+the expansion schemes some block at its () stage: true
+the trial list is the expansion's list: true
 mlp_layer: its own scheme was traced: true
 mlp: its own scheme was traced: true
 softmax: its own scheme was traced: true

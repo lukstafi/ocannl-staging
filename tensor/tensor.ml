@@ -1865,22 +1865,12 @@ module Scheme = struct
       | [] -> "no arguments"
       | _ -> String.concat ~sep:", " (List.map args ~f:(fun t -> Tn.debug_name t.value))
 
-    (* The check of one application: the scheme's constraints against the arguments, solved, in a
-       window that is always rewound -- the session afterwards is what the body alone makes. *)
+    (* The check of one application: the scheme's constraints against the arguments, solved, and
+       then put back -- the session afterwards is what the body alone makes. *)
     let check h scheme args =
       if Shape.can_checkpoint () then (
-        let ck = checkpoint ~label:[%string "the check of the shape scheme %{h.name}"] () in
-        (match
-           Shape.Scheme.instantiate scheme ~application:(application_name args)
-             ~args:(List.map args ~f:(fun t -> t.shape))
-             ~results:[]
-         with
-        | () -> ()
-        | exception exn ->
-            let bt = Stdlib.Printexc.get_raw_backtrace () in
-            (try rewind ck with Session_error _ -> ());
-            Stdlib.Printexc.raise_with_backtrace exn bt);
-        rewind ck;
+        Shape.Scheme.check scheme ~application:(application_name args)
+          ~args:(List.map args ~f:(fun t -> t.shape));
         emit (Checked h.name))
 
     let apply h args body =

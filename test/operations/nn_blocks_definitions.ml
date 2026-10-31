@@ -31,7 +31,21 @@ let blocks =
 (* A block whose body contradicts itself whatever its argument. *)
 let%op inconsistent () x = x + ({ c3 = 0.; o = [ 3 ] } + { c4 = 0.; o = [ 4 ] })
 
+(* The blocks the [%op] expansion of [lib/nn_blocks.ml] schemes at a [()] stage, derived from the
+   expansion itself: the list above is held to it, so a new schemed block needs its trial. *)
+let schemed_at_unit =
+  let text = Stdio.In_channel.read_all "../../lib/nn_blocks.ml" in
+  Ppx_ocannl.schemed_definitions (Ppxlib.Parse.implementation (Lexing.from_string text))
+  |> List.filter_map ~f:(fun (name, at_unit) -> if at_unit then Some name else None)
+  |> List.dedup_and_sort ~compare:String.compare
+
 let () =
+  Verdict.case "the trials cover exactly the blocks the expansion schemes at ()" (fun () ->
+      let trials = List.dedup_and_sort ~compare:String.compare (List.map blocks ~f:fst) in
+      Stdio.eprintf "(not part of the golden) schemed at (): %s\n%!"
+        (String.concat ~sep:" " schemed_at_unit);
+      p_exists "the expansion schemes some block at its () stage" schemed_at_unit ~f:(fun _ -> true);
+      p "the trial list is the expansion's list" (List.equal String.equal trials schemed_at_unit));
   Verdict.case "every schemed nn_blocks block passes its definition check" (fun () ->
       Tensor.unsafe_reinitialize ();
       let ck = Tensor.checkpoint ~label:"before the checks" () in

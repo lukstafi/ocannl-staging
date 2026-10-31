@@ -555,6 +555,12 @@ module Scheme : sig
       trace when the scheme depends on open state no anchored shape holds; after registering
       (tainting the session, as a failed construction does), on a contradiction. *)
 
+  val check : ?sabotage:sabotage -> t -> application:string -> args:shape list -> unit
+  (** [instantiate] against [args] with no results, then puts back everything it wrote (the session
+      and solver globals, the taint, the rows of the arguments and anchored shapes): an
+      argument-dependent shape error raises as [instantiate]'s does, and the session is unchanged
+      either way. Costs what [instantiate] does, independent of the open frontier. *)
+
   val stale : t -> bool
   (** Whether {!instantiate} would refuse the scheme for a closure since its trace (the scheme
       depends on open state no anchored shape holds): trace it again. *)

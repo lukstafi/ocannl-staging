@@ -1021,3 +1021,39 @@ let str_expander ~loc ~path payload =
         | _ -> item)
   in
   str_expander_with_punning translate_tdsl ~loc ~path payload
+
+(* The [%op] functions a structure's [let%op] items get a scheme for, as the expansion gives them:
+   each scheme's name, and whether it is traced at its [()] stage ([true]) or at its first
+   application. Lets a test hold a list of definitions to what the expansion schemes, rather than to
+   a copy of it. *)
+let schemed_definitions (str : structure) =
+  let found = ref [] in
+  let visitor =
+    object
+      inherit Ast_traverse.iter as super
+
+      method! expression e =
+        (match e.pexp_desc with
+        | Pexp_apply
+            ( {
+                pexp_desc =
+                  Pexp_ident
+                    { txt = Ldot (Ldot (Ldot (Lident "Tensor", "Scheme"), "For_ppx"), kind); _ };
+                _;
+              },
+              args )
+          when String.equal kind "closure" || String.equal kind "deferred" ->
+            List.iter args ~f:(function
+              | Labelled "name", { pexp_desc = Pexp_constant (Pconst_string (name, _, _)); _ } ->
+                  found := (name, String.equal kind "closure") :: !found
+              | _ -> ())
+        | _ -> ());
+        super#expression e
+    end
+  in
+  List.iter str ~f:(fun item ->
+      match item.pstr_desc with
+      | Pstr_extension (({ txt = "op"; _ }, PStr payload), _) ->
+          visitor#structure_item (str_expander ~loc:item.pstr_loc ~path:"" payload)
+      | _ -> ());
+  List.rev !found

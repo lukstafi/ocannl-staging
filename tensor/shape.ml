@@ -2434,6 +2434,9 @@ module Checkpoint = struct
     globals : globals;
     row_globals : Row.globals;
     shapes : Shape_record.snapshot list;
+    shape_index : (int, Shape_record.t list) Hashtbl.t Lazy.t;
+        (** [shapes] by id (several physical shapes can share one), for [in_frontier]: a rewind asks
+            it of every open shape, so a linear search made it quadratic in the frontier. *)
     steps : Update_step_record.snapshot list;
     refs : Delayed_ref.snapshot list;
     ref_uids : Set.M(Int).t;
@@ -2468,6 +2471,9 @@ module Checkpoint = struct
         !checkpoint_seq)
     in
     let steps = !active_update_steps in
+    let shapes =
+      List.map (open_shapes ~instances:!active_instances steps) ~f:Shape_record.snapshot
+    in
     (* A closure's checkpoint snapshots no reference: rewinding to the last closure discards every
        reference the discarded work bound or set, as gh-ocannl-1301 specifies. *)
     let refs = if closure then [] else Delayed_ref.snapshot_live () in
@@ -2480,15 +2486,22 @@ module Checkpoint = struct
       update_mark = !update_uid;
       globals = capture_globals ();
       row_globals = Row.capture_globals ();
-      shapes = List.map (open_shapes ~instances:!active_instances steps) ~f:Shape_record.snapshot;
+      shapes;
+      shape_index =
+        lazy
+          (let index = Hashtbl.create (module Int) in
+           List.iter shapes ~f:(fun snap ->
+               let (sh : Shape_record.t) = Shape_record.snapshot_shape snap in
+               Hashtbl.add_multi index ~key:sh.id ~data:sh);
+           index);
       steps = List.map steps ~f:Update_step_record.snapshot;
       refs;
       ref_uids = Set.of_list (module Int) (List.map refs ~f:Delayed_ref.snapshot_uid);
       failed_reads_mark = !failed_reads;
     }
 
-  let in_frontier ck sh =
-    List.exists ck.shapes ~f:(fun s -> phys_equal (Shape_record.snapshot_shape s) sh)
+  let in_frontier ck (sh : Shape_record.t) =
+    List.mem (Hashtbl.find_multi (Lazy.force ck.shape_index) sh.id) sh ~equal:phys_equal
 
   (* Why [ck] can no longer be rewound to, if it cannot. Checked before a rewind writes anything. *)
   let refusal ck =
@@ -4793,4 +4806,23 @@ module Scheme = struct
     with Row.Shape_error (msg, trace) ->
       let bt = Stdlib.Printexc.get_raw_backtrace () in
       Stdlib.Printexc.raise_with_backtrace (Row.Shape_error (prefix ^ msg, trace)) bt
+
+  (* What [instantiate] writes, put back: the session globals, the solver's, the taint, and the rows
+     of the shapes it substitutes the solution into (the arguments and the anchored shapes). *)
+  let restore_after_check ~globals ~row_globals ~taint:taint0 rows =
+    restore_globals globals;
+    Row.restore_globals row_globals;
+    taint := taint0;
+    List.iter rows ~f:(fun (sh, batch, input, output) -> set_rows sh ~batch ~input ~output)
+
+  let check ?sabotage s ~application ~args =
+    let globals = capture_globals () and row_globals = Row.capture_globals () and taint0 = !taint in
+    let rows =
+      List.map
+        (args @ List.map s.anchors ~f:fst)
+        ~f:(fun (sh : shape) -> (sh, sh.batch, sh.input, sh.output))
+    in
+    Exn.protect
+      ~f:(fun () -> instantiate ?sabotage s ~application ~args ~results:[])
+      ~finally:(fun () -> restore_after_check ~globals ~row_globals ~taint:taint0 rows)
 end

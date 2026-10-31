@@ -223,6 +223,26 @@ let () =
       in
       p "control: the explicit trace of the same function still raises a shape error"
         (has_substring ~substring:"precision-dependent" msg));
+  Verdict.case "a check leaves the session as it was" (fun () ->
+      Tensor.unsafe_reinitialize ();
+      let lay = layer () in
+      ignore (lay (leaf ~batch:[ 2 ] "x" [ 3 ]) : Tensor.t);
+      let h =
+        Tensor.Scheme.For_ppx.closure ~name:"probe" ~arity:1 (function
+          | [ x ] -> ignore (lay x : Tensor.t)
+          | _ -> assert false)
+      in
+      let ok = leaf ~batch:[ 5 ] "ok" [ 3 ] and bad = leaf ~batch:[ 5 ] "bad" [ 6 ] in
+      let ck = Tensor.checkpoint ~label:"before the checks" () in
+      let (), evs = events (fun () -> Tensor.Scheme.For_ppx.apply h [ ok ] (fun () -> ())) in
+      p "the check of a fitting argument ran" (List.exists evs ~f:(checked "probe"));
+      p_empty "and left the session as it was" ~over:Tensor.For_testing.restore_categories
+        (Tensor.For_testing.checkpoint_differences ck);
+      p "the check of a conflicting argument raises, naming the scheme"
+        (has_substring ~substring:"applying the shape scheme probe to bad"
+           (error_message (fun () -> Tensor.Scheme.For_ppx.apply h [ bad ] (fun () -> ()))));
+      p_empty "and left the session as it was too" ~over:Tensor.For_testing.restore_categories
+        (Tensor.For_testing.checkpoint_differences ck));
   Verdict.case "a trace's discarded nodes are kept as one id range" (fun () ->
       Tensor.unsafe_reinitialize ();
       let nodes0, ranges0 = Tensor.For_testing.discarded_registry_sizes () in
