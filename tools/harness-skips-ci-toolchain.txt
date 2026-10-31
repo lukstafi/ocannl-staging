@@ -1,0 +1,11 @@
+# The skips the `fmt` CI job's toolchain step (Ubuntu: dune, ocamlformat and ppxlib, none of the
+# project's own dependencies) expects: `tools/test-harnesses.sh --toolchain --expected-skips
+# tools/harness-skips-ci-toolchain.txt` fails a member on any skip not listed here, and the tier on a
+# listed one that no longer occurs (gh-ocannl-1236). The line forms are the header of
+# tools/test-harnesses.sh: `HARNESS<TAB>LABEL`, comments, empty lines.
+
+# Project-syntax arms are checked in an owning module's context, which builds that module of the
+# repository and so needs the project's libraries (gh-ocannl-1587). The build matrix, which has them,
+# runs these legs strict: the `#project` group of tools/test-typecheck-scan-cases.sh.
+tools/test-typecheck-scan-cases.sh	the repository tables' project-syntax arms, checked in their owning modules' contexts
+tools/test-typecheck-scan-cases.sh	planted project-syntax arms, checked in an owning module's context

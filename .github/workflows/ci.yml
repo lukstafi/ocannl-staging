@@ -531,6 +531,17 @@ jobs:
       env:
         OCANNL_LOG_LEVEL_CC_BACKEND: 3
       run: opam exec -- dune build "@check" "@test/operations/runtest-cc_backend_trace_name" 2>&1 | tee -a "$RUNNER_TEMP/dune-build.log"
+    # The scan-case type check's project-syntax legs (gh-ocannl-1587): `let%op`
+    # and other extension arms of the scan tables, type-checked in their owning
+    # modules' contexts, which need the project's libraries the fmt job's
+    # toolchain step lacks (it expects these legs' skips). Strict, so a skip
+    # here is red; after the @check above, the owning modules are built.
+    - name: Type-check the scan tables' project-syntax arms
+      if: matrix.os == 'ubuntu-latest' && matrix.ocaml-compiler == '5.5.x' && matrix.suite == 'main' && startsWith(matrix.shard, '1/')
+      shell: bash
+      env:
+        OCANNL_TOOL_HARNESS_STRICT: 1
+      run: opam exec -- tools/test-typecheck-scan-cases.sh --only '#project'
     # cc_march_census's two aarch64 columns skip without an aarch64 cross gcc,
     # and until gh-ocannl-1120 no runner had one: gh-ocannl-1112's bf16 spill reached
     # master unseen. The script stages gcc 13, the runner's own
@@ -865,12 +876,15 @@ jobs:
     # this job installed the toolchain, so a leg the harness cannot decide is a
     # defect, not a host capability -- a fixture that fails to find the
     # installed dune would otherwise pass as a counted skip behind a green
-    # footer. The promotion step runs even when the formatter controls fail,
-    # but not when the toolchain it is strict about was never installed.
+    # footer. Expected, and listed, are only the scan-case type check's
+    # project-syntax legs, which need the project's own libraries: the build
+    # matrix runs them (gh-ocannl-1587). The promotion step runs even when the
+    # formatter controls fail, but not when the toolchain it is strict about
+    # was never installed.
     - name: Test toolchain harnesses
       env:
         OCANNL_TOOL_HARNESS_STRICT: 1
-      run: tools/test-harnesses.sh --toolchain
+      run: tools/test-harnesses.sh --toolchain --expected-skips tools/harness-skips-ci-toolchain.txt
     - name: Test promotion harnesses
       if: ${{ !cancelled() && steps.install-formatting-deps.outcome == 'success' }}
       env:
