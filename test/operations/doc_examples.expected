@@ -17,4 +17,11 @@ docs/syntax_extensions.md: checked op_schemes_check_definition
 docs/syntax_extensions.md: checked padded_conv_transpose
 docs/tensors_and_contexts.md: checked context_compile
 docs/tensors_and_contexts.md: checked context_creation
+docs/tensors_and_contexts.md: excerpt of test/operations/reusable_tensor_programs.ml
+docs/tensors_and_contexts.md: excerpt of test/operations/reusable_tensor_programs.ml
+docs/tensors_and_contexts.md: excerpt of test/operations/reusable_tensor_programs.ml
+docs/tensors_and_contexts.md: excerpt of test/operations/reusable_tensor_programs.ml
+docs/tensors_and_contexts.md: excerpt of test/operations/reusable_tensor_programs.ml
+docs/tensors_and_contexts.md: excerpt of test/operations/reusable_tensor_programs.ml
+docs/tensors_and_contexts.md: excerpt of test/operations/reusable_tensor_programs.ml
 docs/tensors_and_contexts.md: excluded illustrative partial Tensor record; see tensor/tensor.ml

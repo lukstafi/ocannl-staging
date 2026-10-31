@@ -133,7 +133,9 @@ type print_style = Only_bases | Axis_size | Axis_number_and_size | Projection_an
 [@@deriving equal, compare, sexp]
 
 val solved_dim_to_string : print_style -> solved_dim -> string
-val dim_to_string : print_style -> dim -> string
+
+val dim_to_string : ?var_to_string:(dim_var -> string) -> print_style -> dim -> string
+(** [var_to_string] renders the dimension variables, nested ones included (default: [$<id>]). *)
 
 type provenance [@@deriving sexp, compare, equal, hash]
 
@@ -324,6 +326,13 @@ val get_dim_from_env : environment -> dim_var -> dim option
     it is unsolved (absent or only bounded). {!get_dim_val} is its concrete-size projection. *)
 
 val get_row_from_env : environment -> row_var -> t option
+
+val find_dim_entry : environment -> dim_var -> dim_entry option
+(** A dimension variable's entry: solved, or its bounds. *)
+
+val find_row_entry : environment -> row_var -> row_entry option
+(** A row variable's entry: solved, or its bounds. *)
+
 val unsolved_constraints : environment -> constraint_ list
 
 val solve_inequalities :

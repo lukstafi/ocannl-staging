@@ -426,6 +426,19 @@ module Scheme : sig
   val arity : t -> int
   val num_results : t -> int
 
+  val to_string : t -> string
+  (** [to_string s] prints [s]'s boundary: [<label> : <arguments> => <results>], each shape as
+      [batch|input->output] under the trace's solution, with [..v..] for a row variable and [()] for
+      an empty row. Variables are named by first appearance, so the text does not depend on the
+      session's id counters: a generalized variable (renamed per application) as ['a], ['b], ...; a
+      fixed one (shared with what the function closes over, such as a parameter lifted to its [()]
+      scope) as ['_a], ['_b], ..., the way OCaml prints weak type variables. Then, one per indented
+      line, the broadcasting inequalities [r ⊑ o] (the result side refines the operand side) among
+      the boundary's variables and the fixed ones, and the lower bounds of the boundary's variables,
+      under the trace's final environment, with the function's intermediate variables eliminated
+      along monotone chains. Other constraints (totals, concatenations) are not printed.
+      [test/operations/reusable_tensor_programs.ml] shows one. *)
+
   val trace : label:string -> int -> (tensor list -> tensor list) -> t
   (** [trace ~label n f] applies [f] to [n] tracing tensors whose shapes are fresh row variables,
       inside {!with_rewind}, and returns the scheme of the constraints it registered over them and

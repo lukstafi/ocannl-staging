@@ -1683,6 +1683,7 @@ module Scheme = struct
   let label = Shape.Scheme.label
   let arity = Shape.Scheme.arity
   let num_results = Shape.Scheme.num_results
+  let to_string = Shape.Scheme.to_string
 
   let applications = ref 0
   [@@mutation_serial.exempt "a counter naming default application labels, not inference state"]

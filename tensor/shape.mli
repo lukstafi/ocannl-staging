@@ -525,6 +525,9 @@ module Scheme : sig
   val arity : t -> int
   val num_results : t -> int
 
+  val to_string : t -> string
+  (** See [Tensor.Scheme.to_string]. *)
+
   val trace :
     ?sabotage:sabotage ->
     var_mark:int ->

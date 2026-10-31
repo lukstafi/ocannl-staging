@@ -486,3 +486,22 @@ let () =
             String.is_substring
               (Sexp.to_string (sexp_of_exn e))
               ~substring:"the shape scheme concat applied to the probe application"))
+
+(* gh-ocannl-1753: [Tensor.Scheme.to_string] names variables by first appearance, nested ones in a
+   compound dimension included, so the text does not depend on the id counters: a trace's ids come
+   from the reserved range, which every trace advances. *)
+let () =
+  Verdict.case "a printed scheme names every variable" (fun () ->
+      Tensor.unsafe_reinitialize ();
+      let concat = function
+        | [ x ] -> [ NTDSL.einsum1 "...|...->p^o => ...|...->o" x () ]
+        | _ -> assert false
+      in
+      let print () = Tensor.Scheme.to_string (Tensor.Scheme.trace ~label:"concat" 1 concat) in
+      let first = print () in
+      let (_ : string) = print () in
+      let third = print () in
+      Stdio.eprintf "(not part of the golden) the printed scheme:\n%s\n%!" first;
+      p "the argument's concatenated axis is printed" (String.is_substring first ~substring:"^");
+      p "no raw variable id is printed" (not (String.mem first '$'));
+      p "the text is the same after more traces advanced the ids" (String.equal first third))

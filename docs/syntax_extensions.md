@@ -859,6 +859,8 @@ A `%op` function gets a *shape scheme* automatically (gh-ocannl-1751), on top of
 - **What an application does.** It checks the scheme against its arguments' shapes, in a window that is always rewound, then runs the body, which builds and registers the graph as it always has. The scheme only checks; it never replaces the body (that is gh-ocannl-1761).
 - **What it reports.** A shape error that does not depend on the arguments raises when the closure is built, as `tracing the shape scheme <function>: ...`. One that does raises at the application, before the body runs, as `applying the shape scheme <function> to <arguments>: ...`.
 
+To see a function's scheme, trace it explicitly with `Tensor.Scheme.trace` (the same trace the closure ran) and print it with `Tensor.Scheme.to_string`. The newcomer tutorial [Reusable Tensor Programs](./tensors_and_contexts.md#reusable-tensor-programs) prints one, shows both kinds of report, and recovers a REPL session from a failed construction.
+
 **Which functions qualify.** The returned function -- right after `()`, or the function a unit body ends in, through `let`, `;` and `let open`, as in `Nn_blocks.mlp` -- must take only tensors. The ppx has no types, so it decides syntactically:
 
 - an unlabelled variable parameter is a tensor (the convention above);

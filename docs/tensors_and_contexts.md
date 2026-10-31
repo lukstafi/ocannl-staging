@@ -23,6 +23,10 @@ This document describes how to work with tensors and execution contexts in OCANN
   - [Forward and Backward Passes](#forward-and-backward-passes)
   - [Training Loops](#training-loops)
   - [Stopping and Resuming Training](#stopping-and-resuming-training)
+- [Reusable Tensor Programs](#reusable-tensor-programs)
+  - [One Function, Two Shapes](#one-function-two-shapes)
+  - [A Shape Mistake, Named](#a-shape-mistake-named)
+  - [Recovering a Session from a Failed Construction](#recovering-a-session-from-a-failed-construction)
 - [Randomness and Parameter Initialization](#randomness-and-parameter-initialization)
   - [Counter-Based PRNG](#counter-based-prng)
   - [Initialization Functions](#initialization-functions)
@@ -513,6 +517,94 @@ derived from the restored step draws the same numbers. The checkpoint therefore 
 before the seed was recorded restores with a warning instead.
 `test/training/resume_checkpoint.ml`
 resumes a run in a fresh process and checks it matches the uninterrupted one bit for bit.
+
+## Reusable Tensor Programs
+
+A `%op` function is a tensor program defined once and applied many times. It gets a *shape
+scheme* automatically: the shape constraints its body imposes, traced once when its closure is
+built and checked at every application ([Automatic shape schemes](syntax_extensions.md#automatic-shape-schemes);
+the mechanism is in [Shape schemes](shape_inference.md#shape-schemes)). The tutorial
+[`test/operations/reusable_tensor_programs.ml`](../test/operations/reusable_tensor_programs.ml)
+walks through what that buys, in three steps; its `%expect` blocks are its real output, checked by
+`dune build @test/operations/runtest-reusable_tensor_programs`, and every excerpt below is checked
+to be verbatim from it.
+
+### One Function, Two Shapes
+
+The layer's `()` application creates its parameters `w` and `b` and returns the function that
+uses them; the input size of `w` is left to inference:
+
+```ocaml doc-excerpt=test/operations/reusable_tensor_programs.ml
+let%op mlp_layer ~hid () x = relu (({ w; o = [ hid ] } * x) + { b = 0.; o = [ hid ] })
+```
+
+`Tensor.Scheme.to_string` prints a scheme like a type, `batch|input->output` for the argument,
+then `=>` and the result. A row variable `..'a..` stands for any number of axes and is
+generalized: each application gets its own. `..'_a..` is fixed, shared by every application
+(here, the input row of `w`), the way OCaml prints a weak type variable. The indented lines are
+the broadcasting relations, `r ⊑ o` reading "the result row `r` refines the operand row `o`":
+
+```text doc-excerpt=test/operations/reusable_tensor_programs.ml
+layer : ..'a..|..'b..->..'c.. => ..'d..|..'e..->..'f..,4
+  ..'_a.. ⊑ ..'c..
+  ..'d.. ⊑ ..'a..
+  ..'e.. ⊑ ..'_b..
+  ..'e.. ⊑ ..'b..
+```
+
+The same `layer` then applies at batch shapes `2` and `5,7`, each application checked against
+the scheme before its body builds, giving results of shapes `2|4` and `5,7|4`.
+
+### A Shape Mistake, Named
+
+A shape mistake inside a tensor function is reported naming the function, and as early as the
+mistake allows. One that no argument can fix -- here a bias declared with the hidden size
+instead of the output size -- fails when the closure is built, and
+`Tensor.Scheme.check_definition` finds it at program start from a trial configuration:
+
+```ocaml doc-excerpt=test/operations/reusable_tensor_programs.ml
+let%op two_layer ~hid ~out () x =
+  let h = relu (({ w1; o = [ hid ] } * x) + { b1 = 0.; o = [ hid ] }) in
+  ({ w2; o = [ out ] } * h) + { b2 = 0.; o = [ hid ] }
+```
+
+```text doc-excerpt=test/operations/reusable_tensor_programs.ml
+checking the definition two_layer: tracing the shape scheme two_layer: solved dimensions for axis: mismatch
+  conflicting sizes: 2 vs 8
+```
+
+One that depends on the argument fails at the application, before the body runs: a residual
+block whose layer is 4 wide, applied to 3 features, reads
+
+```text doc-excerpt=test/operations/reusable_tensor_programs.ml
+Shape_error: applying the shape scheme residual_block to x: dimension comparison for axis: mismatch
+  conflicting sizes: 4 vs 3
+```
+
+With the scheme opted out (`[@@ocannl.no_scheme]`), the same mistakes surface only inside the
+body, naming neither the function nor the argument, and leave the session tainted.
+
+### Recovering a Session from a Failed Construction
+
+At a toplevel or in a notebook, a construction that fails inside its body taints the session:
+every later construction is refused, naming the first failure. Take a checkpoint before trying
+things out, and rewind to it after a failure; `Tensor.with_checkpoint` rewinds only when its
+body raises:
+
+```ocaml doc-excerpt=test/operations/reusable_tensor_programs.ml
+let before_model = Tensor.checkpoint ~label:"before the model" () in
+```
+
+```ocaml doc-excerpt=test/operations/reusable_tensor_programs.ml
+Tensor.rewind before_model;
+(* [Tensor.with_checkpoint] does both in one phrase: it rewinds only when its body raises. *)
+attempt (fun () -> Tensor.with_checkpoint (fun () -> [%op x + { bias = 0.; o = [ 5 ] }]));
+```
+
+The rewind discards everything created since the checkpoint -- a failed construction, and the
+parameters of an attempt the scheme refused -- and clears the taint; the session then builds,
+compiles and runs the right model. `Tensor.rewind_to_last_closure` recovers without a checkpoint,
+discarding everything opened since shape inference last closed (at the last compile, say).
 
 ## Randomness and Parameter Initialization
 
