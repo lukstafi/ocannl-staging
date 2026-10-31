@@ -429,6 +429,7 @@ end = struct
     Compiler_options.hiprtc ~target_archs ~hip_include_options:hip_include_opt
       ~rocwmma_include_options:rocwmma_include_opt ~uses_rocwmma
       ~with_debug:(Utils.with_runtime_debug ())
+      ~with_line_info:Utils.settings.output_debug_files_in_build_directory ()
 
   let with_conditional_includes hip_src =
     C_syntax.prepend_conditional_includes

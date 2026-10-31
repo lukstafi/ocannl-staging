@@ -140,7 +140,39 @@ let () =
     ]
     ~f:(fun (binop_syntax, ternop_syntax, select_blend_syntax) ->
       List.is_empty
-        (Cs.operand_conditionality_violations ~binop_syntax ~ternop_syntax ~select_blend_syntax))
+        (Cs.operand_conditionality_violations ~binop_syntax ~ternop_syntax ~select_blend_syntax));
+  (* gh-ocannl-1695: HIP blends a value select over [auto] locals at every float compute precision
+     but fp8, CUDA at none (ptxas if-converts the short-circuiting spelling itself), and the blend's
+     truth is the dialect's own test -- the GPU [Satur01_gate]'s [0 < x && x < 1], not cc's
+     [fabs(floor(x)) > 0] (ahrefs/ocannl#1647). *)
+  let float_precs = [ Ops.half; Ops.bfloat16; Ops.single; Ops.double ] in
+  p_all "HIP blends value selects over auto locals at f16, bf16, f32 and f64" float_precs
+    ~f:(fun prec ->
+      match Hip.select_blend_syntax prec with
+      | Some (Cs.Blend_over_locals "auto") -> true
+      | _ -> false);
+  p_all "HIP keeps fp8's short-circuiting select, and CUDA every precision's"
+    (Ops.fp8 :: float_precs) ~f:(fun prec ->
+      Option.is_none (Cuda.select_blend_syntax prec)
+      && ((not (Ops.equal_prec prec Ops.fp8)) || Option.is_none (Hip.select_blend_syntax prec)));
+  let x = PPrint.string "x" and g = PPrint.string "g" in
+  let gate =
+    render
+      (Cs.Over_locals.blend_gate ~decl:"auto" ~binop_syntax:Hip.binop_syntax Ops.single
+         Ops.Satur01_gate x g)
+  in
+  p "the GPU Satur01 blend binds its operand, then keeps the dialect's own test over the local"
+    (String.is_prefix gate ~prefix:"[&]() { auto ocannl_sel_a__ = g;"
+    && String.is_substring gate ~substring:"x > 0.0f && x < 1.0f"
+    && String.is_substring gate ~substring:"? ocannl_sel_a__ : 0.0f");
+  let where =
+    render
+      (Cs.Over_locals.blend_where ~decl:"auto" ~ternop_syntax:Hip.ternop_syntax Ops.single x a b)
+  in
+  p "the GPU Where blend binds both arms, then selects between them with the dialect's own ternary"
+    (String.equal where
+       "[&]() { auto ocannl_sel_a__ = a; auto ocannl_sel_b__ = b; return ((x) ? ocannl_sel_a__ : \
+        ocannl_sel_b__); }()")
 
 (* gh-ocannl-707: each dialect's vendor-header table reaches the EFFECTIVE config. It is checked
    through [kernel_ident] of the instantiated syntax rather than by membership in the list: [Make]

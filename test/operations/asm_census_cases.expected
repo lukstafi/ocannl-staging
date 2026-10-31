@@ -1,6 +1,16 @@
 each branch attributed to a line comes with the instruction before it, a loop counter's test set apart: true
 a failing branch claim prints each branch with the instruction before it and its source line, off the golden: true
 a branch claim that holds prints nothing: true
+a GPU census anchor is the select's line alone: true
+SASS: the branch around a gate's load is counted, the bounds guard's exit and the unconditional trap are not: true
+SASS: a blended select has no branch, a predicated load is no branch, and nor is an [@PT] branch: true
+AMDGPU: the exec-mask skip around a gate's load is counted, the bounds guard's is not, nor a vendor header's line: true
+AMDGPU: a blended select has no conditional branch ([s_branch] is unconditional): true
+a listing whose line tables name another source has no markers and no instructions there: true
+AMDGPU: a Windows path's drive letter and a trailing column leave the line read: true
+AMDGPU: a Windows path's drive letter and a trailing column leave the line read: true
+an empty listing has no markers and no instructions: true
+a PTX file's target is what ptxas assembles for: true
 compiler plans ignore probe paths and GCC's derived dump names: true
 compiler plan normalization retains SDK paths and effective flags: true
 the census models GCC/GAS and Clang assembly on x86-64 and aarch64: true

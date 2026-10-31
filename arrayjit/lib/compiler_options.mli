@@ -16,10 +16,15 @@ val hiprtc :
   rocwmma_include_options:string list ->
   uses_rocwmma:bool ->
   with_debug:bool ->
+  ?with_line_info:bool ->
+  unit ->
   string list
 (** The hiprtc (HIP) option vector: includes, then the clang fast-math umbrella with its
     left-to-right overrides ([-fno-associative-math], [-fhonor-infinities]), the target's
-    half-register workaround, then debug. *)
+    half-register workaround, then debug -- or, without it, [?with_line_info]'s line tables
+    ([-gline-tables-only], default off): source-line attribution in the code object, which the
+    debug-artifact runs carry so an ISA census can read the code that ran (gh-ocannl-1695). Line
+    tables do not change the code generated. *)
 
 val nvrtc_reassociation_opt_in : string
 (** nvrtc's opt-IN for floating-point reassociation. It exists here only so {!nvrtc} can be checked
@@ -37,11 +42,16 @@ val nvrtc :
   arch_options:string list ->
   fast_math:bool ->
   with_device_debug:bool ->
+  ?with_line_info:bool ->
+  unit ->
   string list
-(** The nvrtc (CUDA) option vector: includes, arch, {!nvrtc_math_options}, debug. What this
-    guarantees under either policy is the absence of {!nvrtc_reassociation_opt_in}:
-    [--use_fast_math] is a fixed expansion of four switches plus a library-function substitution,
-    none of which concerns reassociation (measured for gh-ocannl-784; see the implementation). *)
+(** The nvrtc (CUDA) option vector: includes, arch, {!nvrtc_math_options}, debug, then
+    [?with_line_info]'s [-lineinfo] (default off; source-line attribution in the PTX, which the
+    debug-artifact runs carry for an ISA census, gh-ocannl-1695 -- it does not change the code
+    generated). What this guarantees under either policy is the absence of
+    {!nvrtc_reassociation_opt_in}: [--use_fast_math] is a fixed expansion of four switches plus a
+    library-function substitution, none of which concerns reassociation (measured for gh-ocannl-784;
+    see the implementation). *)
 
 (** Which Metal math-policy API the host macOS offers: the modern split properties (macOS 15+), or
     the deprecated [fastMathEnabled] fallback (macOS 14). *)

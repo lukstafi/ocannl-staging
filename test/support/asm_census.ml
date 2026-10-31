@@ -1138,3 +1138,274 @@ let to_line
      residual=%d residual_mnemonics=%s"
     loop_label span instructions vector_ops vector_fma_ops vector_fma_bytes scalar_fp_ops libm_calls
     stack_refs residual (residual_to_line counts)
+
+(** {1 GPU machine code (gh-ocannl-1695)}
+
+    The branch question of {!conditional_branch_sites}, asked of a GPU kernel the backend compiled.
+    The device compilers are in-process libraries (NVRTC, HIPRTC) whose options a test cannot reach,
+    so nothing is re-compiled: the census reads the code object the run produced, which its
+    debug-artifact compile carries line tables for ([Compiler_options.nvrtc]'s and [hiprtc]'s
+    [?with_line_info]).
+
+    - {b CUDA}: the run's [<routine>.ptx], assembled for the [.target] it names by the toolkit's
+      [ptxas] (the driver's JIT does the same at load; the toolkit's version is the reading's
+      provenance), then [nvdisasm -g -c]: SASS, each instruction under a
+      [//## File "<file>", line <n>] marker.
+    - {b HIP}: the run's [<routine>.hsaco], through [llvm-objdump -d -l], each instruction under a
+      [; <path>:<n>] marker.
+
+    A CONDITIONAL branch is a [BRA] / [BRX] / [JMP] / [JMX] whose guard predicate is not the
+    always-true [PT] (a predicated load or arithmetic instruction is not one: that is what an
+    if-converted select looks like), and any AMDGPU [s_cbranch_*] -- the exec-mask skip around a
+    divergent region included, which is how AMDGPU spells a branch around a load. Loop control is
+    NOT exempted: no GPU dump has yet shown it attributed to a select's line, and a form no fixture
+    pins would be filtered unexplained. *)
+
+type gpu_dialect = Sass | Amdgpu
+
+let gpu_dialect_name = function Sass -> "SASS" | Amdgpu -> "AMDGPU"
+
+(* A GPU instruction listing as [parsed]-like data: per listing line, the source line it is
+   attributed to (when the marker names [source_basename]) and the instruction. *)
+type gpu_line = { g_source : int option; g_text : string; g_mnemonic : string; g_cond : bool }
+
+type gpu_parsed = {
+  g_lines : (int * gpu_line) list;  (** (1-based listing line, instruction), instructions only *)
+  g_markers : int;  (** source-line markers naming [source_basename] *)
+}
+
+let basename_of s = Stdlib.Filename.basename (String.strip s)
+
+(* [//## File "<path>", line <n>] (possibly followed by [inlined at ...]): the first file and
+   line. *)
+let sass_marker line =
+  let line = String.strip line in
+  match String.chop_prefix line ~prefix:"//## File \"" with
+  | None -> None
+  | Some rest -> (
+      match String.lsplit2 rest ~on:'"' with
+      | None -> None
+      | Some (file, after) -> (
+          match String.chop_prefix (String.strip after) ~prefix:", line " with
+          | None -> None
+          | Some n ->
+              let n = String.strip n in
+              let digits =
+                String.prefix n
+                  (Option.value
+                     (String.lfindi n ~f:(fun _ c -> not (Char.is_digit c)))
+                     ~default:(String.length n))
+              in
+              Option.map (Int.of_string_opt digits) ~f:(fun l -> (basename_of file, l))))
+
+(* [/*0110*/ @!P0 BRA `(.L_x_2) ;] -> the instruction text without its address. *)
+let sass_insn line =
+  let s = String.strip line in
+  match String.chop_prefix s ~prefix:"/*" with
+  | None -> None
+  | Some rest -> (
+      match String.lsplit2 rest ~on:'*' with
+      | Some (addr, after)
+        when (not (String.is_empty addr)) && String.for_all addr ~f:Char.is_hex_digit ->
+          let body = String.strip (String.chop_prefix_if_exists after ~prefix:"/") in
+          let body = String.strip (String.chop_suffix_if_exists body ~suffix:";") in
+          if String.is_empty body then None else Some body
+      | _ -> None)
+
+let sass_classify body =
+  let words = String.split body ~on:' ' |> List.filter ~f:(fun w -> not (String.is_empty w)) in
+  let guard, rest =
+    match words with
+    | w :: rest when String.is_prefix w ~prefix:"@" -> (Some (String.drop_prefix w 1), rest)
+    | rest -> (None, rest)
+  in
+  let mnemonic = match rest with m :: _ -> m | [] -> "" in
+  let base = match String.lsplit2 mnemonic ~on:'.' with Some (b, _) -> b | None -> mnemonic in
+  let is_branch = List.mem [ "BRA"; "BRX"; "JMP"; "JMX" ] base ~equal:String.equal in
+  let always = match guard with None | Some "PT" -> true | Some _ -> false in
+  (mnemonic, is_branch && not always)
+
+(* [; /tmp/x.hip:6] (or [:6:3], or [; C:/x.hip:6] on Windows, whose drive letter's colon is the
+   path's): the line is the last field, or the one before a trailing column, read from the right so
+   no colon of the path splits it; a [; name():] function line is not a marker. *)
+let amdgpu_marker line =
+  match String.chop_prefix (String.strip line) ~prefix:"; " with
+  | None -> None
+  | Some rest -> (
+      let fields = String.split rest ~on:':' in
+      let int_of f = Int.of_string_opt (String.strip f) in
+      let file_and_line =
+        match List.rev fields with
+        | col :: l :: (_ :: _ as file) when Option.is_some (int_of col) && Option.is_some (int_of l)
+          ->
+            Some (List.rev file, l)
+        | l :: (_ :: _ as file) when Option.is_some (int_of l) -> Some (List.rev file, l)
+        | _ -> None
+      in
+      match file_and_line with
+      | Some (file, l) when not (String.is_empty (String.concat ~sep:":" file)) ->
+          Option.map (int_of l) ~f:(fun n -> (basename_of (String.concat ~sep:":" file), n))
+      | _ -> None)
+
+let amdgpu_insn line =
+  if String.is_empty line || not (Char.equal line.[0] '\t') then None
+  else
+    let body = String.strip line in
+    let body =
+      match String.substr_index body ~pattern:"//" with
+      | Some i -> String.strip (String.prefix body i)
+      | None -> body
+    in
+    if String.is_empty body then None else Some body
+
+let amdgpu_classify body =
+  let mnemonic = List.hd (String.split body ~on:' ') |> Option.value ~default:"" in
+  (mnemonic, String.is_prefix mnemonic ~prefix:"s_cbranch_")
+
+(** [parse_gpu dialect ~dump ~source_basename] reads a disassembly listing ([nvdisasm -g -c] or
+    [llvm-objdump -d -l] output): every instruction with the source line of [source_basename] the
+    last marker above it names ([None] under a marker naming another file, a vendor header's inlined
+    helper say), and how many markers named [source_basename] at all -- zero means the code object
+    carries no line tables for it, which a caller reports as a failure. *)
+let parse_gpu dialect ~dump ~source_basename =
+  let current = ref None and markers = ref 0 and out = ref [] in
+  List.iteri (String.split_lines dump) ~f:(fun k line ->
+      let marker = match dialect with Sass -> sass_marker line | Amdgpu -> amdgpu_marker line in
+      match marker with
+      | Some (file, l) ->
+          if String.equal file source_basename then (
+            Int.incr markers;
+            current := Some l)
+          else current := None
+      | None -> (
+          let insn = match dialect with Sass -> sass_insn line | Amdgpu -> amdgpu_insn line in
+          match insn with
+          | None -> ()
+          | Some body ->
+              let g_mnemonic, g_cond =
+                match dialect with Sass -> sass_classify body | Amdgpu -> amdgpu_classify body
+              in
+              out := (k + 1, { g_source = !current; g_text = body; g_mnemonic; g_cond }) :: !out));
+  { g_lines = List.rev !out; g_markers = !markers }
+
+(** [gpu_branch_sites p ~anchor] is [(sites, instructions)] as {!conditional_branch_sites} answers
+    it: every conditional branch attributed to a line of [anchor], with the instruction before it in
+    the listing, and how many instructions are attributed there at all. *)
+let gpu_branch_sites p ~anchor =
+  let sites = ref [] and instructions = ref 0 and previous = ref None in
+  List.iter p.g_lines ~f:(fun (asm_line, g) ->
+      (match g.g_source with
+      | Some source_line when Set.mem anchor source_line ->
+          Int.incr instructions;
+          if g.g_cond then
+            sites :=
+              {
+                source_line;
+                source_column = None;
+                asm_line;
+                branch = g.g_text;
+                preceding = !previous;
+                label_between = false;
+                counter_test = false;
+              }
+              :: !sites
+      | _ -> ());
+      previous := Some g.g_text);
+  (List.rev !sites, !instructions)
+
+(* The first of [candidates] that exists, else the first [name] the shell finds on [PATH]. *)
+let find_tool ~candidates ~names =
+  match List.find candidates ~f:Stdlib.Sys.file_exists with
+  | Some p -> Some p
+  | None ->
+      List.find_map names ~f:(fun n ->
+          let rc, out = run_capture ("command -v " ^ Stdlib.Filename.quote n) in
+          let p = String.strip out in
+          if rc = 0 && not (String.is_empty p) then Some p else None)
+
+let cuda_bin_dirs () =
+  (match Stdlib.Sys.getenv_opt "CUDA_PATH" with
+    | Some d when not (String.is_empty d) -> [ Stdlib.Filename.concat d "bin" ]
+    | _ -> [])
+  @ [ "/usr/local/cuda/bin" ]
+
+(* The distribution's versioned LLVM trees ([/usr/lib/llvm-<N>/bin], Ubuntu's ROCm packaging),
+   newest first, after ROCm's own. *)
+let llvm_objdump_candidates () =
+  let versioned =
+    try
+      Stdlib.Sys.readdir "/usr/lib" |> Array.to_list
+      |> List.filter_map ~f:(fun d ->
+          Option.bind (String.chop_prefix d ~prefix:"llvm-") ~f:Int.of_string_opt
+          |> Option.map ~f:(fun v -> (v, "/usr/lib/" ^ d ^ "/bin/llvm-objdump")))
+      |> List.sort ~compare:(fun (a, _) (b, _) -> Int.compare b a)
+      |> List.map ~f:snd
+    with Sys_error _ -> []
+  in
+  [ "/opt/rocm/llvm/bin/llvm-objdump"; "/opt/rocm/lib/llvm/bin/llvm-objdump" ] @ versioned
+
+(* The [.target sm_XX] a PTX file names, as [ptxas -arch] spells it. *)
+let ptx_target ptx =
+  List.find_map (String.split_lines ptx) ~f:(fun l ->
+      match String.split (String.strip l) ~on:' ' |> List.filter ~f:(Fn.non String.is_empty) with
+      | ".target" :: t :: _ -> Some (List.hd_exn (String.split t ~on:','))
+      | _ -> None)
+
+(** [disassemble_gpu dialect ?cuda_arch ~artifact] is the listing of the code object at [artifact]
+    (a [.ptx] for [Sass], a [.hsaco] for [Amdgpu]), with the tool chain that produced it, or why
+    there is none. [?cuda_arch] is the EXECUTING device's architecture as [ptxas -arch] spells it
+    ([sm_120]), which the caller reads from the backend's own device query: the PTX may target an
+    older architecture than the device (NVRTC's default, when no kernel marker raises it), and the
+    driver's JIT assembles it for the device, so the census does too; absent, the PTX's own
+    [.target]. *)
+let disassemble_gpu ?cuda_arch dialect ~artifact =
+  let q = Stdlib.Filename.quote in
+  match dialect with
+  | Sass -> (
+      let bins = cuda_bin_dirs () in
+      let tool n =
+        find_tool ~candidates:(List.map bins ~f:(fun d -> Stdlib.Filename.concat d n)) ~names:[ n ]
+      in
+      match (tool "ptxas", tool "nvdisasm") with
+      | None, _ | _, None -> Error "no ptxas / nvdisasm (CUDA_PATH/bin, /usr/local/cuda/bin, PATH)"
+      | Some ptxas, Some nvdisasm -> (
+          let ptx = Stdio.In_channel.read_all artifact in
+          let arch, arch_source =
+            match cuda_arch with
+            | Some a -> (Some a, "the executing device's")
+            | None -> (ptx_target ptx, "the PTX's own .target")
+          in
+          match arch with
+          | None -> Error (artifact ^ " names no .target")
+          | Some arch ->
+              let cubin = Stdlib.Filename.temp_file "ocannl_gpu_census_" ".cubin" in
+              let rc, out =
+                run_capture
+                  (Printf.sprintf "%s -arch=%s -lineinfo -o %s %s" (q ptxas) arch (q cubin)
+                     (q artifact))
+              in
+              if rc <> 0 then (
+                (try Stdlib.Sys.remove cubin with _ -> ());
+                Error ("ptxas failed: " ^ out))
+              else
+                let rc, out = run_capture (Printf.sprintf "%s -g -c %s" (q nvdisasm) (q cubin)) in
+                (try Stdlib.Sys.remove cubin with _ -> ());
+                let _, version = run_capture (Printf.sprintf "%s --version" (q ptxas)) in
+                let version = List.last (String.split_lines version) |> Option.value ~default:"?" in
+                if rc <> 0 then Error ("nvdisasm failed: " ^ out)
+                else
+                  Ok
+                    ( out,
+                      Printf.sprintf "ptxas -arch=%s (%s; PTX .target %s; %s), nvdisasm -g" arch
+                        arch_source
+                        (Option.value (ptx_target ptx) ~default:"?")
+                        version )))
+  | Amdgpu -> (
+      match
+        find_tool ~candidates:(llvm_objdump_candidates ())
+          ~names:[ "llvm-objdump"; "llvm-objdump-21"; "llvm-objdump-20"; "llvm-objdump-19" ]
+      with
+      | None -> Error "no llvm-objdump (ROCm's, /usr/lib/llvm-<N>/bin, PATH)"
+      | Some objdump ->
+          let rc, out = run_capture (Printf.sprintf "%s -d -l %s" (q objdump) (q artifact)) in
+          if rc <> 0 then Error ("llvm-objdump failed: " ^ out) else Ok (out, objdump ^ " -d -l"))

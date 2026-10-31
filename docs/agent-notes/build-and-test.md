@@ -5144,6 +5144,16 @@ box.
   compiler-sensitive mnemonic goldens (gh-ocannl-924). The driver retains its cache-format probes. `Asm_census.census_source_in` shares the
   exact-anchor-before-brace-range policy between the driver and the discriminating parser control
   (gh-ocannl-937).
+- A GPU branch census reads the code object the run compiled, never a re-compile (gh-ocannl-1695):
+  with `output_debug_files_in_build_directory` the CUDA and HIP compiles carry line tables
+  (`-lineinfo`, `-gline-tables-only`; `Compiler_options`' `?with_line_info`), and
+  `Asm_census.disassemble_gpu` reads `<routine>.ptx` through the toolkit's `ptxas` for the
+  EXECUTING device's `sm_XX` and `nvdisasm -g`, or `<routine>.hsaco` through `llvm-objdump -d -l`
+  (minix: only the distribution's `/usr/lib/llvm-<N>/bin`). Read the architecture from the
+  backend's `Context.static_properties`, never `nvidia-smi`, which ignores `CUDA_VISIBLE_DEVICES`;
+  NVRTC's PTX may target an older one, which the driver JITs for the device. A split compile
+  writes `<routine>.part<k>.*`, whose line tables name the part's own source. Dialect fixtures are
+  in `asm_census_cases`'s `gpu_probes`.
 
 - `flip_bound_pruning` needs a finite arm-A incumbent before its deliberately tiny envelope can
   fathom materialize flips (gh-ocannl-962). An all-refused arm leaves infinity, so a finite roofline

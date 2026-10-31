@@ -6,6 +6,8 @@ stderr, since a tally in a golden moves on every correct addition anywhere (gh-o
 == emitters the census was taken with ==
 interfaces read: Ir, Utils
 binop_syntax [Ir.C_syntax.C_syntax_config.binop_syntax Ir.C_syntax.Pure_C_config.binop_syntax Ir.Cuda_like_config.Make.binop_syntax]
+blend_gate [Ir.C_syntax.Over_locals.blend_gate]
+blend_where [Ir.C_syntax.Over_locals.blend_where]
 body_doc [Ir.C_syntax.C_syntax.body_doc]
 compile_main [Ir.C_syntax.C_syntax.compile_main]
 compile_proc [Ir.C_syntax.C_syntax.compile_proc]
@@ -37,7 +39,6 @@ pp_static_symbol [Ir.Indexing.Doc_helpers.pp_static_symbol]
 pp_symbol [Ir.Indexing.Doc_helpers.pp_symbol]
 pp_tn_offset [Ir.C_syntax.C_syntax.pp_tn_offset]
 render_mma_fragment_scope [Ir.C_syntax.C_syntax.render_mma_fragment_scope]
-select_blend_syntax [Ir.C_syntax.C_syntax_config.select_blend_syntax]
 serial_loop [Ir.C_syntax.C_syntax.serial_loop]
 ternop_syntax [Ir.C_syntax.C_syntax_config.ternop_syntax Ir.C_syntax.Pure_C_config.ternop_syntax Ir.Cuda_like_config.Make.ternop_syntax]
 to_doc [Ir.Assignments.to_doc Ir.Low_level.to_doc Ir.Ndarray.to_doc]
@@ -132,7 +133,9 @@ test/operations/zero_out_local_decl.metal.expected [metal] extension .metal.expe
 == test sources pinning emitted text ==
 roots scanned: arrayjit/test, test
 arrayjit/test/test_cross_cse.ml [renders generated text in memory; run by @arrayjit/test/runtest-test_cross_cse]
-arrayjit/test/test_cuda_like_config.ml [renders generated text in memory; run by @arrayjit/test/runtest-test_cuda_like_config]
+arrayjit/test/test_cuda_like_config.ml [renders generated text in memory; run by @arrayjit/test/runtest-test_cuda_like_config; also pins text this scan cannot name: untraced callback, mutation or unseen buffer write]
+    "? ocannl_sel_a__ : 0.0f"
+    "x > 0.0f && x < 1.0f"
 arrayjit/test/test_local_scope_init.ml [renders generated text in memory; run by @arrayjit/test/runtest-test_local_scope_init]
 arrayjit/test/test_render_context.ml [renders generated text in memory; run by @arrayjit/test/runtest-test_render_context; also pins text this scan cannot name: untraced callback, opaque aggregate component]
     "] = (float)(0.0)"
@@ -151,12 +154,11 @@ test/operations/accum_width.ml [run by @test/operations/runtest-accum_width]
     "= single_to_bfloat16(v"
     "Vectorized reduction rendering"
     "single_to_bfloat16((bfloat16_to_single("
-test/operations/branchless_select.ml [run by @test/operations/runtest-branchless_select; also pins text this scan cannot name: untraced callback, forwarded parameter, opaque aggregate component, unsupplied application, mutation or unseen buffer write]
+test/operations/branchless_select.ml [run by @test/operations/runtest-branchless_select; also pins text this scan cannot name: computed fragment, untraced callback, forwarded parameter, opaque aggregate component, unsupplied application, mutation or unseen buffer write]
     ") != 0.0 ? ("
-    "? ("
-    "__auto_type ocannl_sel_a__"
     "bs_gather_guard"
     "bs_index_guard"
+    "bs_nan_fill"
     "bs_nested_guard"
     "bs_pool_inlined"
     ... ^ "("

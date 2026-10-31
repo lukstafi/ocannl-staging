@@ -95,6 +95,21 @@
   A16 rd=16   wr=0    rmw=0    exact
   C2  rd=0    wr=16   rmw=0    exact
   flops=8 read=32 write=16 intensity=0.167
+== value select, unequal arms (both arms charged) ==
+  K4  rd=16   wr=0    rmw=0    exact
+  A16 rd=32   wr=0    rmw=0    approx
+  C2  rd=0    wr=16   rmw=0    exact
+  flops=28~ read=48 write=16 intensity=0.438
+== value select, nested selects (both arms charged) ==
+  K4  rd=16   wr=0    rmw=0    approx
+  A16 rd=32   wr=0    rmw=0    approx
+  C2  rd=0    wr=16   rmw=0    exact
+  flops=16~ read=48 write=16 intensity=0.250
+== value select, a hoisted arm (both arms charged) ==
+  K4  rd=16   wr=0    rmw=0    exact
+  A16 rd=32   wr=0    rmw=0    approx
+  C2  rd=0    wr=16   rmw=0    exact
+  flops=12~ read=48 write=16 intensity=0.188
 == vectorized writes, disjoint runs (exact) ==
   U   rd=16   wr=0    rmw=0    exact
   V16 rd=0    wr=64   rmw=0    exact

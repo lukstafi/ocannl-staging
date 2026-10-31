@@ -17,7 +17,7 @@ open Base
 
 let build ~arch_options ~fast_math ~with_device_debug =
   Ir.Compiler_options.nvrtc ~cuda_include_options:[ "-I/cuda/include" ] ~arch_options ~fast_math
-    ~with_device_debug
+    ~with_device_debug ()
 
 (* The two shapes [gpu_arch_options] can return: nothing (no arch marker in the source), or exactly
    one [--gpu-architecture] target. *)

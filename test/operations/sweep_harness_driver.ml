@@ -101,7 +101,7 @@ let () =
   in
   let hip_options =
     Ir.Compiler_options.hiprtc ~target_archs:[] ~hip_include_options:[] ~rocwmma_include_options:[]
-      ~uses_rocwmma:false ~with_debug:false
+      ~uses_rocwmma:false ~with_debug:false ()
     |> Ir.Compiler_options.render
   in
   (* The two slots [Cuda_backend] discovers at compile time (the CUDA_PATH include directory and
@@ -112,7 +112,7 @@ let () =
   let nvrtc_options =
     Ir.Compiler_options.nvrtc ~cuda_include_options:[ "-I/sentinel/cuda/include" ]
       ~arch_options:[ "--gpu-architecture=compute_999" ]
-      ~fast_math:true ~with_device_debug:false
+      ~fast_math:true ~with_device_debug:false ()
     |> Ir.Compiler_options.render
   in
   let argv =

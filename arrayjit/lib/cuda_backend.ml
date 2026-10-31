@@ -285,6 +285,7 @@ end = struct
     Compiler_options.nvrtc ~cuda_include_options:(cuda_include_options ()) ~arch_options:arch_opts
       ~fast_math:(Cuda_like_config.cuda_fast_math ())
       ~with_device_debug:(Utils.with_runtime_debug ())
+      ~with_line_info:Utils.settings.output_debug_files_in_build_directory ()
 
   let write_source_artifact ~name cu_src =
     if Utils.settings.output_debug_files_in_build_directory then (

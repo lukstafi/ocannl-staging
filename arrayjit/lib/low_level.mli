@@ -545,8 +545,11 @@ val speculable_select : cond:scalar_t -> arms:scalar_arg list -> bool
     [Local_scope] bodies are hoisted ahead of the statement and run unconditionally already, so a
     scope reference is a plain local read. Admitting an instance evaluates an arm the classifiers
     ({!Ops.ternop_conditionality}, {!Ops.binop_conditionality}) call conditional: their floors stay
-    floors, [Affine]'s [a_gated] stays a conservative over-approximation, and only the cost model's
-    per-arm upper bound can under-count, where both arms are non-trivial. *)
+    floors, [Affine]'s [a_gated] stays a conservative over-approximation, and [Cost_model]'s upper
+    walk, which charges both arms, stays an upper bound (flagged approximate: it reads no backend,
+    and CUDA and Metal still short-circuit). The one walk that charges a single arm is the inline
+    fan-in guard's per-arm maximum ({!evaluation_reads}, gh-ocannl-1451), which can under-count a
+    blended select whose two arms read distinct nodes. *)
 
 val mentions_rng_conversion : scalar_t -> bool
 (** Whether an RNG lane conversion occurs anywhere in the expression (not inside a [Local_scope]).

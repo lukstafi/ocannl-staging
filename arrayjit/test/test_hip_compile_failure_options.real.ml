@@ -20,6 +20,7 @@ let expected_suffix =
        Ir.Compiler_options.hiprtc ~target_archs
          ~hip_include_options:(Hip_backend.hip_include_options ())
          ~rocwmma_include_options:[] ~uses_rocwmma:false ~with_debug:(Utils.with_runtime_debug ())
+         ~with_line_info:Utils.settings.output_debug_files_in_build_directory ()
      in
      "\nhiprtc options: " ^ Ir.Compiler_options.render expected_options)
 

@@ -41,14 +41,15 @@ let hip_target_options ~target_archs =
   then [ "-Xclang"; "-target-feature"; "-Xclang"; "-real-true16" ]
   else []
 
-let hiprtc ~target_archs ~hip_include_options ~rocwmma_include_options ~uses_rocwmma ~with_debug =
+let hiprtc ~target_archs ~hip_include_options ~rocwmma_include_options ~uses_rocwmma ~with_debug
+    ?(with_line_info = false) () =
   hip_include_options
   @ (if uses_rocwmma then rocwmma_include_options @ [ "-std=c++17" ] else [])
   (* These are compiler options rather than kernel-body pragmas so they also govern the bf16 and f16
      operators while the HIP headers are parsed. *)
   @ clang_fast_math_options ~reassociate:false
   @ hip_target_options ~target_archs
-  @ if with_debug then [ "-g" ] else []
+  @ if with_debug then [ "-g" ] else if with_line_info then [ "-gline-tables-only" ] else []
 
 (* nvrtc's opt-IN for floating-point reassociation. nvrtc accepts it (13.3 answers a
    [--fassociative-math=false] with "does not accept any argument", so its parser knows the name and
@@ -96,9 +97,11 @@ let nvrtc_math_options ~fast_math =
   if fast_math then [ "--use_fast_math" ]
   else [ "--ftz=false"; "--prec-div=true"; "--prec-sqrt=true"; "--fmad=false" ]
 
-let nvrtc ~cuda_include_options ~arch_options ~fast_math ~with_device_debug =
+let nvrtc ~cuda_include_options ~arch_options ~fast_math ~with_device_debug
+    ?(with_line_info = false) () =
   cuda_include_options @ arch_options @ nvrtc_math_options ~fast_math
-  @ if with_device_debug then [ "--device-debug" ] else []
+  @ (if with_device_debug then [ "--device-debug" ] else [])
+  @ if with_line_info then [ "-lineinfo" ] else []
 
 (* Metal's MTLCompileOptions is a mutable Objective-C object rather than a string vector. Keep its
    assembly pure anyway: [metal] returns the ordered property writes and Metal_backend is only the
