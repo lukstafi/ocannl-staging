@@ -1,0 +1,57 @@
+control: every prefix closes with the suffix: true
+soak, a failing construction rewound: the held tensors look as before the checkpoint: true
+soak, a failing construction rewound: the window's tensors are refused, naming the rewind: true
+soak, a failing construction rewound: the seed cache holds no discarded seed: true
+soak, a failing construction rewound: the reference made before the checkpoint is unsolved: true
+soak, a failing construction rewound: the symbol holds no role claim: true
+soak, a failing construction rewound: the reference the window made is refused: true
+soak, a failing construction rewound: the valid suffix closes to the control's dims: true
+soak, a failing construction rewound: the checkpoint's own observer sees no difference: true
+soak, a succeeding construction rewound: the held tensors look as before the checkpoint: true
+soak, a succeeding construction rewound: the window's tensors are refused, naming the rewind: true
+soak, a succeeding construction rewound: the seed cache holds no discarded seed: true
+soak, a succeeding construction rewound: the reference made before the checkpoint is unsolved: true
+soak, a succeeding construction rewound: the symbol holds no role claim: true
+soak, a succeeding construction rewound: the reference the window made is refused: true
+soak, a succeeding construction rewound: the valid suffix closes to the control's dims: true
+soak, a succeeding construction rewound: the checkpoint's own observer sees no difference: true
+negative control: omitting "node discard" fails an independent oracle: true
+negative control: omitting "roots" fails an independent oracle: true
+negative control: omitting "seed" fails an independent oracle: true
+negative control: omitting "nodes" fails an independent oracle: true
+negative control: omitting "shapes" fails an independent oracle: true
+negative control: omitting "refs" fails an independent oracle: true
+negative control: omitting "shape globals" fails an independent oracle: true
+negative control: omitting "row globals" fails an independent oracle: true
+negative control: omitting "stale marking" fails an independent oracle: true
+nested: the window's tensor is discarded by the outer rewind: true
+nested: the inner checkpoint is abandoned by the outer rewind: true
+repeated: the outer checkpoint can be rewound to again: true
+the suffix closes inference: true
+a closure since the checkpoint refuses the rewind: true
+rewind_to_last_closure abandons the explicit checkpoints: true
+and discards the open work, as before: true
+a failing construction fails: true
+a tainted session takes no checkpoint: true
+the rewind clears the taint: the open tensor older than the checkpoint is usable: true
+tainted: forcing an open node's dims raises: true
+a failed read of a frontier shape refuses the explicit rewind: true
+a contradictory set_dim makes the closure fail, and taints the session: true
+after rewinding a failed closure, the reference it solved takes a new size: true
+and the prefix closes to it: true
+a precision settled after the checkpoint refuses the rewind: true
+a checkpoint inside an op_asn is refused: true
+with_checkpoint re-raises the construction's own shape error: true
+with_checkpoint rewound the failure: the held tensors look as before: true
+with_checkpoint rewound the taint: true
+with_checkpoint keeps the work of a normal return: true
+with_rewind returns what the trace read: true
+with_rewind: the trace's tensors are discarded: true
+with_rewind leaves no trace in the session: true
+with_rewind: the trace had grown the open frontier: true
+with_rewind over a trace that closes inference raises, loudly: true
+a re-run after a rewind has the first run's frontier sizes: true
+negative control: a re-run without the rewind grows them: true
+the fresh-process reference ran: true
+compiled and run after the rewind: the values equal the fresh process's: true
+and they are the closed form 0.5 (1 + 2) + [1; 2]: true

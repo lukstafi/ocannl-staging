@@ -76,12 +76,14 @@ files.
   `docs/shape_inference.md` "Session consistency"); a per-mutable rollback at this seam is NOT to be
   grown: the review loop of lukstafi/ocannl-staging#598 tried, found another mutable every round,
   and was reverted.
-- Rewind restores the graph-root maps WHOLESALE from the closure checkpoint and resets the restored
-  roots' handout markers — a `Taken` marker does not mean "handed to a caller": `%cd` embedding
-  calls `take_forward_code` too (gh-ocannl-1301). External handouts of closed work
-  (`consume_*_code`) are recorded into the checkpoint as they happen, and
-  `with_unchanged_roots` restores the checkpoint with the maps. A rewind discards exactly the nodes
-  the frontend allocated since the closure, by uid (gh-ocannl-1505): a new `Tn.create` site in
+- Rewind restores the graph-root maps WHOLESALE from the checkpoint (the last closure's, or an
+  explicit one, gh-ocannl-903) and resets the restored roots' handout markers — a `Taken` marker
+  does not mean "handed to a caller": `%cd` embedding calls `take_forward_code` too
+  (gh-ocannl-1301), but only on a root, so the roots' markers are all a window can set. External
+  handouts (`consume_*_code`) are recorded as they happen in `handouts`, which a rewind subtracts
+  from the saved roots and no rewind takes back; `with_unchanged_roots` restores it with the maps.
+  A rewind discards exactly the nodes the frontend allocated since its checkpoint (gh-ocannl-1505;
+  `Tensor.open_nodes` holds them): a new `Tn.create` site in
   `tensor.ml` must call `note_open_node`, or its node outlives the rewind as a live handle (an id or
   uid range would refuse nodes other code created in the window). `open_node_scan` (gh-ocannl-1579)
   enforces it over every `tensor/` module: the creators are derived from `tnode.ml` (the values
