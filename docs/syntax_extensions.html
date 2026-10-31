@@ -1989,6 +1989,12 @@ on the arguments raises when the closure is built, as
 does raises at the application, before the body runs, as
 <code>applying the shape scheme &lt;function&gt; to &lt;arguments&gt;: ...</code>.</li>
 </ul>
+<p>To see a function’s scheme, trace it explicitly with
+<code>Tensor.Scheme.trace</code> (the same trace the closure ran) and
+print it with <code>Tensor.Scheme.to_string</code>. The newcomer
+tutorial <a href="./tensors_and_contexts.md#reusable-tensor-programs">Reusable
+Tensor Programs</a> prints one, shows both kinds of report, and recovers
+a REPL session from a failed construction.</p>
 <p><strong>Which functions qualify.</strong> The returned function –
 right after <code>()</code>, or the function a unit body ends in,
 through <code>let</code>, <code>;</code> and <code>let open</code>, as
