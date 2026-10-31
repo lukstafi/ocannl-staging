@@ -695,9 +695,14 @@ then restores:</p>
 <p><code>Checkpoint.restore</code> refuses a state set different from
 the one saved (a set missing the optimizer moments would silently
 restart them) and a plain <code>Persistence</code> checkpoint, which
-records no progress. Device-side randomness needs nothing saved: random
-operations are counter-based (see <a href="#counter-based-prng">Counter-Based PRNG</a>), so the same seed
-with counters derived from the restored step draws the same numbers.
+records no progress. Device-side randomness needs no generator state
+saved: random operations are counter-based (see <a href="#counter-based-prng">Counter-Based PRNG</a>), so the same seed
+with counters derived from the restored step draws the same numbers. The
+checkpoint therefore records the seeds
+(<code>Tensor.random_seeds</code>: every one the session created,
+including a graph’s scoped seed), and <code>Checkpoint.restore</code>
+refuses a program built under different ones, naming both; a checkpoint
+from before the seed was recorded restores with a warning instead.
 <code>test/training/resume_checkpoint.ml</code> resumes a run in a fresh
 process and checks it matches the uninterrupted one bit for bit.</p>
 <h2 id="randomness-and-parameter-initialization">Randomness and
