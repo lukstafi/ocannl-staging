@@ -797,6 +797,14 @@ let scalar_precision = function
   | Binop (_, (_, prec), _) -> prec
   | Unop (_, (_, prec)) -> prec
 
+(* gh-ocannl-1739: the operand an arm that is never evaluated becomes -- a decided [Where]'s dead
+   arm, a shut gate's gated operand. Annotated at the [Constant]'s own precision, which describes it
+   in every slot (the renderer evaluates a homogeneous slot at the slot's precision, whatever the
+   annotation says), so the elisions need no knowledge of the slot and all write one form. *)
+let elided_operand : scalar_arg =
+  let c = Constant 0. in
+  (c, scalar_precision c)
+
 (** Helper to construct binary/ternary/unary ops with proper precision *)
 let mk_binop op arg1 arg2 = Binop (op, (arg1, scalar_precision arg1), (arg2, scalar_precision arg2))
 
@@ -4206,14 +4214,14 @@ let virtual_llc ?(fresh_symbol = Indexing.get_symbol) ?(fresh_scope = get_scope)
     (* gh-ocannl-1469: the arm of a [Where] whose condition is decided is never evaluated — do not
        descend into it, as for a projection's discarded operand below: inlining there could reject
        the routine for code that never runs (a merge-tainted inherited computation), mint a scope,
-       or register a spliced read. It becomes [Constant 0.] at its own precision, the form
+       or register a spliced read. It becomes {!elided_operand}, the form
        [elide_unevaluated_operands] gives a stored template (gh-ocannl-625), so the condition and
        the live arm are still walked and kept exactly. *)
     | Ternop (Ops.Where, (cnd, cprec), (llv2, prec2), (llv3, prec3)) -> (
         let cond = (loop cnd, cprec) in
         match decide_where ~loops:(decision_loops ~opaque enclosing) cond with
-        | Some true -> Ternop (Ops.Where, cond, (loop llv2, prec2), (Constant 0., prec3))
-        | Some false -> Ternop (Ops.Where, cond, (Constant 0., prec2), (loop llv3, prec3))
+        | Some true -> Ternop (Ops.Where, cond, (loop llv2, prec2), elided_operand)
+        | Some false -> Ternop (Ops.Where, cond, elided_operand, (loop llv3, prec3))
         | None -> Ternop (Ops.Where, cond, (loop llv2, prec2), (loop llv3, prec3)))
     | Ternop (op, (llv1, prec1), (llv2, prec2), (llv3, prec3)) ->
         Ternop (op, (loop llv1, prec1), (loop llv2, prec2), (loop llv3, prec3))
@@ -5245,14 +5253,14 @@ let live_view static_indices (llc : t) : t =
     | Constant _ | Constant_bits _ | Embed_index _ | Get _ | Get_local _ | Get_merge_buffer _ -> sc
     | Get_dynamic ({ dyn_value; _ } as g) -> Get_dynamic { g with dyn_value = arg ~loops dyn_value }
     | Local_scope ({ body; _ } as scope) -> Local_scope { scope with body = stmt ~loops body }
-    | Ternop (Ops.Where, ((cnd, _) as cond), ((_, p2) as a2), ((_, p3) as a3)) -> (
+    | Ternop (Ops.Where, ((cnd, _) as cond), a2, a3) -> (
         let cond = arg ~loops cond in
         let decided =
           if reads_buffer cnd then None else where_condition_decided static_indices ~loops cond
         in
         match decided with
-        | Some true -> Ternop (Ops.Where, cond, arg ~loops a2, (Constant 0., p3))
-        | Some false -> Ternop (Ops.Where, cond, (Constant 0., p2), arg ~loops a3)
+        | Some true -> Ternop (Ops.Where, cond, arg ~loops a2, elided_operand)
+        | Some false -> Ternop (Ops.Where, cond, elided_operand, arg ~loops a3)
         | None -> Ternop (Ops.Where, cond, arg ~loops a2, arg ~loops a3))
     | Ternop (op, a1, a2, a3) -> Ternop (op, arg ~loops a1, arg ~loops a2, arg ~loops a3)
     | Binop (op, a1, a2) -> Binop (op, arg ~loops a1, arg ~loops a2)
@@ -5262,7 +5270,7 @@ let live_view static_indices (llc : t) : t =
 
 let elide_unevaluated_operands static_indices ~(opaque : Indexing.symbol -> bool) (llc : t) : t =
   let decided = decided_at_every_precision in
-  let elided ((_, prec) : scalar_arg) : scalar_arg = (Constant 0., prec) in
+  let elided (_ : scalar_arg) : scalar_arg = elided_operand in
   let extend ienv index ~from_ ~to_ =
     if opaque index then ienv else ienv_extend ienv index ~from_ ~to_
   in
@@ -10263,14 +10271,125 @@ let hosted_constant_inits_to_link_time (plc : Tn.Placements.t) (traced_store : t
             traced.read_only <- true);
     llc
 
+(* gh-ocannl-1709: the slots are [elide_unevaluated_operands]'s, i.e. [C_syntax.pp_scalar_op]'s.
+   [dest] is the node whose value the slot feeds, [None] under a guard. One walk serves both uses
+   (gh-ocannl-1739): [`Refuse] raises on the first annotation that is not descriptive, [`Describe]
+   rewrites each such annotation to the slot's evaluation precision. *)
+exception Operand_precision_malformed of string
+
+let walk_operand_precisions ~(mode : [ `Refuse | `Describe ]) (llc : t) : t =
+  let tn_prec (tn : Tn.t) = Lazy.force tn.Tn.storage_prec in
+  let rec stmt (c : t) : t =
+    match c with
+    | Noop | Comment _ | Staged_compilation _ | Workgroup_barrier | Declare_local _ | Zero_out _ ->
+        c
+    | Seq (a, b) ->
+        let a = stmt a in
+        Seq (a, stmt b)
+    | For_loop ({ body; _ } as fl) -> For_loop { fl with body = stmt body }
+    | Scan_loop ({ carried; body; _ } as sl) ->
+        let carried =
+          List.map carried ~f:(fun cr ->
+              { cr with init = scalar ~dest:(Some cr.prev.tn) ~prec:(tn_prec cr.prev.tn) cr.init })
+        in
+        Scan_loop { sl with carried; body = stmt body }
+    | Set ({ tn; llsc; _ } as set) ->
+        Set { set with llsc = scalar ~dest:(Some tn) ~prec:(tn_prec tn) llsc }
+    | Set_dynamic ({ tn; dyn_value; llsc; _ } as set) ->
+        let dyn_value = own ~dest:(Some tn) dyn_value in
+        Set_dynamic { set with dyn_value; llsc = scalar ~dest:(Some tn) ~prec:(tn_prec tn) llsc }
+    | Set_from_vec ({ tn; arg = a; _ } as set) ->
+        Set_from_vec { set with arg = own ~dest:(Some tn) a }
+    | Set_local (id, v) -> Set_local (id, scalar ~dest:(Some id.tn) ~prec:(tn_prec id.tn) v)
+    | If { cond; body } ->
+        let cond = own ~dest:None cond in
+        If { cond; body = stmt body }
+    | Tile_mma ({ fallback; _ } as tm) -> Tile_mma { tm with fallback = stmt fallback }
+  (* A heterogeneous slot: evaluated at its own annotation, so the annotation is the semantics. *)
+  and own ~dest ((sc, ann) : scalar_arg) : scalar_arg = (scalar ~dest ~prec:ann sc, ann)
+  (* A homogeneous slot: evaluated at [prec] whatever it says, so it may only say [prec] or the
+     operand's own precision ({!scalar_precision}, which [mk_binop] writes). *)
+  and at ~dest ~prec ~what ((sc, ann) : scalar_arg) : scalar_arg =
+    (* The operand first: the precision it has is read off its own operands' annotations, which
+       describing may rewrite. *)
+    let sc = scalar ~dest ~prec sc in
+    let natural = scalar_precision sc in
+    let ann =
+      if Ops.equal_prec ann prec || Ops.equal_prec ann natural then ann
+      else
+        match mode with
+        | `Describe -> prec
+        | `Refuse ->
+            let ps = Ops.prec_string in
+            let descriptive =
+              if Ops.equal_prec prec natural then ps prec else ps prec ^ " or " ^ ps natural
+            in
+            raise
+              (Operand_precision_malformed
+                 (Printf.sprintf
+                    "%s %s is annotated %s, but a homogeneous operator evaluates its operands at \
+                     its result precision, here %s, so the annotation would be silently ignored \
+                     (the operand's own precision is %s). Annotate the operand %s; to compute at \
+                     %s, make the destination (a node, or a local over one) %s"
+                    what
+                    (match dest with
+                    | Some tn -> "in the value stored to " ^ Tn.debug_name tn
+                    | None -> "in a guard condition")
+                    (ps ann) (ps prec) (ps natural) descriptive (ps ann) (ps ann)))
+    in
+    (sc, ann)
+  and scalar ~dest ~prec (sc : scalar_t) : scalar_t =
+    let operand i name = Printf.sprintf "Operand %d of %s" i (Sexp.to_string_hum name) in
+    match sc with
+    | Constant _ | Constant_bits _ | Embed_index _ | Get _ | Get_local _ | Get_merge_buffer _ -> sc
+    | Get_dynamic ({ dyn_value; _ } as g) -> Get_dynamic { g with dyn_value = own ~dest dyn_value }
+    | Local_scope ({ body; _ } as ls) -> Local_scope { ls with body = stmt body }
+    | Ternop (op, a, b, c) when Ops.is_homogeneous_prec_ternop op ->
+        let what i = operand i (Ops.sexp_of_ternop op) in
+        let a = at ~dest ~prec ~what:(what 1) a in
+        let b = at ~dest ~prec ~what:(what 2) b in
+        Ternop (op, a, b, at ~dest ~prec ~what:(what 3) c)
+    | Ternop (Ops.Where, cond, a, b) ->
+        let cond = own ~dest cond in
+        let a = at ~dest ~prec ~what:"The then-arm of Where" a in
+        Ternop (Ops.Where, cond, a, at ~dest ~prec ~what:"The else-arm of Where" b)
+    | Ternop (op, a, b, c) ->
+        let a = own ~dest a in
+        let b = own ~dest b in
+        Ternop (op, a, b, own ~dest c)
+    | Binop (op, a, b) when Ops.is_homogeneous_prec_binop op ->
+        let what i = operand i (Ops.sexp_of_binop op) in
+        let a = at ~dest ~prec ~what:(what 1) a in
+        Binop (op, a, at ~dest ~prec ~what:(what 2) b)
+    | Binop (op, a, b) ->
+        let a = own ~dest a in
+        Binop (op, a, own ~dest b)
+    | Unop (op, a) when Ops.is_homogeneous_prec_unop op ->
+        Unop
+          (op, at ~dest ~prec ~what:("The operand of " ^ Sexp.to_string_hum (Ops.sexp_of_unop op)) a)
+    | Unop (op, a) -> Unop (op, own ~dest a)
+  in
+  stmt llc
+
+let operand_precision_violation (llc : t) : string option =
+  match walk_operand_precisions ~mode:`Refuse llc with
+  | _ -> None
+  | exception Operand_precision_malformed msg -> Some msg
+
+let describe_operand_precisions (llc : t) : t = walk_operand_precisions ~mode:`Describe llc
+
+let validate_operand_precisions ?(site = "Low_level.validate_operand_precisions") (llc : t) : unit =
+  Option.iter (operand_precision_violation llc) ~f:(fun msg -> invalid_arg (site ^ ": " ^ msg))
+
 (* gh-ocannl-1011: the passes virtualized code receives on its way to being the routine's schedule —
    cleanup's commitments and retractions, simplification under the routine's interval environment,
-   the hosted-constant link-time conversion, the one-hot reduction rewrite, then the scalar and the
-   cross-statement CSE — as one function, so the flip-candidate pricer's synthetic instantiation
-   ({!instantiate_at_synthetic_read}) receives exactly the pipeline the emitted code does rather
-   than a remembered subset of it. *)
+   the hosted-constant link-time conversion, the one-hot reduction rewrite, the scalar and the
+   cross-statement CSE, then re-describing the operand annotations those rewrites left stale
+   (gh-ocannl-1739, {!describe_operand_precisions}) — as one function, so the flip-candidate
+   pricer's synthetic instantiation ({!instantiate_at_synthetic_read}) receives exactly the pipeline
+   the emitted code does rather than a remembered subset of it. *)
 let post_virtualization_pipeline plc traced_store ~input_scopes ~static_indices (llc : t) : t =
-  hoist_cross_statement_cse @@ eliminate_common_subexpressions
+  describe_operand_precisions @@ hoist_cross_statement_cse @@ eliminate_common_subexpressions
   @@ rewrite_one_hot_reductions ~static_indices
   @@ hosted_constant_inits_to_link_time plc traced_store
   @@ simplify_llc static_indices
@@ -11287,93 +11406,6 @@ let slice_alias_violation (root : t) : string option =
 
 let validate_no_slice_aliases ?(site = "Low_level.validate_no_slice_aliases") (llc : t) : unit =
   Option.iter (slice_alias_violation llc) ~f:(fun msg -> invalid_arg (site ^ ": " ^ msg))
-
-(* gh-ocannl-1709: the slots are [elide_unevaluated_operands]'s, i.e. [C_syntax.pp_scalar_op]'s.
-   [dest] is the node whose value the slot feeds, [None] under a guard. *)
-let operand_precision_violation (llc : t) : string option =
-  let exception Malformed of string in
-  let tn_prec (tn : Tn.t) = Lazy.force tn.Tn.storage_prec in
-  let rec stmt (c : t) : unit =
-    match c with
-    | Noop | Comment _ | Staged_compilation _ | Workgroup_barrier | Declare_local _ | Zero_out _ ->
-        ()
-    | Seq (a, b) ->
-        stmt a;
-        stmt b
-    | For_loop { body; _ } -> stmt body
-    | Scan_loop { carried; body; _ } ->
-        List.iter carried ~f:(fun cr ->
-            scalar ~dest:(Some cr.prev.tn) ~prec:(tn_prec cr.prev.tn) cr.init);
-        stmt body
-    | Set { tn; llsc; _ } -> scalar ~dest:(Some tn) ~prec:(tn_prec tn) llsc
-    | Set_dynamic { tn; dyn_value; llsc; _ } ->
-        own ~dest:(Some tn) dyn_value;
-        scalar ~dest:(Some tn) ~prec:(tn_prec tn) llsc
-    | Set_from_vec { tn; arg = a; _ } -> own ~dest:(Some tn) a
-    | Set_local (id, v) -> scalar ~dest:(Some id.tn) ~prec:(tn_prec id.tn) v
-    | If { cond; body } ->
-        own ~dest:None cond;
-        stmt body
-    | Tile_mma { fallback; _ } -> stmt fallback
-  (* A heterogeneous slot: evaluated at its own annotation, so the annotation is the semantics. *)
-  and own ~dest ((sc, ann) : scalar_arg) = scalar ~dest ~prec:ann sc
-  (* A homogeneous slot: evaluated at [prec] whatever it says, so it may only say [prec] or the
-     operand's own precision ({!scalar_precision}, which [mk_binop] writes). *)
-  and at ~dest ~prec ~what ((sc, ann) : scalar_arg) =
-    let natural = scalar_precision sc in
-    if not (Ops.equal_prec ann prec || Ops.equal_prec ann natural) then begin
-      let ps = Ops.prec_string in
-      let descriptive =
-        if Ops.equal_prec prec natural then ps prec else ps prec ^ " or " ^ ps natural
-      in
-      raise
-        (Malformed
-           (Printf.sprintf
-              "%s %s is annotated %s, but a homogeneous operator evaluates its operands at its \
-               result precision, here %s, so the annotation would be silently ignored (the \
-               operand's own precision is %s). Annotate the operand %s; to compute at %s, make the \
-               destination (a node, or a local over one) %s"
-              what
-              (match dest with
-              | Some tn -> "in the value stored to " ^ Tn.debug_name tn
-              | None -> "in a guard condition")
-              (ps ann) (ps prec) (ps natural) descriptive (ps ann) (ps ann)))
-    end;
-    scalar ~dest ~prec sc
-  and scalar ~dest ~prec (sc : scalar_t) : unit =
-    let operand i name = Printf.sprintf "Operand %d of %s" i (Sexp.to_string_hum name) in
-    match sc with
-    | Constant _ | Constant_bits _ | Embed_index _ | Get _ | Get_local _ | Get_merge_buffer _ -> ()
-    | Get_dynamic { dyn_value; _ } -> own ~dest dyn_value
-    | Local_scope { body; _ } -> stmt body
-    | Ternop (op, a, b, c) when Ops.is_homogeneous_prec_ternop op ->
-        let what i = operand i (Ops.sexp_of_ternop op) in
-        at ~dest ~prec ~what:(what 1) a;
-        at ~dest ~prec ~what:(what 2) b;
-        at ~dest ~prec ~what:(what 3) c
-    | Ternop (Ops.Where, cond, a, b) ->
-        own ~dest cond;
-        at ~dest ~prec ~what:"The then-arm of Where" a;
-        at ~dest ~prec ~what:"The else-arm of Where" b
-    | Ternop (_, a, b, c) ->
-        own ~dest a;
-        own ~dest b;
-        own ~dest c
-    | Binop (op, a, b) when Ops.is_homogeneous_prec_binop op ->
-        let what i = operand i (Ops.sexp_of_binop op) in
-        at ~dest ~prec ~what:(what 1) a;
-        at ~dest ~prec ~what:(what 2) b
-    | Binop (_, a, b) ->
-        own ~dest a;
-        own ~dest b
-    | Unop (op, a) when Ops.is_homogeneous_prec_unop op ->
-        at ~dest ~prec ~what:("The operand of " ^ Sexp.to_string_hum (Ops.sexp_of_unop op)) a
-    | Unop (_, a) -> own ~dest a
-  in
-  match stmt llc with () -> None | exception Malformed msg -> Some msg
-
-let validate_operand_precisions ?(site = "Low_level.validate_operand_precisions") (llc : t) : unit =
-  Option.iter (operand_precision_violation llc) ~f:(fun msg -> invalid_arg (site ^ ": " ^ msg))
 
 let optimize_proc (input_ctx : optimize_ctx) static_indices llc =
   (* gh-ocannl-584: the pipeline's entry gate for scope purity, ahead of the analysis cache so a

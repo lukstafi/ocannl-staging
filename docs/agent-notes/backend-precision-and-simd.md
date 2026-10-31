@@ -238,8 +238,16 @@ files.
   `Constant`'s index-precision annotation is neither that nor its own `single`). To compare at
   `single` (a `single` flag local), spell `binop Cmplt`: `lt` there is refused.
   `test/operations/ll_builder_precisions` pins each builder under `single`, `half` and `bfloat16`
-  stores. Only the optimizer's input is checked: its own output re-annotates elided operands
-  freely, and a `?prelowered` routine skips the check.
+  stores. `C_syntax.compile_proc` repeats the check on the way out (gh-ocannl-1739), so a
+  `?prelowered` routine, which skips `optimize`, meets it there. The optimizer's own rewrites leave
+  stale annotations (a scope of another precision collapsed into its reader keeps the scope's
+  precision on a product of wider loads; `mixed_prec_twin_shape`'s virtualized bf16 cast twin was
+  one), so `post_virtualization_pipeline` ends in `describe_operand_precisions`, which rewrites each
+  annotation the gate would refuse to the slot's precision: sound only there, because the entry gate
+  already refused every builder's request. `Schedule.apply` re-describes a schedule's result
+  (`Privatize`'s widened tile evaluates at `acc_prec`; its trailing simplify collapses scopes too)
+  only when the program it started from passes the check, so a prelowered routine's own requests
+  still reach the gate.
 - **Which bits an RNG conversion consumes is fixed per precision, and it is the same on every
   backend** (gh-ocannl-951). The scalar `uint4x32_to_{bfloat16,half}_uniform` take the single draw
   of the key's first 32 bits (`uint32_to_single_uniform`) and narrow it; the `_vec`/`_lane` forms
