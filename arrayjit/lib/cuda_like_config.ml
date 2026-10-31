@@ -15,6 +15,8 @@ module Cuda = struct
   let cos_f32 = "cosf"
   let sqrt_f32 = "sqrtf"
   let fmod_f32 = "fmodf"
+  let fmod_f64 = "fmod"
+  let recip_sqrt_f64 = ("(1.0 / sqrt(", "))")
   let fp8_from_float_fn = "(__nv_fp8_e5m2)"
   let conditional_includes = [ ("nvcuda::wmma", "#include <mma.h>") ]
 
@@ -41,6 +43,12 @@ module Hip = struct
      as zero, and [fmodf] returns a signed zero where C returns NaN. *)
   let sqrt_f32 = "ocannl_sqrtf"
   let fmod_f32 = "ocannl_fmodf"
+
+  (* gh-ocannl-1730: [fmod] the same at f64 ([Builtins_hip.ocannl_fmod]); and under [-ffast-math],
+     [1.0 / sqrt(x)] at f64 becomes a reciprocal-root estimate refined by Newton steps, NaN for +-0
+     and +inf, where ROCm's own [rsqrt] is C's [1 / sqrt] there and correctly rounded elsewhere. *)
+  let fmod_f64 = "ocannl_fmod"
+  let recip_sqrt_f64 = ("rsqrt(", ")")
 
   (* ROCm's subnormal guard is one funnel for conversion and every operator arity. *)
   let fp8_from_prec_fn = function
@@ -77,6 +85,11 @@ module Make (Dialect : sig
      and [fmod] functions. *)
   val sqrt_f32 : string
   val fmod_f32 : string
+
+  (* The f64 [fmod] function, and the f64 [Recip_sqrt] rendering as a prefix and a suffix around the
+     operand. *)
+  val fmod_f64 : string
+  val recip_sqrt_f64 : string * string
   val fp8_from_float_fn : string
   val vendor_routine_idents : string list
 end) (Input : sig
@@ -468,6 +481,7 @@ struct
             (string ("__float2half(" ^ Dialect.fmod_f32 ^ "(__half2float(")
             ^^ v1 ^^ string "), __half2float(" ^^ v2 ^^ string ")))")
     | Mod, Single_prec _ -> func Dialect.fmod_f32
+    | Mod, Double_prec _ -> func Dialect.fmod_f64
     | Mod, _ -> func "fmod"
     (* Comparisons and logical connectives are precision-independent and spelled the same in HIP C++
        as in C, so they render through the shared default -- fp8 already bridged above. The
@@ -615,7 +629,7 @@ struct
           (Dialect.error_prefix
          ^ ".unop_syntax: Recip_sqrt not supported for byte/integer precisions")
     | Recip_sqrt, Half_prec _ -> func "hrsqrt"
-    | Recip_sqrt, Double_prec _ -> f "(1.0 / sqrt(" "))"
+    | Recip_sqrt, Double_prec _ -> f (fst Dialect.recip_sqrt_f64) (snd Dialect.recip_sqrt_f64)
     | Recip_sqrt, Single_prec _ -> f ("(1.0f / " ^ Dialect.sqrt_f32 ^ "(") "))"
     | Recip_sqrt, Bfloat16_prec _ ->
         f ("__float2bfloat16(1.0f / " ^ Dialect.sqrt_f32 ^ "(__bfloat162float(") ")))"

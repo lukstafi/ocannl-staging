@@ -34,8 +34,8 @@
    gives 1, 1 and +inf. The shared helper ([Builtins_cc.cuda_like_power_builtins]) now answers those
    cases itself, at every precision (half and bfloat16 widen into it); the host emulation
    [runtime_power_fast_math_emulation] pins them GPU-free. The f32 magnitude stays [__powf]'s,
-   claimed against its contract ([cuda_powf]: 3 and 5 ulps measured at [pow(0.25, 3)] and [pow(0.25,
-   -3)]).
+   claimed against its contract ([log_scaled_pow]: 3 and 5 ulps measured at [pow(0.25, 3)] and
+   [pow(0.25, -3)]).
 
    CUDA's [--use_fast_math] lowers f32 (and widened bfloat16) [sinf]/[cosf]/[expf]/[logf]/[exp2f]/
    [log2f] to its fast intrinsics, and [Tanh_approx] renders [__tanhf]; they keep the special values
@@ -79,6 +79,19 @@
    allowance. Metal's fast [fmod] gave NaN for a finite [x] over an infinite [y] (C: [x]) and [+0]
    for an exact remainder of a negative [x] (C: [-0]), at every precision, so [Mod] renders as
    [precise::fmod], half widened; Metal's own [pow] was C's on the whole grid.
+
+   f64 (gh-ocannl-1730): [sqrt], [rsqrt], [pow] and [fmod] once more, subnormals kept, on every
+   backend with f64 -- Metal has none, so its f64 claims are skipped and their kernels never built.
+   cc and CUDA were C's on all four (CUDA's [--use_fast_math] touches only f32). HIP departed three
+   ways under [-ffast-math], measured on gfx1102 discrete: [fmod] as at f32 (the signed zero of [x]
+   for [fmod(+-0, +-0)] and [fmod(+-inf, +-inf)]), fixed by [Builtins_hip]'s [ocannl_fmod]; [1.0 /
+   sqrt(x)] became a refined reciprocal-root estimate, NaN for +-0 and +inf, fixed by rendering
+   ROCm's [rsqrt] (C's there, and correctly rounded on the probed values); and [pow] -- ROCm's
+   extended-precision [y log x] -- loses its low part under [-ffp-contract=fast] (exact again under
+   [-ffp-contract=on], probed with hipcc): 204 ulps at [pow(2, 1000)] and [pow(2^-1000, 0.5)], 206
+   at [pow(2^-1060, 0.5)]. That one is recorded, not fixed: contraction is the backend's policy for
+   every kernel and the library function is precompiled, so HIP's f64 [pow] skips the 2-ulp claim
+   and is held to [log_scaled_pow]'s [2 + 2 |y log2 |x||] instead, its special values still C's.
 
    A claim that does not apply to a backend is skipped there ([SKIPPED on <backend>] on stderr), and
    its label names where it is skipped and why. Every backend compiles and runs every kernel. *)
@@ -291,7 +304,7 @@ let cases =
 
 (* One kernel at [c.prec] computing every op over every input: [out.(k * n + i) = op_k
    inputs.(i)]. *)
-let run c ~first_id =
+let run ?(ops = ops) c ~first_id =
   let inputs = List.map c.inputs ~f:c.round in
   let n = List.length inputs and m = List.length ops in
   let name = "umsv_" ^ c.label in
@@ -363,7 +376,7 @@ let binop_names = names_phrase (List.map binops ~f:(fun (_, name, _, _, _) -> na
 
 (* Every binary op at [c.prec] over its grid, in one kernel: [out.(j) = op lhs.(j) rhs.(j)], the
    pairs of all the ops concatenated. Returns each result with its op, operands and reference. *)
-let run_binary c ~first_id =
+let run_binary ?(binops = binops) c ~first_id =
   let pairs =
     List.concat_map binops ~f:(fun (op, name, reference, xs, ys) ->
         List.concat_map xs ~f:(fun x ->
@@ -399,7 +412,7 @@ let run_binary c ~first_id =
 (* [fmod] of constant operands, which the optimizer folds on the host ([Ops.interpret_binop]) before
    any backend sees it: the finite pairs of the [fmod] grid with a nonzero modulus and a nonzero
    result, negative operands among them. *)
-let run_folded_fmod c ~first_id =
+let run_folded_fmod ?(binops = binops) c ~first_id =
   let _, name, reference, xs, ys =
     List.find_exn binops ~f:(fun (op, _, _, _, _) -> Ops.equal_binop op Mod)
   in
@@ -467,10 +480,13 @@ let cuda_fast c name x =
   | "log2" when Float.(0.5 <= x && x <= 2.) -> Absolute (2. **. -22.)
   | _ -> stated c name x
 
-(* CUDA's [--use_fast_math] [powf] is [__powf], [exp2(y * log2(x))] through the intrinsics: their 2
-   ulps each, the logarithm's relative error carried into the result scaled by [|y log2 |x||] (times
-   [ln 2] and the product's rounding, together under 2). Measured at 5 ulps for [pow(0.25, -3)]. *)
-let cuda_powf x y =
+(* A power whose logarithm's error reaches the result scaled by [|y log2 |x||]. CUDA's
+   [--use_fast_math] [powf] is [__powf], [exp2(y * log2(x))] through the intrinsics: their 2 ulps
+   each, the logarithm's relative error carried into the result (times [ln 2] and the product's
+   rounding, together under 2). Measured at 5 ulps for [pow(0.25, -3)]. HIP's f64 [pow] under
+   [-ffp-contract=fast] (gh-ocannl-1730): ROCm's extended-precision [y log x] loses its low part, up
+   to 206 ulps measured where [|y log2 |x||] is 500 to 1000. *)
+let log_scaled_pow x y =
   (* [0 * log2 0] and [inf * log2 1] are NaN: their exact results ([pow(0, 0) = pow(1, inf) = 1])
      carry no logarithm error. *)
   let k = Float.abs (y *. Stdlib.Float.log2 (Float.abs x)) in
@@ -509,6 +525,63 @@ let judge2 c contract (name, reference, x, y, v) =
     Stdio.eprintf "(not part of the golden) %s %s %s(%h, %h) = %h, f64 %h\n" backend_name c.label
       name x y v want;
   ok
+
+(* f64 (gh-ocannl-1730), the four functions #1684 found departing at f32 on a GPU: [sqrt] and
+   [rsqrt] over the special values, the subnormals (smallest, an odd and an even exponent, the
+   largest) and the edges of the normal range, held to 1 and 2 ulps of the host's f64 (the reference
+   itself rounds [1 / sqrt x] twice, as the backends' [1.0 / sqrt(x)] does); and [pow] and [fmod]
+   over the f32 grid widened by subnormal operands -- an exact remainder and a remainder that is the
+   dividend, a subnormal modulus, and powers of a subnormal base that underflow to zero, overflow to
+   infinity or stay exact. *)
+let f64_case =
+  {
+    label = "f64";
+    prec = Ops.double;
+    cuda_intrinsics = false;
+    round = Fn.id;
+    ulp = spacing ~mant:52 ~emin:(-1022);
+    bound = (fun name _ -> if String.equal name "sqrt" then 1. else 2.);
+    inputs =
+      specials
+      @ [
+          0x1p-1074;
+          -0x1p-1074;
+          0x1.8p-1061;
+          0x1p-1060;
+          -0x1p-1060;
+          0x0.fffffffffffffp-1022;
+          0x1p-1022;
+          -0x1p-1022;
+          0x1p-1021;
+          0x1p-767;
+          0x1p-768;
+          0x1p-100;
+          0x1.fffffffffffffp-1;
+          0.5;
+          1.;
+          0x1.0000000000001p+0;
+          2.;
+          3.;
+          -4.;
+          1e300;
+          0x1p1023;
+          0x1.fffffffffffffp+1023;
+        ];
+  }
+
+let f64_ops =
+  List.filter ops ~f:(fun (_, name, _, _) -> List.mem [ "sqrt"; "rsqrt" ] name ~equal:String.equal)
+
+let f64_binops =
+  List.map binops ~f:(fun (op, name, reference, xs, ys) ->
+      match op with
+      | Ops.ToPowOf -> (op, name, reference, xs @ [ 0x1p-1000; 0x1p-1060 ], ys)
+      | _ -> (op, name, reference, xs @ [ 0x1.4p-1070; -0x1.4p-1070 ], ys @ [ 0x1p-1073 ]))
+
+(* A claim over f64 results: Metal has no f64 (its backend refuses to compile one), so there the
+   kernel is never built and the claim is skipped. *)
+let f64_claim ?(when_ = true) label results ~f =
+  if is_metal || not when_ then skipped ~backend:backend_name label else p_all label (results ()) ~f
 
 let () =
   Verdict.case "unary math special values" (fun () ->
@@ -562,7 +635,7 @@ let () =
             ~f:(fun ((name, _, x, y, _) as r) ->
               judge2 c
                 (if is_cuda && Ops.equal_prec c.prec Ops.single && String.equal name "pow" then
-                   cuda_powf x y
+                   log_scaled_pow x y
                  else stated c name x)
                 r);
           p_all
@@ -614,4 +687,60 @@ let () =
         "f32 log and log2 on every f32 within 2^-13 of 1: within the backend's contract -- the \
          stated ulps of f64, CUDA's absolute 2^-21.41 and 2^-22 (every backend)"
         band_results ~f:(fun ((name, _, x, _) as r) ->
-          judge f32_case (if is_cuda then cuda_fast f32_case name x else stated f32_case name x) r))
+          judge f32_case (if is_cuda then cuda_fast f32_case name x else stated f32_case name x) r);
+      let c = f64_case in
+      let f64_unary =
+        lazy
+          (let inputs, got = run ~ops:f64_ops c ~first_id:21100 in
+           let n = List.length inputs in
+           List.mapi (Array.to_list got) ~f:(fun j v ->
+               let _, name, reference, _ = List.nth_exn f64_ops (j / n) in
+               (name, reference, List.nth_exn inputs (j % n), v)))
+      in
+      let f64_names = names_phrase (List.map f64_ops ~f:(fun (_, name, _, _) -> name)) in
+      let unary_part ~special () =
+        List.filter (Lazy.force f64_unary) ~f:(fun (_, _, x, _) ->
+            Bool.equal special (is_special x))
+      in
+      f64_claim
+        (Printf.sprintf
+           "f64 %s of +-0, +-inf and NaN: NaN where f64 gives NaN, otherwise the signed zero or \
+            infinity f64 gives (skipped on Metal, which has no f64)"
+           f64_names) (unary_part ~special:true) ~f:(fun ((name, _, x, _) as r) ->
+          judge c (stated c name x) r);
+      f64_claim
+        (Printf.sprintf
+           "f64 %s of finite nonzero inputs, subnormals among them: within the stated ulps of the \
+            host's f64 (1 for sqrt, 2 for rsqrt) with subnormals kept (skipped on Metal, which has \
+            no f64)"
+           f64_names) (unary_part ~special:false) ~f:(fun ((name, _, x, _) as r) ->
+          judge c (stated c name x) r);
+      let f64_binary = lazy (run_binary ~binops:f64_binops c ~first_id:21200) in
+      (* A [pow] result C gives as finite and nonzero, which the precision claims below judge. *)
+      let finite_pow (name, reference, x, y, _) =
+        String.equal name "pow" && Float.(is_finite (reference x y) && reference x y <> 0.)
+      in
+      let binary_part ~finite_pow:b () =
+        List.filter (Lazy.force f64_binary) ~f:(fun r -> Bool.equal b (finite_pow r))
+      in
+      f64_claim
+        "f64 pow and fmod over +-0, +-inf, NaN, dyadic and subnormal operands: NaN where C gives \
+         NaN, otherwise the signed zero or infinity C gives, and fmod exactly (skipped on Metal, \
+         which has no f64)"
+        (binary_part ~finite_pow:false) ~f:(fun r -> judge2 c (Ulps 0.) r);
+      f64_claim ~when_:(not is_hip)
+        "f64 pow's finite nonzero results over the same operands: within 2 ulps of C's pow \
+         (skipped on Metal, which has no f64, and on HIP, whose pow under -ffp-contract=fast loses \
+         the low part of its extended-precision y log x, claimed by the next line)"
+        (binary_part ~finite_pow:true) ~f:(fun ((name, _, x, _, _) as r) ->
+          judge2 c (stated c name x) r);
+      f64_claim ~when_:is_hip
+        "HIP f64 pow's finite nonzero results over the same operands: within 2 + 2 |y log2 |x|| \
+         ulps of C's pow"
+        (binary_part ~finite_pow:true) ~f:(fun ((_, _, x, y, _) as r) ->
+          judge2 c (log_scaled_pow x y) r);
+      f64_claim
+        "f64 fmod of constant operands, subnormal ones among them, folded on the host: exactly C's \
+         fmod (skipped on Metal, which has no f64)"
+        (fun () -> run_folded_fmod ~binops:f64_binops c ~first_id:21300)
+        ~f:(fun r -> judge2 c (Ulps 0.) r))

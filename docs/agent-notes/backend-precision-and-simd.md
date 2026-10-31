@@ -2367,8 +2367,21 @@ files.
   `Mod` rendered C's `%`, a compile error (now `fmodf`/`fmod`); half `Mod` on CUDA/HIP was an
   ambiguous `fmod(__half, __half)` call (now widened); and the host fold (`Ops.interpret_binop`)
   used `Base`'s float `%`, which raises on a negative modulus and returns a nonnegative remainder
-  (now `Float.rem`, the truncating remainder every backend computes). f64 `fmod`/`sqrt` on HIP are
-  unaudited: the test has no f64 case, since Metal has no f64.
+  (now `Float.rem`, the truncating remainder every backend computes).
+
+- **The same four at f64** (gh-ocannl-1730; the test's f64 section, skipped on Metal, which has no
+  f64): cc and CUDA are C's, subnormals kept (`--use_fast_math` touches only f32). **HIP**
+  (gfx1102) departed three ways under `-ffast-math`. `fmod` shares the f32 defect, fixed by
+  `ocannl_fmod` (the dialect's `fmod_f64`). `1.0 / sqrt(x)` becomes a Newton-refined reciprocal-root
+  estimate, NaN at ±0 and +inf; the dialect's `recip_sqrt_f64` renders ROCm's `rsqrt` instead,
+  which is C's there. The same estimate makes **every f64 division** NaN for `x / 0`, `x / inf` and
+  overflowing quotients (hipcc probe; outside this audit, unfixed). And `pow` (`__ocml_pow_f64`)
+  loses the low part of its extended-precision `y log x` to `-ffp-contract=fast`: about 205 ulps
+  where `|y log2 |x||` is 500-1000, exact again under `-ffp-contract=on` (and not restored by
+  `-fno-approx-func` or `-fno-unsafe-math-optimizations`). Recorded, not fixed: the test holds
+  HIP's f64 `pow` to `2 + 2 |y log2 |x||` ulps. A hipcc probe with the backend's own flags
+  (`-O3 -ffast-math -fno-associative-math -fhonor-infinities --offload-arch=gfx1102`) reproduced
+  each hiprtc departure it was compared against, bit for bit: a fast way to bisect a flag.
 
 - A float power whose exponent is only known at run time renders on CUDA and HIP through
   `ocannl_pow_f32`/`ocannl_pow_f64` (`Builtins_cc.cuda_like_power_builtins`, gh-ocannl-1240), half
