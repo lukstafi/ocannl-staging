@@ -173,10 +173,11 @@ let open_nodes : Tn.t list ref = ref []
 
 let note_open_node (tn : Tn.t) = open_nodes := tn :: !open_nodes
 
-(* External handouts since the last closure, by tensor id: code given to a caller
-   ([consume_forward_code], [consume_backprop_code]) is a closed-world act, so a rewind never
-   resurrects a root whose code the caller holds. Embeddings by constructions are not recorded --
-   those constructions are what a rewind discards. *)
+(* External handouts since the last closure: code given to a caller ([consume_forward_code],
+   [consume_backprop_code]) is a closed-world act, so a rewind never resurrects a root whose code
+   the caller holds. Forward code by the value node's id; backprop code by the gradient node's uid,
+   since a parameter over an initializer shares its value node but owns a fresh gradient. Embeddings
+   by constructions are not recorded -- those constructions are what a rewind discards. *)
 type handouts = {
   mutable fwd_out : Set.M(Int).t;
       [@mutation_serial.kept "a record of code given to callers, which no rewind takes back"]
@@ -188,7 +189,8 @@ let handouts = { fwd_out = Set.empty (module Int); bprop_out = Set.empty (module
 
 let note_external_handout ~fwd t =
   if fwd then handouts.fwd_out <- Set.add handouts.fwd_out t.value.id
-  else handouts.bprop_out <- Set.add handouts.bprop_out t.value.id
+  else
+    Option.iter t.diff ~f:(fun d -> handouts.bprop_out <- Set.add handouts.bprop_out d.grad.Tn.uid)
 [@@mutation_serial.boundary
   "a closed-world act: records that work left the session, so a rewind does not resurrect it; not \
    open inference state"]
@@ -263,7 +265,10 @@ let with_unchanged_roots ~f =
     if phys_equal !last_closure closure then (
       handouts.fwd_out <- fwd_out;
       handouts.bprop_out <- bprop_out)
-    else
+    else (
+      (* The closure restarted the record; what [f] handed out since is undone with the maps. *)
+      handouts.fwd_out <- Set.empty (module Int);
+      handouts.bprop_out <- Set.empty (module Int);
       last_closure :=
         {
           !last_closure with
@@ -273,7 +278,7 @@ let with_unchanged_roots ~f =
               g_forward_roots = fwd_roots;
               g_backprop_roots = bprop_roots;
             };
-        };
+        });
     (* A root's code can only have been taken inside [f] if it was a root at entry, and a root is by
        construction not yet taken: restoring the maps restores the markers. *)
     Map.iter fwd_roots ~f:(fun t -> t.consumption.fwd <- Not_handed_out);
@@ -1436,7 +1441,10 @@ let restore_checkpoint ?omit ~provenance ck =
        not taken back. *)
     let fwd = Map.filter_keys g_forward_roots ~f:(fun id -> not (Set.mem handouts.fwd_out id)) in
     let bprop =
-      Map.filter_keys g_backprop_roots ~f:(fun id -> not (Set.mem handouts.bprop_out id))
+      Map.filter g_backprop_roots ~f:(fun t ->
+          match t.diff with
+          | Some d -> not (Set.mem handouts.bprop_out d.grad.Tn.uid)
+          | None -> true)
     in
     session_state.forward_roots <- fwd;
     session_state.backprop_roots <- bprop;

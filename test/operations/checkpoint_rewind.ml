@@ -417,6 +417,35 @@ let wrappers () =
   p "negative control: a re-run without the rewind grows them"
     (not (List.equal Poly.equal second third))
 
+(* {2 External handouts} *)
+
+let handouts () =
+  Tensor.unsafe_reinitialize ();
+  (* A parameter over an open differentiable initializer shares its value node but owns a fresh
+     gradient: handing out the parameter's backprop does not hand out the initializer's. *)
+  let v = leaf ~grad_spec:Tensor.Require_grad "ck_hv" 2 in
+  let init_tensor = TDSL.O.relu v in
+  p "the initializer is a backprop root" (Tensor.is_bprop_root init_tensor);
+  let ck = Tensor.checkpoint () in
+  let reuse ?label:_ ?top_down_prec:_ ?batch_dims:_ ?batch_axes:_ ?input_dims:_ ?output_dims:_
+      ?input_axes:_ ?output_axes:_ ?deduced:_ () =
+    init_tensor
+  in
+  let parameter = Tensor.param ~t:reuse "ck_hp" () in
+  ignore (Tensor.consume_backprop_code parameter : Ir.Assignments.comp);
+  Tensor.rewind ck;
+  p "rewound: the initializer's backprop root is back, the parameter's handout notwithstanding"
+    (Tensor.is_bprop_root init_tensor);
+  (* A handout inside [with_unchanged_roots] after a closure there is undone with the maps. *)
+  Tensor.rewind_to_last_closure ();
+  let y = leaf "ck_hy" 2 in
+  p "a fresh leaf is a forward root" (Tensor.is_fwd_root y);
+  Tensor.with_unchanged_roots ~f:(fun () ->
+      ignore (Shape.to_dims y.shape : int array);
+      ignore (Tensor.consume_forward_code y : Ir.Assignments.comp));
+  Tensor.rewind_to_last_closure ();
+  p "with_unchanged_roots undid a handout made after a closure inside it" (Tensor.is_fwd_root y)
+
 (* {2 Against a fresh process: compiled, run} *)
 
 let fixed_suffix pre =
@@ -473,4 +502,5 @@ let () =
       soak ();
       lifecycle ();
       wrappers ();
+      handouts ();
       fresh_comparison ()

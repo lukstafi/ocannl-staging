@@ -52,6 +52,10 @@ with_rewind: the trace had grown the open frontier: true
 with_rewind over a trace that closes inference raises, loudly: true
 a re-run after a rewind has the first run's frontier sizes: true
 negative control: a re-run without the rewind grows them: true
+the initializer is a backprop root: true
+rewound: the initializer's backprop root is back, the parameter's handout notwithstanding: true
+a fresh leaf is a forward root: true
+with_unchanged_roots undid a handout made after a closure inside it: true
 the fresh-process reference ran: true
 compiled and run after the rewind: the values equal the fresh process's: true
 and they are the closed form 0.5 (1 + 2) + [1; 2]: true
