@@ -243,11 +243,44 @@ let collect_written (asgns : t) : Tn.t_set =
 let sequential l =
   Option.value ~default:Noop @@ List.reduce l ~f:(fun sts another_st -> Seq (sts, another_st))
 
+(* gh-ocannl-1746: [owned] is a set, so a fragment carried by two members of one sequence would
+   merge into a single entry while [asgns] runs it twice -- out of sight of [Context.compile]'s
+   lineage check, which compares sets. Refused here, naming the fragment and the members. *)
+let refuse_shared_fragments l shared =
+  let listed =
+    Set.to_list shared
+    |> List.map ~f:(fun fragment ->
+        let members =
+          List.filter_mapi l ~f:(fun i c ->
+              if Set.mem c.owned fragment then Some (Int.to_string (i + 1)) else None)
+        in
+        Printf.sprintf "%s (members %s)" (Fragment.describe fragment)
+          (String.concat ~sep:", " members))
+    |> String.concat ~sep:"; "
+  in
+  raise
+  @@ Utils.User_error
+       (Printf.sprintf
+          "Assignments.sequence: a tensor's code fragment occurs in more than one member of this \
+           sequence (members counted from 1): %s. A backprop fragment accumulates into its \
+           operands' gradients, so a second copy double-counts them; a second forward copy \
+           recomputes, re-running any state update the forward carries. Sequence each fragment \
+           once: a computation that embeds a fragment already carries it (Train.grad_update \
+           carries its loss's forward and backprop code); in [%%cd], a statement naming a \
+           forward-root tensor embeds its forward code, so an explicit [t.forward] beside a \
+           statement naming [t] is a second copy -- drop the explicit one."
+          listed)
+
 let sequence l =
+  let owned, shared =
+    List.fold l ~init:(no_fragments, no_fragments) ~f:(fun (owned, shared) c ->
+        (Set.union owned c.owned, Set.union shared (Set.inter owned c.owned)))
+  in
+  if not (Set.is_empty shared) then refuse_shared_fragments l shared;
   {
     asgns = sequential (List.map l ~f:(fun c -> c.asgns));
     embedded_nodes = Set.union_list (module Tn) (List.map l ~f:(fun c -> c.embedded_nodes));
-    owned = Set.union_list (module Fragment) (List.map l ~f:(fun c -> c.owned));
+    owned;
     requires = Set.union_list (module Fragment) (List.map l ~f:(fun c -> c.requires));
   }
 

@@ -96,7 +96,13 @@ val empty_comp : comp
 val context_nodes : plc:Tnode.Placements.t -> t -> Tnode.t_set
 val collect_nodes_guess_output : t -> Tnode.t_set * Tnode.t_set
 val collect_written : t -> Tnode.t_set
+
 val sequence : comp list -> comp
+(** Runs the computations in order, uniting their nodes and fragments. Raises [Utils.User_error],
+    naming the fragment, when two members own the same fragment (gh-ocannl-1746): [owned] is a set,
+    so the copy would otherwise run twice unseen -- for a backprop fragment, a double-counted
+    gradient. *)
+
 val collect_neutral_elem : t -> float option
 val to_low_level : ?static_indices:Indexing.static_symbol list -> t -> Low_level.t
 

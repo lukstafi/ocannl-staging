@@ -46,6 +46,16 @@ files.
   lineage to exercise lowering compiles an unowned copy (`Asgns.comp ~embedded asgns`). The
   `Train.*_once` functions mean "compile and run one time"; `forward_once` drops nothing, so a loss
   built after it trains through it (`lineage_fragments.ml`).
+- Within ONE comp, `owned` is a set, so a fragment carried twice merged unseen while `asgns` ran
+  it twice: `Asgns.sequence` refuses members sharing a fragment, naming it (gh-ocannl-1746,
+  `fragment_sequenced_twice.ml`). A comp built past `sequence` (a hand-made `Seq`) owes the same
+  disjointness. The check found OCANNL's own duplicate: a `%cd` `op_asn` naming an operand tensor
+  (`deinterleave_even`'s `id t1`) re-embedded the operand's forward beside `Tensor.op`'s `fwds`,
+  so `Tensor.op` hides the root operands from the root map while `op_asn` runs. Trap: `%cd`
+  evaluates a statement sequence's members right to left, so the LAST statement naming a root
+  tensor embeds its forward code — an explicit `t.forward` before a statement naming `t` is now
+  refused as a second copy, and an earlier statement reading that root reads it before it is
+  computed.
 
 - The `projections` handle an `op_asn` receives is a promise: `Tensor.op` creates the operation's
   shape update step only after `op_asn` returns, because the step's `neutral_elem` is immutable and
