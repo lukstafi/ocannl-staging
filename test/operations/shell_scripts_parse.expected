@@ -55,6 +55,8 @@ a case inside a function-keyword body in a command substitution keeps the struct
 a case inside a process substitution keeps the structure readable: true
 a save-and-restore function is named as the reason for the whole-file reading: true
 a file whose functions leave errexit alone carries no whole-file note: true
+a function whose only set -e is in a subshell carries no whole-file note: true
+a function that returns right after a direct set -e is named for the whole-file reading: true
 errexit-negation fixture multiline single quote is classified as specified: true
 errexit-negation fixture multiline double quote is classified as specified: true
 errexit-negation fixture quoted heredoc is classified as specified: true
@@ -226,6 +228,12 @@ errexit-negation fixture negation in a group an || tail reads is classified as s
 errexit-negation fixture negation after a redirected set +e is classified as specified: true
 errexit-negation fixture negation after a builtin set +e beside a set function is classified as specified: true
 errexit-negation fixture negation after set +e in a file with a save-and-restore function is classified as specified: true
+errexit-negation fixture negation after set +e beside a function whose subshell turns errexit on is classified as specified: true
+errexit-negation fixture negation after set +e beside a function whose subshell returns after set -e is classified as specified: true
+errexit-negation fixture negation after set +e beside a function whose piped group turns errexit on is classified as specified: true
+errexit-negation fixture negation after set +e beside a function that returns right after set -e is classified as specified: true
+errexit-negation fixture negation after a loop whose subshell runs set -e before break is classified as specified: true
+errexit-negation fixture negation after a loop left by break right after set -e is classified as specified: true
 errexit-negation fixture negation after a loop whose condition turns errexit off is classified as specified: true
 errexit-negation fixture negation after a loop whose condition turns errexit off, then set -e is classified as specified: true
 errexit-negation fixture negation after a for loop whose body turns errexit off is classified as specified: true
@@ -461,6 +469,14 @@ errexit execution control after set -e ending a lastpipe pipeline, `! true`: fla
 errexit execution control after set -e ending a lastpipe pipeline, `[ -n "" ] && [ -n x ]`: flagged; bash runs past its failure where `false` stops: true
 errexit execution control after a loop left by break right after set -e, `! true`: flagged; bash runs past its failure where `false` stops: true
 errexit execution control after a loop left by break right after set -e, `[ -n "" ] && [ -n x ]`: flagged; bash runs past its failure where `false` stops: true
+errexit execution control after a loop whose subshell runs set -e before break, `! true`: not flagged; bash treats its failure as it treats `false`: true
+errexit execution control after a loop whose subshell runs set -e before break, `[ -n "" ] && [ -n x ]`: not flagged; bash treats its failure as it treats `false`: true
+errexit execution control after a function that returns right after set -e, called after set +e, `! true`: flagged; bash runs past its failure where `false` stops: true
+errexit execution control after a function that returns right after set -e, called after set +e, `[ -n "" ] && [ -n x ]`: flagged; bash runs past its failure where `false` stops: true
+errexit execution control after a function whose subshell returns after set -e, called after set +e, `! true`: not flagged; bash treats its failure as it treats `false`: true
+errexit execution control after a function whose subshell returns after set -e, called after set +e, `[ -n "" ] && [ -n x ]`: not flagged; bash treats its failure as it treats `false`: true
+errexit execution control after a function whose piped group returns after set -e, called after set +e, `! true`: not flagged; bash treats its failure as it treats `false`: true
+errexit execution control after a function whose piped group returns after set -e, called after set +e, `[ -n "" ] && [ -n x ]`: not flagged; bash treats its failure as it treats `false`: true
 errexit execution control in a function defined and called in one subshell, `! true`: flagged; bash runs past its failure where `false` stops: true
 errexit execution control in a function defined and called in one subshell, `[ -n "" ] && [ -n x ]`: flagged; bash runs past its failure where `false` stops: true
 errexit execution control after a loop whose condition turns errexit off, `! true`: not flagged; bash treats its failure as it treats `false`: true
@@ -694,6 +710,8 @@ Synthetic controls: scanner refusal diagnostics exercised by this control golden
   [scanner-refusal:1b6c2569972a33c6d8cdd0f5ea2c5752] a case inside
   [scanner-refusal:77db671c892d42f5738f054827480452] save-and-restore function is
   [scanner-refusal:b8ca55024e0a84b39a4011db683a7ba9] functions leave errexit
+  [scanner-refusal:671f27a3cd7fa4d4c5dcb8af868a63fb] carries no whole-file
+  [scanner-refusal:090dba89fb927b42ec1f1c29354ae999] the whole-file reading
   [scanner-refusal:88b12da9841dbf6131676bf4fb0f4686] statement-position ! command
   [scanner-refusal:003eba7381c87352fb02cd374fa62ea9] errexit-negation fixture
   [scanner-refusal:b67c631ab7ecd7df55fc002761cf99f6] reaches the absent()-style

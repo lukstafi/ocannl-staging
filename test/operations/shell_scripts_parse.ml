@@ -1679,18 +1679,22 @@ end
       leave it on. [case]: each arm starts from the state before [case] ([;&]/[;;&] also from the
       arm falling into it); afterwards it may be on if any arm, or no arm, leaves it on. A loop body
       is read again from a head that may be on when one pass may leave it on, or when the loop holds
-      a [set -e] anywhere ([continue] can re-enter the head right after it), so a [set -e] late in a
-      body reaches its earlier statements. A [while]/[until] loop is left where its condition ends,
-      so a condition that turns errexit off leaves it off (gh-ocannl-1266); a [for]/[select] loop
-      from its head, which it may leave untouched; and a loop holding a [set -e] anywhere may leave
-      errexit on ([break] can leave right after it);
+      a [set -e] that may run in its shell ([continue] can re-enter the head right after it), so a
+      [set -e] late in a body reaches its earlier statements. A [while]/[until] loop is left where
+      its condition ends, so a condition that turns errexit off leaves it off (gh-ocannl-1266); a
+      [for]/[select] loop from its head, which it may leave untouched; and a loop holding a [set -e]
+      that may run in its shell may leave errexit on ([break] can leave right after it). A [set -e]
+      in a subshell, or in a pipeline element or background job other than a [lastpipe] last
+      element, counts for neither: a [break], [continue] or [return] beside it leaves only that
+      subshell (gh-ocannl-1577);
     - inside a compound whose status a condition, a [!] or a following [&&]/[||] reads, bash ignores
       errexit for every command, so nothing there is judged under it;
     - a function body runs where it is called, which a text scan cannot see: it is entered with
       errexit on when the file may turn it on anywhere outside that body (a subshell included, where
       a function defined beside the [set -e] may run). And since the scan does not follow calls, a
       body that may hand errexit back ON to a caller that called it with errexit off -- any [set -e]
-      in it, since [return] can leave right after one; so [enable() { set -e; }], and the
+      in it that may run in the body's shell (by the loop's rule above), since [return] can leave
+      right after one; so [enable() { set -e; }], but not [f() { ( set -e; x ); }], and the
       [set +e ... set -e] save-and-restore that assumes its caller had it on -- makes every off
       state in the file untrustworthy: such a script is read with errexit on from its first line,
       and no [set +e] in it turns it off. The scan names those functions on a line of its golden
@@ -2367,10 +2371,26 @@ module Shell_context = struct
       @ if List.mem (command_words top) "enable" ~equal:String.equal then [ "set" ] else []
     in
     let errexit_of text = L.command_errexit ~shadowed text in
-    (* A loop or function body holding any [set -e] may be left -- by [break], [continue] or
-       [return] -- right after it, whatever its end state says. *)
-    let may_enable branches =
-      List.exists branches ~f:(fun b -> not (List.is_empty (enabling_sites ~functions:[] [] b)))
+    (* A loop or function body holding a [set -e] that runs in its own shell may be left -- by
+       [break], [continue] or [return] -- right after it, whatever its end state says. A [set -e] in
+       a subshell (a [( )] group, a [( )]-bodied function's definition) or in a pipeline element or
+       background job that cannot run here changes nothing the body hands on, and the [break] or
+       [return] beside it leaves only that subshell (gh-ocannl-1577). A brace-bodied function
+       defined in the body is read through: its own leak is judged where it is entered. *)
+    let rec may_enable branches =
+      List.exists branches ~f:(fun (b : branch) ->
+          List.exists b.statements ~f:(fun statement ->
+              List.existsi statement.operands ~f:(fun index operand ->
+                  let after = List.nth statement.connectors index in
+                  let may_run_here =
+                    (not statement.async) && not (Option.value_map after ~default:false ~f:is_pipe)
+                  in
+                  may_run_here
+                  &&
+                  match operand.compound with
+                  | None -> Option.equal Bool.equal (L.command_errexit operand.text) (Some true)
+                  | Some { kind = Group `Paren | Function `Paren; _ } -> false
+                  | Some { branches; _ } -> may_enable branches)))
     in
     (* One reading of the tree. [leaky]: some function body may turn errexit on for a caller that
        had it off, so no off state can be trusted. [unread]: the function bodies whose status every
@@ -2726,7 +2746,18 @@ module Shell_context = struct
             "fixture.sh: read with errexit on from its first line: function `f` may turn errexit \
              back on for a caller that had it off"));
     Verdict.p "a file whose functions leave errexit alone carries no whole-file note"
-      (Option.is_none (note ~rel:"fixture.sh" (read "set -e\nf() {\n  x\n}\nset +e\n! probe\n")))
+      (Option.is_none (note ~rel:"fixture.sh" (read "set -e\nf() {\n  x\n}\nset +e\n! probe\n")));
+    Verdict.p "a function whose only set -e is in a subshell carries no whole-file note"
+      (Option.is_none
+         (note ~rel:"fixture.sh" (read "set -e\nf() {\n  ( set -e; x )\n}\nset +e\n! probe\n")));
+    Verdict.p
+      "a function that returns right after a direct set -e is named for the whole-file reading"
+      (Option.equal String.equal
+         (note ~rel:"fixture.sh"
+            (read "set -e\nf() {\n  set -e\n  return 0\n  set +e\n}\nset +e\n! probe\n"))
+         (Some
+            "fixture.sh: read with errexit on from its first line: function `f` may turn errexit \
+             back on for a caller that had it off"))
 end
 
 (** A deliberately textual check for statement-position command negation in scripts that enable
@@ -3015,6 +3046,27 @@ module Errexit_negation = struct
         [ 4 ] );
       ( "negation after set +e in a file with a save-and-restore function",
         "set -e\nf() {\n  set +e\n  x\n  set -e\n}\nset +e\n! probe\n",
+        [ 8 ] );
+      (* gh-ocannl-1577: a [set -e] in a subshell inside a brace-bodied function, or a loop, never
+         reaches the caller -- the [return] or [break] beside it leaves only the subshell -- while a
+         direct one followed by [return] does. *)
+      ( "negation after set +e beside a function whose subshell turns errexit on",
+        "set -e\nf() {\n  ( set -e; x )\n}\nset +e\nf\n! probe\n",
+        [] );
+      ( "negation after set +e beside a function whose subshell returns after set -e",
+        "set -e\nf() {\n  ( set -e; return 0 )\n  set +e\n}\nset +e\nf\n! probe\n",
+        [] );
+      ( "negation after set +e beside a function whose piped group turns errexit on",
+        "set -e\nf() {\n  { set -e; return 0; } | cat\n}\nset +e\nf\n! probe\n",
+        [] );
+      ( "negation after set +e beside a function that returns right after set -e",
+        "set -e\nf() {\n  set -e\n  return 0\n  set +e\n}\nset +e\nf\n! probe\n",
+        [ 9 ] );
+      ( "negation after a loop whose subshell runs set -e before break",
+        "set -e\nset +e\nfor x in a; do\n  ( set -e; break )\ndone\n! probe\n",
+        [] );
+      ( "negation after a loop left by break right after set -e",
+        "set -e\nset +e\nfor x in a; do\n  set -e\n  break\n  set +e\ndone\n! probe\n",
         [ 8 ] );
       (* gh-ocannl-1266: a loop left through a condition that turns errexit off, a [case] inside a
          substitution, and the calls that decide whether a function's status is read. *)
@@ -3617,6 +3669,14 @@ module Errexit_execution_controls = struct
         "shopt -s lastpipe\n: | set -e\n@@\necho SURVIVED\n";
       both Inert "after a loop left by break right after set -e"
         "for i in 1; do\n  set -e\n  break\n  set +e\ndone\n@@\necho SURVIVED\n";
+      both Live "after a loop whose subshell runs set -e before break"
+        "set -e\nset +e\nfor i in 1; do\n  ( set -e; break )\ndone\n@@\necho SURVIVED\n";
+      both Inert "after a function that returns right after set -e, called after set +e"
+        "set -e\nf() {\n  set -e\n  return 0\n  set +e\n}\nset +e\nf\n@@\necho SURVIVED\n";
+      both Live "after a function whose subshell returns after set -e, called after set +e"
+        "set -e\nf() {\n  ( set -e; return 0 )\n  :\n}\nset +e\nf\n@@\necho SURVIVED\n";
+      both Live "after a function whose piped group returns after set -e, called after set +e"
+        "set -e\nf() {\n  { set -e; return 0; } | cat\n}\nset +e\nf\n@@\necho SURVIVED\n";
       both Inert "in a function defined and called in one subshell"
         "(\n  set -e\n  f() {\n    @@\n    :\n  }\n  f\n  echo REACHED\n)\necho SURVIVED\n";
       both Live "after a loop whose condition turns errexit off"
