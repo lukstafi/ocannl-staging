@@ -723,7 +723,7 @@ module Impl = struct
     (* gh-ocannl-1338: [metal_stdlib]'s global types and macros ([uint4] -- the storage type of
        every uint4x32 node --, [float4], [M_PI_F], [MAXFLOAT]) cannot be shadowed by, or expand
        into, a node's identifier. *)
-    let node_ident_prefix = C_syntax.node_ident_prefix_for_backend "metal"
+    let node_ident_prefix = Backend_intf.metal_facts.node_ident_prefix
 
     (* gh-ocannl-707: the file-scope names [metal_stdlib] puts in the GLOBAL namespace, which a
        [kernel void <name>(] definition collides with ("redefinition of 'float4' as different kind
@@ -1570,6 +1570,8 @@ module Impl = struct
           ^^ nest 4 (break 1 ^^ separate (comma ^^ break 1) args_docs)
           ^^ rparen ^^ semi)
   end
+
+  let backend_facts = Backend_intf.metal_facts
 
   let codegen_capabilities () =
     let module Config = C_syntax_config (struct

@@ -68,7 +68,7 @@ let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~d
 (* Intentional dialect identity: these branches count the exact MSL versus CUDA/HIP array and
    barrier tokens. Async-copy availability is queried separately through codegen capabilities. *)
 let on_metal = String.is_substring backend_name ~substring:"metal"
-let on_gpu = Sched.backend_is_gpu backend_name
+let on_gpu = Ir.Backend_intf.binds_hardware_grid (Context.backend_facts_of_name backend_name)
 
 (* The claims only a GPU can evaluate: open there, and skipped by name elsewhere, each written once
    (gh-ocannl-1703). *)

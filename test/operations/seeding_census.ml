@@ -390,8 +390,8 @@ let () =
   let seeded =
     capture (fun () ->
         plan :=
-          Autotune.seeded_plan ~min_reduction:1 ~backend:"cuda" ~limits:gpu_limits ~accum_prec:Fn.id
-            ~static_indices:[] mopt)
+          Autotune.seeded_plan ~min_reduction:1 ~facts:Ir.Backend_intf.cuda_facts ~limits:gpu_limits
+            ~accum_prec:Fn.id ~static_indices:[] mopt)
   in
   let seeded_lines =
     List.filter seeded ~f:(fun l ->

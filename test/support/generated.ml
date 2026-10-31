@@ -322,14 +322,15 @@ let assert_emits ?ext ~routine ~contains claim =
 let assert_omits ?ext ~routine ~contains claim =
   Verdict.p claim (not (String.is_substring (read ?ext routine) ~substring:contains))
 
-(** [node_ident label] is the identifier a tensor node whose code name is [label] takes in this
-    run's emitted kernels: [label] behind the backend dialect's node-identifier prefix
-    ({!Ir.C_syntax.node_ident_prefix_for_backend}, gh-ocannl-1338). A claim pinning a node's
-    identifier in emitted text spells it through here, so it states the same identifier on every
-    backend. *)
-let node_ident label =
+(** [node_ident ~facts label] is the identifier a tensor node whose code name is [label] takes in
+    this run's emitted kernels: [label] behind the backend dialect's node-identifier prefix, as the
+    backend's [facts] state it ([node_ident_prefix] of {!Ir.Backend_intf.backend_facts},
+    gh-ocannl-1338, gh-ocannl-1723) -- [Context.backend_facts_of_name backend_name] for the run's
+    backend. A claim pinning a node's identifier in emitted text spells it through here, so it
+    states the same identifier on every backend. *)
+let node_ident ~(facts : Ir.Backend_intf.backend_facts) label =
   match !backend with
-  | Some b -> Ir.C_syntax.node_ident_prefix_for_backend b ^ label
+  | Some _ -> facts.node_ident_prefix ^ label
   | None ->
       uninitialized "Generated.node_ident";
       label
@@ -339,7 +340,7 @@ let node_ident label =
    [_<label>]: [Tnode.styled_ident] for an unlabeled node or one whose label repeats in the kernel),
    or a scope-local scalar spelling its scope id ([v<digits>_<ident>]). A type or builtin whose name
    ends in a digit ([uint3], [float4], [__half2]) is none of these shapes and stays as written. *)
-let is_minted_ident ident =
+let is_minted_ident ~(facts : Ir.Backend_intf.backend_facts) ident =
   let numbered ~prefix =
     match String.chop_prefix ident ~prefix with
     | None -> None
@@ -353,13 +354,12 @@ let is_minted_ident ident =
   || Option.is_some (numbered ~prefix:"n")
   (* A node identifier behind a GPU dialect's prefix ([t_n12_x], gh-ocannl-1338). *)
   || (match !backend with
-    | Some b ->
-        Option.is_some (numbered ~prefix:(Ir.C_syntax.node_ident_prefix_for_backend b ^ "n"))
+    | Some _ -> Option.is_some (numbered ~prefix:(facts.node_ident_prefix ^ "n"))
     | None -> false)
   || match numbered ~prefix:"v" with Some rest -> String.mem rest '_' | None -> false
 
-(** [normalize_minted text] is a generated source with every identifier a compile spells with a
-    freshly minted number -- loop symbols [i<digits>], node identifiers [n<digits>[_<label>]]
+(** [normalize_minted ~facts text] is a generated source with every identifier a compile spells with
+    a freshly minted number -- loop symbols [i<digits>], node identifiers [n<digits>[_<label>]]
     (behind the backend's {!node_ident} prefix where it has one), scope-local scalars
     [v<digits>_<ident>] -- renamed [@0], [@1], ... by first appearance, and every run of whitespace
     collapsed to one space (a longer identifier moves the pretty-printer's line breaks). Two
@@ -367,7 +367,7 @@ let is_minted_ident ident =
     new node ids (gh-ocannl-1473) -- so their normalized sources are equal, and a difference left is
     one in the code. Number literals are copied whole, so a hex float's letters are not read as an
     identifier. *)
-let normalize_minted text =
+let normalize_minted ~facts text =
   let names = Hashtbl.create (module String) in
   let out = Buffer.create (String.length text) in
   let n = String.length text in
@@ -388,7 +388,7 @@ let normalize_minted text =
           Int.incr j
         done;
         let ident = String.sub text ~pos:i ~len:(!j - i) in
-        if is_minted_ident ident then
+        if is_minted_ident ~facts ident then
           let fresh = Hashtbl.length names in
           Buffer.add_string out
             ("@" ^ Int.to_string (Hashtbl.find_or_add names ident ~default:(fun () -> fresh)))

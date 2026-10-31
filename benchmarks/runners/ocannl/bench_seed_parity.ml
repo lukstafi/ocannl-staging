@@ -110,7 +110,8 @@ let any_seed (_ : Autotune.sketch_params) = true
 
 let target ctx =
   let backend = Context.backend_name ctx in
-  (Ir.Schedule.backend_is_gpu backend, Ir.Schedule.backend_is_cpu backend)
+  ( Ir.Backend_intf.binds_hardware_grid (Context.backend_facts_of_name backend),
+    Ir.Backend_intf.renders_on_host_pool (Context.backend_facts_of_name backend) )
 
 let census_lines ctx ~static_indices opt =
   let is_gpu, is_cpu = target ctx in
@@ -592,7 +593,9 @@ let compile_rounded ?(replayed = []) ~targets ctx comp bindings =
     let llc, n = round_products ~targets lowered.LL.llc in
     let llc = if List.is_empty replayed then llc else replay_nodes ~replayed llc in
     stmts := n;
-    Ir.Schedule.maybe_default_schedules ~backend_name ~limits
+    Ir.Schedule.maybe_default_schedules
+      ~facts:(Context.backend_facts_of_name backend_name)
+      ~limits
       ~static_indices:(Ir.Indexing.bound_symbols bindings)
       { lowered with LL.llc }
   in

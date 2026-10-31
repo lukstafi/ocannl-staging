@@ -116,8 +116,8 @@ let () =
   let assignment line = String.mem line '=' in
   p "the split kernel's statements, its parts spliced in at their calls, are the whole kernel's"
     (String.equal
-       (Generated.normalize_minted split_statements)
-       (Generated.normalize_minted whole_statements));
+       (Generated.normalize_minted ~facts:Ir.Backend_intf.cc_facts split_statements)
+       (Generated.normalize_minted ~facts:Ir.Backend_intf.cc_facts whole_statements));
   p_exists "the split kernel's statements hold its assignments"
     (String.split_lines split_statements)
     ~f:assignment;

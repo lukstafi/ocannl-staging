@@ -110,7 +110,10 @@ let step ~gate_on ~transform () =
   let limits = Context.hardware_limits ctx in
   let lowered_transform =
     Option.map transform ~f:(fun f o ->
-        f (Sched.maybe_default_schedules ~backend_name ~limits ~static_indices:[] o))
+        f
+          (Sched.maybe_default_schedules
+             ~facts:(Context.backend_facts_of_name backend_name)
+             ~limits ~static_indices:[] o))
   in
   let ctx, routine = Context.compile ?lowered_transform ctx update Ir.Indexing.Empty in
   let read ctx =
@@ -257,7 +260,10 @@ let () =
   printf "--- the gate ---\n";
   (* One claim line on every backend, so the golden is backend-uniform: a GPU backend ships what the
      explicit pass produces, a CPU backend ships its reference zeros. *)
-  let expected = if Sched.backend_is_gpu backend_name then elided else reference in
+  let expected =
+    if Ir.Backend_intf.binds_hardware_grid (Context.backend_facts_of_name backend_name) then elided
+    else reference
+  in
   p "shipped: elides exactly on a GPU backend, as the explicit pass does"
     (List.length (zeros_with_next shipped.segments)
      = List.length (zeros_with_next expected.segments)

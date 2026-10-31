@@ -108,10 +108,12 @@ let () =
     }
   in
   let untuned opt =
-    Sched.maybe_default_schedules ~backend_name ~limits ~static_indices (copy opt)
+    Sched.maybe_default_schedules
+      ~facts:(Context.backend_facts_of_name backend_name)
+      ~limits ~static_indices (copy opt)
   in
-  let is_gpu = Sched.backend_is_gpu backend_name in
-  let is_cpu = Sched.backend_is_cpu backend_name in
+  let is_gpu = Ir.Backend_intf.binds_hardware_grid (Context.backend_facts_of_name backend_name) in
+  let is_cpu = Ir.Backend_intf.renders_on_host_pool (Context.backend_facts_of_name backend_name) in
   let candidate opt =
     (* Mirrors Autotune.compile_candidate's preset for [F_preset { block_size = None; privatize =
        false; config_thresholds = true }]. *)

@@ -50,7 +50,7 @@ let cuda_fast_math = Ir.Cuda_like_config.cuda_fast_math ()
 (* [-ffast-math] may link a startup file that sets flush-to-zero (GCC's [crtfastmath.o]), so the C
    claim holds only for the default IEEE compile. *)
 let ieee_cpu =
-  Ir.Schedule.backend_is_cpu backend_name
+  Ir.Backend_intf.renders_on_host_pool (Context.backend_facts_of_name backend_name)
   && not (Utils.get_global_flag ~default:false ~arg_name:"cc_backend_fast_math")
 
 let bf = Ops.bfloat16

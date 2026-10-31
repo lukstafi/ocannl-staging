@@ -149,7 +149,9 @@ let () =
             | None -> Stdio.printf "wgrad-model: plan=%s kernel=[%s] no coverage\n" plan (written o))
   in
   predict "default"
-    (Ir.Schedule.maybe_default_schedules ~backend_name:backend ~limits ~static_indices:[]);
+    (Ir.Schedule.maybe_default_schedules
+       ~facts:(Context.backend_facts_of_name backend)
+       ~limits ~static_indices:[]);
   Option.iter (Autotune.seeded_transform ctx Ir.Indexing.Empty) ~f:(predict "seeded");
   let report = ref None in
   let t0 = Unix.gettimeofday () in

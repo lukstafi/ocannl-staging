@@ -3648,7 +3648,7 @@ let folded_seed_claims ~pre ~on_gpu ~run =
       [] );
     ( "accepts a backend gate that also steers the population's construction",
       {ocaml|open Verdict.Claims
-let on_gpu = Sched.backend_is_gpu backend_name
+let on_gpu = Ir.Backend_intf.binds_hardware_grid (Context.backend_facts_of_name backend_name)
 let () =
   let real = if on_gpu then gpu_seeds pre else [] in
   let results = List.map real ~f:run in
@@ -4794,8 +4794,8 @@ let run_gate_refusal_control () =
 let folded_gate_prelude =
   {ocaml|open Verdict.Claims
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
-let on_cpu = Sched.backend_is_cpu backend_name
-let on_gpu = Sched.backend_is_gpu backend_name
+let on_cpu = Ir.Backend_intf.renders_on_host_pool (Context.backend_facts_of_name backend_name)
+let on_gpu = Ir.Backend_intf.binds_hardware_grid (Context.backend_facts_of_name backend_name)
 let is_metal = String.equal backend_name "metal"
 |ocaml}
 
@@ -4905,7 +4905,7 @@ let () = p "the path is portable" (!gate || portable (Context.auto ()))|ocaml},
         [] );
       ( "refuses a gate a module of the source binds",
         {ocaml|module Gates = struct
-  let cpu = Sched.backend_is_cpu backend_name
+  let cpu = Ir.Backend_intf.renders_on_host_pool (Context.backend_facts_of_name backend_name)
 end
 
 let () = p "the census renders tiled" ((not Gates.cpu) || census_ok (Context.auto ()))|ocaml},

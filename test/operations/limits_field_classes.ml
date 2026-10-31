@@ -134,7 +134,8 @@ let is_key name = List.mem key_fields name ~equal:String.equal
 let untimed_fields = List.filter all_fields ~f:(Fn.non is_key)
 
 let key_of limits =
-  SC.codegen_tag ~backend:"cuda" ~limits ~capabilities:BI.no_codegen_capabilities ()
+  SC.codegen_tag ~facts:Ir.Backend_intf.cuda_facts ~limits ~capabilities:BI.no_codegen_capabilities
+    ()
 
 let () =
   let names = List.map toggles ~f:fst in

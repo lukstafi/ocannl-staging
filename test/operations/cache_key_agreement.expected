@@ -9,6 +9,7 @@ the key computation reads its Keyed keys per lookup, so the trace sees reads: tr
 no unflippable Keyed key is read per lookup by the key computation: true
 the backend name moves its own component: true
 and only components it reaches: true
+the backend's facts move only the components they reach: true
 cc_grid_private_bytes_cap, stated in a child, moves the codegen component alone on a CPU backend, and nothing on a GPU one: true
 every child run of the pool-class flips completed: true
 no pool-class flip moves a component other than the pool and what follows from it: true

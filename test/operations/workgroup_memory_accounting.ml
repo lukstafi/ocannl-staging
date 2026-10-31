@@ -37,7 +37,7 @@ let () =
   Stdio.eprintf "workgroup_memory_accounting: backend=%s (not part of the golden)\n%!" backend_name
 
 let () = Generated.init ~backend_name
-let on_gpu = Sched.backend_is_gpu backend_name
+let on_gpu = Ir.Backend_intf.binds_hardware_grid (Context.backend_facts_of_name backend_name)
 
 let scratch (o : LL.optimized) =
   {

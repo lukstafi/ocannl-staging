@@ -1210,6 +1210,14 @@ let codegen_capabilities ctx =
   let (module Backend) = backend_module ctx in
   Backend.codegen_capabilities ()
 
+let backend_facts ctx = Backends.backend_facts (Backends.wrapped_backend ctx.wrapped)
+
+let backend_facts_of_name backend_name =
+  Backends.backend_facts (Backends.get_backend ~backend_name ())
+
+let same_backend c1 c2 =
+  Backends.equal_backend (Backends.wrapped_backend c1.wrapped) (Backends.wrapped_backend c2.wrapped)
+
 (* Internal helper - not exposed in interface to maintain invariants *)
 let mark_initialized ctx nodes =
   { ctx with initialized_nodes = Set.union ctx.initialized_nodes nodes }

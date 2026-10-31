@@ -96,12 +96,14 @@ let () =
     ~over:(Ir.Affine.Loop_ranges.to_alist (LL.loop_ranges base.LL.llc))
     (LL.hardware_axes base.LL.llc);
   let default =
-    Sched.maybe_default_schedules ~backend_name:backend ~limits ~static_indices:[] base
+    Sched.maybe_default_schedules
+      ~facts:(Context.backend_facts_of_name backend)
+      ~limits ~static_indices:[] base
   in
   (* The default schedules are a configuration's to switch off ([automatic_gpu_schedule],
      [automatic_cpu_schedule], routine logging): a run that did has nothing to compare. *)
   gated ~aggregation:`Environment
-    ~when_:(Sched.automatic_schedule_active ~backend_name:backend)
+    ~when_:(Sched.automatic_schedule_active ~facts:(Context.backend_facts_of_name backend))
     ~on:(backend ^ " with automatic schedules off")
     "the untuned default compile of the same code does"
     (List.exists default ~f:(fun o -> not (List.is_empty (LL.hardware_axes o.LL.llc))));
@@ -123,7 +125,7 @@ let () =
   let ctx = Context.run ctx routine in
   let got = Context.get_values ctx mc.Tensor.value in
   let r = Option.value_exn ~here:[%here] !report in
-  let is_gpu = Sched.backend_is_gpu backend in
+  let is_gpu = Ir.Backend_intf.binds_hardware_grid (Context.backend_facts_of_name backend) in
   let baseline_measured = Float.is_finite r.Autotune.baseline_ms in
   (* The baseline's own window (gh-ocannl-1423), not [timings_contended], which a refused candidate
      window grows too. Any refusal excuses it, and the cause is printed (gh-ocannl-1517). *)
@@ -251,6 +253,7 @@ let () =
      best, so a replay of it reports none. *)
   ignore
     (Cache_plant.plant ~best_ms:1e-6 ~baseline_ms:1e-6 ~cache_dir ~backend
+       ~facts:(Context.backend_facts_of_name backend)
        ~timing_identity:(Context.timing_identity ctx) ~limits:(Context.hardware_limits ctx)
        ~capabilities:(Context.codegen_capabilities ctx)
        canon

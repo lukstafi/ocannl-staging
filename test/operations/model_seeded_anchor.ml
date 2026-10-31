@@ -48,8 +48,7 @@ let () = Unix.putenv "OCANNL_FP_CONTRACT" "true"
 let seeds_here =
   let ctx = Context.auto () in
   Option.is_some
-    (Autotune.model_seeding ~backend:(Context.backend_name ctx)
-       ~limits:(Context.hardware_limits ctx))
+    (Autotune.model_seeding ~facts:(Context.backend_facts ctx) ~limits:(Context.hardware_limits ctx))
 
 (* Full mantissas: [k / 1009 - 1/2] over a stride coprime to 1009. *)
 let values ~n ~stride =

@@ -1068,7 +1068,7 @@ let none_emitted ~what census =
     test. The stanza declares the configuration that judgment reads (see {!tensorized_capability}).
 *)
 let advertised ~backend_name ~a_prec ~b_prec ~d_prec =
-  let is_gpu = Ir.Schedule.backend_is_gpu backend_name in
+  let is_gpu = Ir.Backend_intf.binds_hardware_grid (Context.backend_facts_of_name backend_name) in
   match
     tensorized_capability ~is_gpu ~is_cpu:(not is_gpu)
       ~limits:(Context.hardware_limits (Context.auto ()))
@@ -1106,8 +1106,8 @@ let host_target () =
   let ctx = Lazy.force base_ctx in
   let name = Context.backend_name ctx in
   {
-    is_gpu = Ir.Schedule.backend_is_gpu name;
-    is_cpu = Ir.Schedule.backend_is_cpu name;
+    is_gpu = Ir.Backend_intf.binds_hardware_grid (Context.backend_facts_of_name name);
+    is_cpu = Ir.Backend_intf.renders_on_host_pool (Context.backend_facts_of_name name);
     limits = Context.hardware_limits ctx;
   }
 

@@ -44,6 +44,7 @@ let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~d
 module Generated = Test_utils.Generated
 
 let () = Generated.init ~backend_name
+let facts = Context.backend_facts_of_name backend_name
 
 let named name (comp : Asgns.comp) : Asgns.comp =
   { comp with asgns = Asgns.Block_comment (name, comp.asgns) }
@@ -132,9 +133,9 @@ let () =
   let has sub = String.is_substring src ~substring:sub in
   let count_sub sub = String.substr_index_all src ~may_overlap:false ~pattern:sub |> List.length in
   p "packed tiles are plain local arrays, no barriers, no guards"
-    (count_sub ("float " ^ Generated.node_ident "tile_") = 2
+    (count_sub ("float " ^ Generated.node_ident ~facts "tile_") = 2
     && has "acc_mc1"
-    && (not (has ("threadgroup float " ^ Generated.node_ident "tile_")))
+    && (not (has ("threadgroup float " ^ Generated.node_ident ~facts "tile_")))
     && (not (has "__shared__"))
     && (not (has "barrier"))
     && not (has "if ("))

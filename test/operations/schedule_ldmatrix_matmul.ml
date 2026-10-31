@@ -67,7 +67,7 @@ let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~d
    forms; which way each statement rendered, the other dialects' decline included, is the MMA
    census's to say. *)
 let on_cuda = String.is_substring backend_name ~substring:"cuda"
-let on_gpu = Sched.backend_is_gpu backend_name
+let on_gpu = Ir.Backend_intf.binds_hardware_grid (Context.backend_facts_of_name backend_name)
 
 module Generated = Test_utils.Generated
 

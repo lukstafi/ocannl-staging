@@ -32,7 +32,9 @@ let backend_name = Context.backend_name (Context.cpu ())
 (* The untuned floor a cc search attempts whatever its budget: the default-pipeline seed. *)
 let is_floor label =
   String.equal label "baseline"
-  || Option.exists (Autotune.default_seed_label ~backend_name) ~f:(String.equal label)
+  || Option.exists
+       (Autotune.default_seed_label ~facts:(Context.backend_facts_of_name backend_name))
+       ~f:(String.equal label)
 
 let inline_flips = 2
 

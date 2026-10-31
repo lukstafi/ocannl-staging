@@ -44,11 +44,12 @@ let nonzero name (a : float array) =
 let approx_tol _ = 1e-3
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 let skipped = Verdict.skipped ~backend:backend_name
-let has_shared = Sched.backend_is_gpu backend_name
+let has_shared = Ir.Backend_intf.binds_hardware_grid (Context.backend_facts_of_name backend_name)
 
 module Generated = Test_utils.Generated
 
 let () = Generated.init ~backend_name
+let facts = Context.backend_facts_of_name backend_name
 
 let named name (comp : Asgns.comp) : Asgns.comp =
   { comp with asgns = Asgns.Block_comment (name, comp.asgns) }
@@ -160,10 +161,11 @@ let () =
        declaration and barrier spellings in emitted source. *)
     let shared_ok =
       if String.is_substring backend_name ~substring:"metal" then
-        count_sub ("threadgroup float " ^ Generated.node_ident "tile_") = 2
+        count_sub ("threadgroup float " ^ Generated.node_ident ~facts "tile_") = 2
         && has "threadgroup_barrier"
       else
-        count_sub ("__shared__ float " ^ Generated.node_ident "tile_") = 2 && has "__syncthreads()"
+        count_sub ("__shared__ float " ^ Generated.node_ident ~facts "tile_") = 2
+        && has "__syncthreads()"
     in
     (* All tile sizes divide the extents: Split remainder guards and Stage/Privatize edge guards
        fold; the only Ifs left are the two thread-0 load restrictions. The k loop accumulates into
@@ -261,8 +263,8 @@ let () =
       (* This is intentionally dialect identity: the assertion counts the literal shared-memory
          declaration token emitted by each language. *)
       if String.is_substring backend_name ~substring:"metal" then
-        count_sub ("threadgroup float " ^ Generated.node_ident "tile_") = 1
-      else count_sub ("__shared__ float " ^ Generated.node_ident "tile_") = 1))
+        count_sub ("threadgroup float " ^ Generated.node_ident ~facts "tile_") = 1
+      else count_sub ("__shared__ float " ^ Generated.node_ident ~facts "tile_") = 1))
   else (
     (match
        try

@@ -22,7 +22,7 @@ open Ocannl.Operation.DSL_modules
 open Verdict.Claims
 
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
-let splits_here = Autotune.seeded_split_backend backend_name
+let splits_here = Autotune.seeded_split_backend (Context.backend_facts_of_name backend_name)
 
 let nb = 128
 and ns = 64
@@ -97,7 +97,9 @@ let split_bgrad (r : Autotune.seeded_choice) =
 let () =
   let opt = Context.lowered_for_decisions (Context.auto ()) comp Ir.Indexing.Empty in
   let sites ~backend ~min_serial =
-    Autotune.seeded_split_sites ~backend ~min_serial ~static_indices:[] opt
+    Autotune.seeded_split_sites
+      ~facts:(Context.backend_facts_of_name backend)
+      ~min_serial ~static_indices:[] opt
   in
   p "structural: for cuda the bias gradient is split at a threshold below its serial chain"
     (List.exists (sites ~backend:"cuda" ~min_serial:4096) ~f:(fun (s, _) ->
@@ -165,7 +167,7 @@ let () =
   Stdio.eprintf "model_default picked: %s (not part of the golden)\n"
     (Option.value_map !report ~default:"nothing reported" ~f:(fun r -> r.Autotune.mc_label));
   Verdict.gated_all
-    ~when_:(Autotune.seeded_default_backend backend_name)
+    ~when_:(Autotune.seeded_default_backend (Context.backend_facts_of_name backend_name))
     ~on:backend_name
     "on CUDA/HIP the model's bias gradient is bitwise the seeded default's, split order included"
     (List.zip_exn (Array.to_list model) (Array.to_list configured))

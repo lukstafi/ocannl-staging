@@ -108,7 +108,11 @@ let backend = Context.backend_name base_ctx
 let timing_identity = Context.timing_identity base_ctx
 let limits = Context.hardware_limits base_ctx
 let capabilities = Context.codegen_capabilities base_ctx
-let key = Cache_plant.key ~backend ~timing_identity ~limits ~capabilities canon
+
+let key =
+  Cache_plant.key ~backend
+    ~facts:(Context.backend_facts_of_name backend)
+    ~timing_identity ~limits ~capabilities canon
 
 (* Timed-cache reuse needs a concrete device identity; without one nothing is looked up. *)
 let cache_available = Option.is_some key
@@ -124,8 +128,9 @@ let planted = ref []
 
 let plant ~saved ~segments =
   let ios =
-    Cache_plant.plant ~saved ?segments ~cache_dir ~backend ~timing_identity ~limits ~capabilities
-      canon
+    Cache_plant.plant ~saved ?segments ~cache_dir ~backend
+      ~facts:(Context.backend_facts_of_name backend)
+      ~timing_identity ~limits ~capabilities canon
   in
   planted := !planted @ ios;
   ios

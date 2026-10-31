@@ -102,7 +102,9 @@ let () =
                schedule may place [y.grad] otherwise (Metal does at the larger size of
                [autotune_timing_state_restore]), where the parity claims still execute. *)
             let backend = Context.backend_name ctx_l in
-            let on_cpu = Ir.Schedule.backend_is_cpu backend in
+            let on_cpu =
+              Ir.Backend_intf.renders_on_host_pool (Context.backend_facts_of_name backend)
+            in
             gated ~when_:on_cpu ~on:backend "step 1: w.grad is committed virtual"
               (Ir.Tnode.Placements.known_virtual plc w_grad);
             gated ~when_:on_cpu ~on:backend "step 1: y.grad is routine-local scratch"
@@ -130,7 +132,7 @@ let () =
   let totals = List.rev !totals in
   (let backend = Context.backend_name lineage in
    gated
-     ~when_:(Ir.Schedule.backend_is_cpu backend)
+     ~when_:(Ir.Backend_intf.renders_on_host_pool (Context.backend_facts_of_name backend))
      ~on:backend "after step 1, the lineage stores w.grad's template" (!w_grad_components > 0));
   (match totals with
   | first :: rest ->

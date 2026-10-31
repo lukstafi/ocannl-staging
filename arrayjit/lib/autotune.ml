@@ -1024,8 +1024,8 @@ let window_bounded ?(at_least_ms = 0.) ~bound_ms samples =
    gh-ocannl-1482), and refusing it made every search there uncacheable. *)
 type dispersion_policy = Refuse_dispersed | Attribute_dispersion
 
-let dispersion_policy_for_backend backend =
-  if Sched.backend_is_cpu backend then Attribute_dispersion else Refuse_dispersed
+let dispersion_policy_for_backend (facts : Ir.Backend_intf.backend_facts) =
+  if facts.host_load_attributable then Attribute_dispersion else Refuse_dispersed
 
 (* The attribution itself, pure. Only a dispersed window changes, and only on a [Quiet] verdict: a
    co-tenant keeps the refusal, and so does an [Unavailable] signal -- no evidence of quiet is not
@@ -1067,11 +1067,13 @@ let queued_batch_ms = 10.
 let max_queue_depth = 2048
 let legacy_queue_depth = 200
 
-let queue_depth_cap_for_backend = function
-  | "cuda" | "hip" -> max_queue_depth
-  | _ -> legacy_queue_depth
+let queue_depth_cap_for_backend (facts : Ir.Backend_intf.backend_facts) =
+  match facts.queued_timing with
+  | Queued_deep -> max_queue_depth
+  | Queued_legacy -> legacy_queue_depth
 
-let retry_contended_window_for_backend backend = String.equal backend "metal"
+let retry_contended_window_for_backend (facts : Ir.Backend_intf.backend_facts) =
+  facts.retries_contended_window
 
 (* The depth is calibrated from timed single launches, not from the warmup: the warmup absorbs lazy
    initialization and module loading, so on a fast kernel it can overestimate by enough to collapse
@@ -2314,9 +2316,9 @@ let time_routine ?(on_retry = fun () -> ()) ?(on_call = fun _ -> ()) ?(tag_failu
       in
       calibrate_and_time_from ~window_bound_ms ~hopeless_against ~started ~tagged:tag_failures
         ~on_retry ~on_call ~phase ~timing ~repeats
-        ~retry_contended:(retry_contended_window_for_backend (Context.backend_name cctx))
-        ~dispersion:(dispersion_policy_for_backend (Context.backend_name cctx))
-        ~queue_depth_cap:(queue_depth_cap_for_backend (Context.backend_name cctx))
+        ~retry_contended:(retry_contended_window_for_backend (Context.backend_facts cctx))
+        ~dispersion:(dispersion_policy_for_backend (Context.backend_facts cctx))
+        ~queue_depth_cap:(queue_depth_cap_for_backend (Context.backend_facts cctx))
         ~batch)
 
 (* gh-ocannl-532: on a GPU backend, code that binds no hardware dimension runs the whole routine in
@@ -4083,9 +4085,9 @@ let spec_label = function
    seam at all; with it active, the [config_thresholds] seed reproduces the default pipeline
    exactly, but only when that pipeline fissions -- the whole-routine annotation it is otherwise has
    no reproducing candidate (Codex P1 on PR #279). *)
-let default_seed_label ~backend_name =
-  if not (Sched.automatic_schedule_active ~backend_name) then
-    if Sched.backend_is_gpu backend_name then None else Some "baseline"
+let default_seed_label ~facts =
+  if not (Sched.automatic_schedule_active ~facts) then
+    if Ir.Backend_intf.binds_hardware_grid facts then None else Some "baseline"
   else if Sched.default_pipeline_fissions () then
     Some
       (spec_label
@@ -5372,7 +5374,7 @@ let placement_surface ?name ?ordering ?(evidence = []) ctx comp bindings =
   let allmat = Context.lowered_for_decisions ?name ~materialized:to_materialize ctx comp bindings in
   let enablement, disablement =
     placement_enablement
-      ~is_gpu:(Sched.backend_is_gpu (Context.backend_name ctx))
+      ~is_gpu:(Ir.Backend_intf.binds_hardware_grid (Context.backend_facts ctx))
       ~limits ~static_indices ~base ~allmat
   in
   let ps_candidates = rank_flip_candidates ~ordering ?profit ~enablement ~disablement candidates in
@@ -5593,7 +5595,7 @@ let site_reduction_extent (site : matmul_site) =
 (* CUDA and HIP only: the backends the untiled-contraction gap was measured on (gh-ocannl-1183) and
    the seeded plan's before/after was measured on. Metal keeps the plain default until a Metal
    measurement says otherwise. *)
-let seeded_default_backend backend = Sched.backend_seeds_untuned_default backend
+let seeded_default_backend (facts : Ir.Backend_intf.backend_facts) = facts.seeds_untuned_default
 
 type seed_gate =
   | Min_reduction of int
@@ -5818,7 +5820,7 @@ let seeded_params ?capabilities ?admit_narrow ~limits ~accum_prec ~min_reduction
    CUDA's alone until its first pass ran the block loop outside the cell loops ([sr_block_hoist]):
    with the lanes walking the blocks, the HIP b256 step went from 885 to 1256 ms on gfx1151's
    unified memory where CUDA's caches absorbed the scattered loads. *)
-let seeded_split_backend backend = seeded_default_backend backend
+let seeded_split_backend facts = seeded_default_backend facts
 
 (* gh-ocannl-1331: whether a search on [backend] can read the [Search_shaping] key [key]: the seeded
    plan's keys where {!seeded_settings} resolves them (its backend tests come first, so another
@@ -5826,18 +5828,17 @@ let seeded_split_backend backend = seeded_default_backend backend
    it ([matmul_flavor_tree]'s [is_cpu] arm, the register-tiled rendering), the default pipeline's
    per {!Sched.search_shaping_key_read}. The other [autotune_*] keys are read on every backend: the
    search's own knobs, and [autotune_pad_waste_max] in the GPU and CPU menus alike. *)
-let search_shaping_key_read ~backend key =
+let search_shaping_key_read ~facts key =
   match key with
-  | "autotune_register_tile_rm_twin" -> Sched.backend_is_cpu backend
+  | "autotune_register_tile_rm_twin" -> Ir.Backend_intf.renders_on_host_pool facts
   | "gpu_default_sketch_min_reduction" | "gpu_default_reduction_sink" ->
-      seeded_default_backend backend
+      seeded_default_backend facts
   | "gpu_default_split_reduce_min_serial" ->
-      seeded_default_backend backend && seeded_split_backend backend
-  | _ -> Sched.search_shaping_key_read ~backend_name:backend key
+      seeded_default_backend facts && seeded_split_backend facts
+  | _ -> Sched.search_shaping_key_read ~facts key
 
-let search_shaping_identity ~backend ~limits =
-  Utils.config_class_fingerprint
-    ~reads:(search_shaping_key_read ~backend)
+let search_shaping_identity ~facts ~limits =
+  Utils.config_class_fingerprint ~reads:(search_shaping_key_read ~facts)
     ~resolve:(Sched.resolve_search_shaping_value limits)
     Utils.Search_shaping
 
@@ -5872,9 +5873,9 @@ let seeded_split_threads = 32768
    The cap binds the fallback too: a chain shorter than 32 * 32, reachable only below the default
    threshold, is not split. Every split of gh-ocannl-1325's b256 measurement chains 32768 rows and
    keeps its count. *)
-let seeded_split_sites ~backend ~min_serial ~static_indices (opt : LL.optimized) :
+let seeded_split_sites ~facts ~min_serial ~static_indices (opt : LL.optimized) :
     (sr_site * int) list =
-  if min_serial <= 0 || not (seeded_split_backend backend) then []
+  if min_serial <= 0 || not (seeded_split_backend facts) then []
   else
     List.filter_map (split_reduce_sites ~static_indices opt) ~f:(fun s ->
         let chain = s.sr_cost / s.sr_out in
@@ -5944,7 +5945,7 @@ let no_seeded_choice =
    first: the thresholds are CUDA/HIP settings, so a malformed value must not break a compile on a
    backend that ignores them. *)
 let seeded_settings ?min_reduction ?seed_gate ?min_serial ?reduction_sink:sink_override ?seed_narrow
-    ~backend ~configured_gate () =
+    ~facts ~configured_gate () =
   let gate () =
     match (seed_gate, min_reduction) with
     | Some _, Some _ ->
@@ -5956,7 +5957,7 @@ let seeded_settings ?min_reduction ?seed_gate ?min_serial ?reduction_sink:sink_o
   let gate_off () = match gate () with Min_reduction n -> n <= 0 | Ranked _ -> false in
   (* Resolved only where the split runs, so a malformed value breaks no compile that ignores it. *)
   let min_serial () =
-    if not (seeded_split_backend backend) then 0
+    if not (seeded_split_backend facts) then 0
     else match min_serial with Some n -> n | None -> seeded_split_min_serial ()
   in
   let sink_enabled () =
@@ -5966,9 +5967,9 @@ let seeded_settings ?min_reduction ?seed_gate ?min_serial ?reduction_sink:sink_o
     match seed_narrow with Some b -> b | None -> seed_narrow_storage_enabled ()
   in
   if
-    (not (seeded_default_backend backend))
+    (not (seeded_default_backend facts))
     || (gate_off () && min_serial () <= 0 && not (sink_enabled ()))
-    || (not (Sched.automatic_schedule_active ~backend_name:backend))
+    || (not (Sched.automatic_schedule_active ~facts))
     || not (Sched.default_pipeline_fissions ())
   then None
   else Some (gate (), min_serial (), sink_enabled (), admit_narrow ())
@@ -5980,8 +5981,8 @@ let seeded_settings ?min_reduction ?seed_gate ?min_serial ?reduction_sink:sink_o
    is the caller's, which the partials nodes the prelude mints must be registered in for the routine
    to link. A prelude that fails leaves at most placements for nodes no routine mentions, and the
    routine unsplit. *)
-let seeded_split ~backend ~min_serial ~static_indices (opt : LL.optimized) =
-  match seeded_split_sites ~backend ~min_serial ~static_indices opt with
+let seeded_split ~facts ~min_serial ~static_indices (opt : LL.optimized) =
+  match seeded_split_sites ~facts ~min_serial ~static_indices opt with
   | [] -> (opt, [])
   | sites -> (
       match
@@ -6263,10 +6264,10 @@ let seeded_plan_on ~capabilities ~limits ~accum_prec ~admit_narrow ~static_indic
       }
 
 let seeded_plan ?min_reduction ?seed_gate ?min_serial ?reduction_sink ?seed_narrow
-    ?(capabilities = Ir.Backend_intf.no_codegen_capabilities) ~backend ~limits ~accum_prec
+    ?(capabilities = Ir.Backend_intf.no_codegen_capabilities) ~facts ~limits ~accum_prec
     ~static_indices (opt : LL.optimized) =
   match
-    seeded_settings ?min_reduction ?seed_gate ?min_serial ?reduction_sink ?seed_narrow ~backend
+    seeded_settings ?min_reduction ?seed_gate ?min_serial ?reduction_sink ?seed_narrow ~facts
       ~configured_gate:(fun () -> seeded_default_gate ~limits)
       ()
   with
@@ -6274,7 +6275,7 @@ let seeded_plan ?min_reduction ?seed_gate ?min_serial ?reduction_sink ?seed_narr
   | Some (gate, min_serial, sink_enabled, admit_narrow) -> (
       (* Hermetic, prelude included: deriving the plan must leave the caller's lowering as it
          was. *)
-      let opt, split = seeded_split ~backend ~min_serial ~static_indices (scratch_of opt) in
+      let opt, split = seeded_split ~facts ~min_serial ~static_indices (scratch_of opt) in
       let ranked_below = seeded_ranker ~capabilities ~limits ~accum_prec ~static_indices in
       match
         seeded_plan_on ~capabilities ~limits ~accum_prec ~admit_narrow ~static_indices ~gate
@@ -6302,11 +6303,11 @@ let seeded_plan ?min_reduction ?seed_gate ?min_serial ?reduction_sink ?seed_narr
 (* The seeded pipeline on [opt] (mutated as a compile's transform input is): the splits, the plan
    decided on the split routine, its replay. Shared by the untuned compile's transform and by
    [model_default], which starts from it (gh-ocannl-1253). *)
-let seeded_apply ?(on_choice = fun (_ : seeded_choice) -> ()) ~capabilities ~backend ~limits
+let seeded_apply ?(on_choice = fun (_ : seeded_choice) -> ()) ~capabilities ~facts ~limits
     ~accum_prec ~static_indices ~gate ~min_serial ~sink_enabled ~admit_narrow (opt : LL.optimized) :
     LL.optimized list =
   let t0 = Unix.gettimeofday () in
-  let opt, split = seeded_split ~backend ~min_serial ~static_indices opt in
+  let opt, split = seeded_split ~facts ~min_serial ~static_indices opt in
   on_choice
     (seeded_plan_choice
        {
@@ -6344,9 +6345,9 @@ let seeded_apply ?(on_choice = fun (_ : seeded_choice) -> ()) ~capabilities ~bac
 
 let seeded_transform ?min_reduction ?seed_gate ?min_serial ?reduction_sink ?seed_narrow
     ?(on_choice = fun (_ : seeded_choice) -> ()) ctx bindings =
-  let backend = Context.backend_name ctx in
+  let facts = Context.backend_facts ctx in
   match
-    seeded_settings ?min_reduction ?seed_gate ?min_serial ?reduction_sink ?seed_narrow ~backend
+    seeded_settings ?min_reduction ?seed_gate ?min_serial ?reduction_sink ?seed_narrow ~facts
       ~configured_gate:(fun () -> seeded_default_gate ~limits:(Context.hardware_limits ctx))
       ()
   with
@@ -6357,7 +6358,7 @@ let seeded_transform ?min_reduction ?seed_gate ?min_serial ?reduction_sink ?seed
       let accum_prec = capabilities.Ir.Backend_intf.accum_prec in
       let static_indices = Idx.bound_symbols bindings in
       Some
-        (seeded_apply ~on_choice ~capabilities ~backend ~limits ~accum_prec ~static_indices ~gate
+        (seeded_apply ~on_choice ~capabilities ~facts ~limits ~accum_prec ~static_indices ~gate
            ~min_serial ~sink_enabled ~admit_narrow)
 
 (* gh-ocannl-1479: the launch sweep's pinned sketch -- one whole-routine scalar blocktile leaf of
@@ -6365,7 +6366,7 @@ let seeded_transform ?min_reduction ?seed_gate ?min_serial ?reduction_sink ?seed
    runs the same geometry. Applied and validated as [model_default] applies a whole-routine pick. *)
 let pinned_sketch_transform ~select ?(on_leaf = fun (_ : sketch_params) -> ()) ctx bindings =
   let backend = Context.backend_name ctx in
-  if not (Sched.backend_is_gpu backend) then
+  if not (Ir.Backend_intf.binds_hardware_grid (Context.backend_facts ctx)) then
     raise
       (Utils.User_error
          (Printf.sprintf "Autotune.pinned_sketch_transform: backend %s has no GPU sketch family"
@@ -6427,9 +6428,9 @@ let seeded_default ?name ?min_reduction ?seed_gate ?min_serial ?reduction_sink ?
    program, against its own sketch there ({!model_seeded_anchors}, gh-ocannl-1477). [None] where the
    untuned compile is the plain default (another backend, seeding off). Shared by [model_default]
    and [model_explain]. *)
-let model_seeding ~backend ~limits =
-  if not (Sched.backend_is_gpu backend) then None
-  else seeded_settings ~backend ~configured_gate:(fun () -> seeded_default_gate ~limits) ()
+let model_seeding ~facts ~limits =
+  if not (Ir.Backend_intf.binds_hardware_grid facts) then None
+  else seeded_settings ~facts ~configured_gate:(fun () -> seeded_default_gate ~limits) ()
 
 (* Where the model starts from the seeded plan, the family is restricted to the numerics-preserving
    candidate set the seeding uses ({!scalar_blocktile}, at a site accumulating at its storage
@@ -6525,8 +6526,9 @@ let seeded_record_for_key ~(plan : Sched.segmentation) ~record (key : seg_key) =
         p)
 
 let model_default ?name ?report ctx comp bindings =
-  let backend = Context.backend_name ctx in
-  let is_gpu = Sched.backend_is_gpu backend and is_cpu = Sched.backend_is_cpu backend in
+  let facts = Context.backend_facts ctx in
+  let is_gpu = Ir.Backend_intf.binds_hardware_grid facts
+  and is_cpu = Ir.Backend_intf.renders_on_host_pool facts in
   let limits = Context.hardware_limits ctx in
   let accum_prec = (Context.codegen_capabilities ctx).Ir.Backend_intf.accum_prec in
   let static_indices = Idx.bound_symbols bindings in
@@ -6545,7 +6547,7 @@ let model_default ?name ?report ctx comp bindings =
   in
   if
     (Option.is_none peak_flops && Option.is_none peak_memory_bandwidth)
-    || not (Sched.automatic_schedule_active ~backend_name:backend)
+    || not (Sched.automatic_schedule_active ~facts)
   then (
     emit no_selection;
     Context.compile ?name ctx comp bindings)
@@ -6592,7 +6594,7 @@ let model_default ?name ?report ctx comp bindings =
        incumbent, and the action taken when no candidate strictly beats it (and its own sketch,
        [anchored] below). [None] where the untuned compile is the plain default (another backend,
        seeding off). *)
-    let seeding_here = lazy (model_seeding ~backend ~limits) in
+    let seeding_here = lazy (model_seeding ~facts ~limits) in
     (* Where the model starts from the seeded plan, the family is restricted to the
        numerics-preserving candidate set the seeding uses ({!scalar_blocktile}, at a site
        accumulating at its storage precision), so a model pick never changes a result the seeded
@@ -6684,7 +6686,7 @@ let model_default ?name ?report ctx comp bindings =
        pre-search's leaf scoring (hermetic lowerings of decided placement vectors). *)
     let seeded_segs ?on_choice seeding opt =
       let gate, min_serial, sink_enabled, admit_narrow = seeding in
-      seeded_apply ?on_choice ~capabilities ~backend ~limits ~accum_prec ~static_indices ~gate
+      seeded_apply ?on_choice ~capabilities ~facts ~limits ~accum_prec ~static_indices ~gate
         ~min_serial ~sink_enabled ~admit_narrow opt
     in
     (* Whether the applied seeded plan differs from the default pipeline, as [seeded_default] judges
@@ -6701,7 +6703,7 @@ let model_default ?name ?report ctx comp bindings =
       match Lazy.force seeding_here with
       | Some (_, min_serial, _, _) ->
           fst
-            (seeded_split ~backend ~min_serial ~static_indices
+            (seeded_split ~facts ~min_serial ~static_indices
                (if hermetic then scratch_of opt else opt))
       | None -> opt
     in
@@ -6721,8 +6723,7 @@ let model_default ?name ?report ctx comp bindings =
           | None ->
               ( "default",
                 `Default,
-                Sched.maybe_default_schedules ~backend_name:backend ~limits ~static_indices
-                  (scratch_of opt) )
+                Sched.maybe_default_schedules ~facts ~limits ~static_indices (scratch_of opt) )
         in
         (* gh-ocannl-1477: what the incumbent plan seeded, by first unit -- the anchors' source. *)
         let seeded_record = !seeded_record in
@@ -6831,9 +6832,7 @@ let model_default ?name ?report ctx comp bindings =
         ("default", None, `Default)
     in
     let transforms (opt : LL.optimized) : LL.optimized list =
-      let default_segs () =
-        Sched.maybe_default_schedules ~backend_name:backend ~limits ~static_indices opt
-      in
+      let default_segs () = Sched.maybe_default_schedules ~facts ~limits ~static_indices opt in
       let label, model_s, action = select opt in
       choice :=
         {
@@ -7107,8 +7106,9 @@ type segment_explain = {
 type explanation = { x_routine : (string * explain) list; x_segments : segment_explain list }
 
 let model_explain ?name ?(coalesced = false) ctx comp bindings =
-  let backend = Context.backend_name ctx in
-  let is_gpu = Sched.backend_is_gpu backend and is_cpu = Sched.backend_is_cpu backend in
+  let facts = Context.backend_facts ctx in
+  let is_gpu = Ir.Backend_intf.binds_hardware_grid facts
+  and is_cpu = Ir.Backend_intf.renders_on_host_pool facts in
   let limits = Context.hardware_limits ctx in
   let caps = Context.codegen_capabilities ctx in
   let accum_prec = caps.Ir.Backend_intf.accum_prec in
@@ -7175,21 +7175,20 @@ let model_explain ?name ?(coalesced = false) ctx comp bindings =
      it ranks nothing and compiles the default pipeline. *)
   if
     (Option.is_none peak_flops && Option.is_none peak_memory_bandwidth)
-    || not (Sched.automatic_schedule_active ~backend_name:backend)
+    || not (Sched.automatic_schedule_active ~facts)
   then
     {
       x_routine =
         [
           ( "default",
-            explain
-              (Sched.maybe_default_schedules ~backend_name:backend ~limits ~static_indices
-                 (scratch_of opt)) );
+            explain (Sched.maybe_default_schedules ~facts ~limits ~static_indices (scratch_of opt))
+          );
         ];
       x_segments = [];
     }
   else
     (* [model_default]'s incumbent and searched program, as it derives them. *)
-    let seeding = model_seeding ~backend ~limits in
+    let seeding = model_seeding ~facts ~limits in
     let record = ref [] in
     let incumbent_label, incumbent =
       match seeding with
@@ -7197,17 +7196,15 @@ let model_explain ?name ?(coalesced = false) ctx comp bindings =
           ( "seeded",
             seeded_apply
               ~on_choice:(fun c -> record := c.sd_seeded)
-              ~capabilities:caps ~backend ~limits ~accum_prec ~static_indices ~gate ~min_serial
+              ~capabilities:caps ~facts ~limits ~accum_prec ~static_indices ~gate ~min_serial
               ~sink_enabled ~admit_narrow (scratch_of opt) )
       | None ->
-          ( "default",
-            Sched.maybe_default_schedules ~backend_name:backend ~limits ~static_indices
-              (scratch_of opt) )
+          ("default", Sched.maybe_default_schedules ~facts ~limits ~static_indices (scratch_of opt))
     in
     let base =
       match seeding with
       | Some (_, min_serial, _, _) ->
-          fst (seeded_split ~backend ~min_serial ~static_indices (scratch_of opt))
+          fst (seeded_split ~facts ~min_serial ~static_indices (scratch_of opt))
       | None -> opt
     in
     (* The sketch leaves [model_default]'s family search visits on [prog] (a whole routine or one
@@ -7615,6 +7612,7 @@ let tune_in_stream_scope ~timing_state ~defer ~substituted ?name ?search ?beam_w
   in
   let static_indices = Idx.bound_symbols bindings in
   let backend = Context.backend_name ctx in
+  let facts = Context.backend_facts ctx in
   let device = Context.ordinal ctx in
   (* The tuned computation's name, for the calibration rows and log lines of every candidate
      (gh-ocannl-635). READ from [name] rather than re-derived (gh-ocannl-669): every compile below
@@ -7984,7 +7982,8 @@ let tune_in_stream_scope ~timing_state ~defer ~substituted ?name ?search ?beam_w
        #291); a compile that raises reports its own failure instead (gh-ocannl-550). *)
     finish base_report (fun () -> compile_untuned_default ()))
   else
-    let is_gpu = Sched.backend_is_gpu backend and is_cpu = Sched.backend_is_cpu backend in
+    let is_gpu = Ir.Backend_intf.binds_hardware_grid facts
+    and is_cpu = Ir.Backend_intf.renders_on_host_pool facts in
     (* With [timing_ctx], the search (candidate compiles and timing runs) happens against that
        scratch lineage's buffers, and only the winner is compiled from [ctx] — so the timing runs
        never mutate the caller's live state (parameters, accumulators). The scratch context must
@@ -7994,10 +7993,7 @@ let tune_in_stream_scope ~timing_state ~defer ~substituted ?name ?search ?beam_w
        elsewhere do not predict this device, and the winner would be cached under this backend's key
        without ever having been timed on it. *)
     Option.iter timing_ctx ~f:(fun tctx ->
-        if
-          (not (String.equal (Context.backend_name tctx) backend))
-          || Context.ordinal tctx <> Context.ordinal ctx
-        then
+        if (not (Context.same_backend tctx ctx)) || Context.ordinal tctx <> Context.ordinal ctx then
           invalid_arg
             (Printf.sprintf
                "Autotune.tune: timing_ctx must be on the same backend and device as the target \
@@ -8037,7 +8033,7 @@ let tune_in_stream_scope ~timing_state ~defer ~substituted ?name ?search ?beam_w
       Printf.sprintf "search=%b beam=%d rounds=%d repeats=%d keep=%h split_sites=%d blocks=%s|%s"
         search beam_width rounds repeats keep_fraction max_split_reduce_sites
         (String.concat ~sep:"," (List.map seed_block_sizes ~f:Int.to_string))
-        (search_shaping_identity ~backend ~limits)
+        (search_shaping_identity ~facts ~limits)
     in
     (* The accumulator residency the seeded [Privatize] tiles are minted at: the same resolution the
        backend's code generation widens the serial rendering by (gh-ocannl-1116). *)
@@ -8231,7 +8227,7 @@ let tune_in_stream_scope ~timing_state ~defer ~substituted ?name ?search ?beam_w
            (Option.bind !base_pristine ~f:(fun opt ->
                 let t0 = Unix.gettimeofday () in
                 let plan =
-                  seeded_plan ~capabilities ~backend ~limits ~accum_prec ~static_indices opt
+                  seeded_plan ~capabilities ~facts ~limits ~accum_prec ~static_indices opt
                 in
                 logf "seeded untuned plan derived in %.3f s: %s"
                   (Unix.gettimeofday () -. t0)
@@ -8282,12 +8278,12 @@ let tune_in_stream_scope ~timing_state ~defer ~substituted ?name ?search ?beam_w
           release_quietly ~what:"the baseline compile" bctx)
     in
     release_baseline_hook := release_baseline;
-    let codegen_tag = SC.codegen_tag ~backend ~limits ~capabilities () in
+    let codegen_tag = SC.codegen_tag ~facts ~limits ~capabilities () in
     let objective = timing_string timing in
     let key_of canon =
       SC.cache_key
         ~timing_identity:(Context.timing_identity search_ctx)
-        ~objective ~limits ~capabilities canon ~backend
+        ~objective ~limits ~capabilities ~facts canon ~backend
     in
     (* Whether a stored winner answers this call, for the base whose digest is [digest]. The
        numerics and codegen checks are belt-and-braces: the key already carries both tags
@@ -8765,8 +8761,7 @@ let tune_in_stream_scope ~timing_state ~defer ~substituted ?name ?search ?beam_w
                          #279). *)
                       (match (entry.SC.default_ms, entry.SC.default_fingerprint) with
                       | (Some _ as d), Some fp
-                        when String.equal fp
-                               (Sched.default_schedule_fingerprint ~backend_name:backend) ->
+                        when String.equal fp (Sched.default_schedule_fingerprint ~facts) ->
                           d
                       | _ -> None);
                     (* Not stored: a measurement of one seed, read only next to the search that
@@ -9338,12 +9333,10 @@ let tune_in_stream_scope ~timing_state ~defer ~substituted ?name ?search ?beam_w
            off, the untuned default is the whole-routine config-thresholds annotation, which no
            candidate reproduces (the whole-routine presets are ungated): no attribution, rather than
            labeling a differently-scheduled pipeline as the default. *)
-        let auto_sched = Sched.automatic_schedule_active ~backend_name:backend in
+        let auto_sched = Sched.automatic_schedule_active ~facts in
         (* A candidate label only when scheduling is active: inactive, the default is the base
            digest attributed right here, never a seed. *)
-        let default_candidate_label =
-          if auto_sched then default_seed_label ~backend_name:backend else None
-        in
+        let default_candidate_label = if auto_sched then default_seed_label ~facts else None in
         let timed_ms_by_digest = Hashtbl.create (module String) in
         if baseline_timed then Hashtbl.set timed_ms_by_digest ~key:base_digest ~data:baseline_ms;
         let default_seed_digest = ref (if auto_sched then None else Some base_digest) in
@@ -11282,7 +11275,7 @@ let tune_in_stream_scope ~timing_state ~defer ~substituted ?name ?search ?beam_w
                    default_ms = default_ms ();
                    default_fingerprint =
                      Option.map (default_ms ()) ~f:(fun _ ->
-                         Sched.default_schedule_fingerprint ~backend_name:backend);
+                         Sched.default_schedule_fingerprint ~facts);
                    best_steps =
                      Some
                        { SC.search_shape = Lazy.force search_shape; steps = List.rev !best_steps };

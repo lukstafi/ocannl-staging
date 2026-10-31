@@ -47,7 +47,9 @@ let () =
      seed; [None] would mean no candidate reproduces it, and the claims below would have no
      target. *)
   let default_seed_label =
-    Option.value (Autotune.default_seed_label ~backend_name) ~default:"<no default seed>"
+    Option.value
+      (Autotune.default_seed_label ~facts:(Context.backend_facts_of_name backend_name))
+      ~default:"<no default seed>"
   in
   let default_digest = ref None and seam_refused = ref 0 and report = ref None in
   (* The label of the latest attempt, the label and admission of a timed window the seam has not yet

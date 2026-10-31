@@ -202,9 +202,9 @@ let maybe_sink_zeros (lowered : Low_level.optimized) : Low_level.optimized =
    render as [memset], and so does a hand-built [?prelowered] routine (see [compile]). *)
 let elide_covered_zeros () = Utils.get_global_flag ~default:true ~arg_name:"gpu_elide_covered_zeros"
 
-let maybe_elide_zeros ~backend_name (segments : Low_level.optimized list) : Low_level.optimized list
-    =
-  if not (Schedule.backend_is_gpu backend_name && elide_covered_zeros ()) then segments
+let maybe_elide_zeros ~(facts : backend_facts) (segments : Low_level.optimized list) :
+    Low_level.optimized list =
+  if not (binds_hardware_grid facts && elide_covered_zeros ()) then segments
   else
     let elided =
       List.filter_map
@@ -329,13 +329,13 @@ let arena_items ~spans group =
 
    Every layout-relevant step is the shared helper the allocator pipeline also runs (the layout head
    above), so scorer/allocator agreement is structural rather than by comment. *)
-let score_footprint ~(backend_name : string) ~(limits : hardware_limits)
+let score_footprint ~(facts : backend_facts) ~(limits : hardware_limits)
     ~(static_indices : Indexing.static_symbol list) (lowered : Low_level.optimized) :
     Low_level.footprint =
   let lowered = maybe_sink_zeros lowered in
   let segments =
-    maybe_elide_zeros ~backend_name
-      (Schedule.maybe_default_schedules ~backend_name ~limits ~static_indices lowered)
+    maybe_elide_zeros ~facts
+      (Schedule.maybe_default_schedules ~facts ~limits ~static_indices lowered)
   in
   let spans = plan_alias_spans ~name:"<footprint>" ~limits ~lowered ~segments in
   (* Score the union store, as the compile's own fold-back does -- but on a copy: scoring must not
@@ -1067,14 +1067,14 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
                  pool-rendered Grid on CPU backends; the identity otherwise. Kernel fission may
                  split the routine into several kernels at cross-workgroup dependency edges; they
                  run back-to-back on the routine's stream (see [link]). *)
-              Schedule.maybe_default_schedules ~backend_name:Device.name ~limits
+              Schedule.maybe_default_schedules ~facts:Device.backend_facts ~limits
                 ~static_indices:(Indexing.bound_symbols bindings) lowered)
     in
     (* A [?prelowered] routine is hand-built IR compiled as written (the gh-ocannl-562 test seam):
        its zeros are what the test is about, so they are not elided. *)
     let lowereds =
       if Option.is_some prelowered then lowereds
-      else maybe_elide_zeros ~backend_name:Device.name lowereds
+      else maybe_elide_zeros ~facts:Device.backend_facts lowereds
     in
     record_segments lowereds;
     (* Per-compile launch-geometry trace (config [schedule_log_launches]): one line per segment with
@@ -1499,7 +1499,7 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
     let segments = List.map segments ~f:copy in
     (* As in [compile]: a [?prelowered] routine's zeros are compiled as written. *)
     let segments =
-      if prelowered then segments else maybe_elide_zeros ~backend_name:Device.name segments
+      if prelowered then segments else maybe_elide_zeros ~facts:Device.backend_facts segments
     in
     if List.is_empty segments then invalid_arg "Backends.link_delta: no segments";
     let alias_spans =
@@ -1553,7 +1553,7 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
     let lowered =
       if prelowered then lowered
       else
-        match maybe_elide_zeros ~backend_name:Device.name [ lowered ] with
+        match maybe_elide_zeros ~facts:Device.backend_facts [ lowered ] with
         | [ single ] -> single
         | _ -> lowered
     in
@@ -1563,7 +1563,7 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
       Hashtbl.fold lowered.Low_level.traced_store
         ~init:(Set.empty (module Tn))
         ~f:(fun ~key ~data acc ->
-          if Schedule.may_keep_off_device ~backend_name:Device.name ~limits plc key data then
+          if Schedule.may_keep_off_device ~facts:Device.backend_facts ~limits plc key data then
             Set.add acc key
           else acc)
     in
@@ -1938,19 +1938,29 @@ module Metal_b : Backend = Raise_backend (With_device_init_deadline (
 
 type backend = Cc | Multidev_cc | Cuda | Hip | Metal [@@deriving sexp, equal, enumerate]
 
+(* The one place a backend name is tested (gh-ocannl-1723): parsing the [backend] setting. Every
+   compiler decision asks the backend's {!Backend_intf.backend_facts} instead. "sync_cc" and
+   "multicore_cc" are accepted as deprecated aliases of the renamed backends. *)
+let accepted_names =
+  [
+    ("cc", Cc);
+    ("sync_cc", Cc);
+    ("multidev_cc", Multidev_cc);
+    ("multicore_cc", Multidev_cc);
+    ("cuda", Cuda);
+    ("hip", Hip);
+    ("metal", Metal);
+  ]
+
 let get_backend ?backend_name () =
-  match
+  let name =
     Option.value_or_thunk backend_name ~default:(fun () ->
         Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
     |> String.lowercase
-  with
-  (* "sync_cc" and "multicore_cc" are accepted as deprecated aliases of the renamed backends. *)
-  | "cc" | "sync_cc" -> Cc
-  | "multidev_cc" | "multicore_cc" -> Multidev_cc
-  | "cuda" -> Cuda
-  | "hip" -> Hip
-  | "metal" -> Metal
-  | backend -> invalid_arg [%string "Backends.get_backend: unknown backend %{backend}"]
+  in
+  match List.Assoc.find accepted_names ~equal:String.equal name with
+  | Some backend -> backend
+  | None -> invalid_arg [%string "Backends.get_backend: unknown backend %{name}"]
 
 let backend_name = function
   | Cc -> "cc"
@@ -2049,6 +2059,10 @@ let backend_module (b : backend) : (module Backend) =
       (module B)
 
 let wrapped_backend w = match unwrap w with Unwrapped (i, _) -> i.bi_backend
+
+let backend_facts (b : backend) : backend_facts =
+  let (module B) = backend_module b in
+  B.backend_facts
 
 let make_context ?(ordinal = 0) backend =
   match impl_of_backend backend with

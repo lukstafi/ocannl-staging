@@ -2646,22 +2646,23 @@ let gate_census content =
 
     A value fixed by the run's configuration, not computed by the test: what a configuration reader
     returns ({!configuration_readers}: [Utils.get_global_arg], [Utils.get_global_flag],
-    [Sys.getenv]/[getenv_opt], [Context.backend_name], [Context.hardware_limits] -- an applied path
-    ending in one of these names, or an unqualified one the source does not bind), a value of [Sys]
-    ([Sys.win32], [Sys.os_type], [Sys.big_endian], [Sys.argv], ...), the settings record
-    [Utils.settings] (its fields being the configuration), and what is computed from those and
-    constants alone: an application of a function from outside the source to run-constant and
-    constant arguments, at least one of them run-constant ([backend_is_cpu backend_name],
-    [String.equal backend_name "metal"], [not on_gpu]); an [if], [match] or [try] over such parts; a
-    field, a [lazy] or a constructor of one, a field of a record the source writes out being that
-    field's value; a name bound to one by [let], anywhere in the source, a qualified path into a
-    module of the source ([Gates.on_cpu]) being that module's binding of the name -- or, for a cell
-    the source assigns into with [:=], to a run-constant value in its initializer or in any write,
-    whatever their order. A constant is a literal, a constructor of constants, or a library value.
+    [Sys.getenv]/[getenv_opt], [Context.backend_name], [Context.hardware_limits],
+    [Context.backend_facts] -- an applied path ending in one of these names, or an unqualified one
+    the source does not bind), a value of [Sys] ([Sys.win32], [Sys.os_type], [Sys.big_endian],
+    [Sys.argv], ...), the settings record [Utils.settings] (its fields being the configuration), and
+    what is computed from those and constants alone: an application of a function from outside the
+    source to run-constant and constant arguments, at least one of them run-constant
+    ([Context.backend_facts_of_name backend_name], [String.equal backend_name "metal"],
+    [not on_gpu]); an [if], [match] or [try] over such parts; a field, a [lazy] or a constructor of
+    one, a field of a record the source writes out being that field's value; a name bound to one by
+    [let], anywhere in the source, a qualified path into a module of the source ([Gates.on_cpu])
+    being that module's binding of the name -- or, for a cell the source assigns into with [:=], to
+    a run-constant value in its initializer or in any write, whatever their order. A constant is a
+    literal, a constructor of constants, or a library value.
 
-    So [on_cpu], [on_gpu], [is_metal], [seeds_here = Autotune.seeded_default_backend backend_name]
-    and a [lazy] hardware probe are gates; a value computed from the program under test -- a census,
-    a readback, a query's answer, a seed list -- is not, though it read the backend along the way,
+    So [on_cpu], [on_gpu], [is_metal], [seeds_here = Autotune.seeded_default_backend facts] and a
+    [lazy] hardware probe are gates; a value computed from the program under test -- a census, a
+    readback, a query's answer, a seed list -- is not, though it read the backend along the way,
     because it also reads something that is not run-constant (a parameter, a pattern variable, a
     function value, a call over constants alone such as [Context.auto ()]). The distinction is the
     one [Verdict]'s gates draw: the backend, an advertised capability, the configuration.
@@ -2714,6 +2715,7 @@ let configuration_readers =
     "backend_name";
     "hardware_limits";
     "codegen_capabilities";
+    "backend_facts";
     "static_properties";
     "timing_identity";
   ]

@@ -2325,14 +2325,6 @@ type routine_name_probe = {
     of its kernel definitions, its runtime compiler under the options its kernels compile with, and
     the routine-name mangling with the tables behind it. *)
 
-(** [node_ident_prefix_for_backend backend_name] is the {!C_syntax_config.node_ident_prefix} of the
-    named backend's dialect: ["t_"] for the GPU dialects ([metal], [cuda], [hip]), whose vendor
-    headers declare global types and macros outside the reserved namespace, and [""] for the C
-    backends (gh-ocannl-1338). The configs take their prefix from here, so a test that pins a node's
-    emitted identifier derives it from the same place rather than restating it. *)
-let node_ident_prefix_for_backend backend_name =
-  match String.lowercase backend_name with "metal" | "cuda" | "hip" -> "t_" | _ -> ""
-
 (** Every [<prefix><scalar><width>] spelling: the vector-type families GPU dialects declare as
     global type names, which a kernel definition of the same name collides with as "redefinition as
     a different kind of symbol". A generator rather than a list because the families are a grammar

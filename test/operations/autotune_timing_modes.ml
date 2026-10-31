@@ -208,10 +208,10 @@ let confirmation_cases =
 let () =
   Stdio.printf "== queued batch depth ==\n";
   Verdict.p_all "CUDA and HIP use the raised queue-depth cap" [ "cuda"; "hip" ] ~f:(fun backend ->
-      Autotune.queue_depth_cap_for_backend backend = 2048);
+      Autotune.queue_depth_cap_for_backend (Context.backend_facts_of_name backend) = 2048);
   Verdict.p_all "cc and Metal retain the historical queue-depth cap"
     [ "cc"; "multidev_cc"; "metal" ] ~f:(fun backend ->
-      Autotune.queue_depth_cap_for_backend backend = 200);
+      Autotune.queue_depth_cap_for_backend (Context.backend_facts_of_name backend) = 200);
   Verdict.p_all "every calibration estimate gets the depth the policy owes it" depth_cases
     ~f:(fun (what, est_ms, want) ->
       let got =
@@ -472,7 +472,7 @@ let describe what c =
    still owe a batch. Dyadic nearby costs isolate that boundary from device jitter. *)
 let () =
   Stdio.printf "\n== a fitted single crossing keeps supported queued work ==\n";
-  let cap = Autotune.queue_depth_cap_for_backend "hip" in
+  let cap = Autotune.queue_depth_cap_for_backend Ir.Backend_intf.hip_facts in
   let walls ~single ~fixed ~marginal _nth depth =
     if depth = 1 then single else fixed +. (marginal *. Float.of_int depth)
   in
@@ -600,8 +600,8 @@ let () =
     (not (cacheable (fixed_dominated :: supported)))
 
 let () =
-  let gpu_cap = Autotune.queue_depth_cap_for_backend "hip"
-  and cc_cap = Autotune.queue_depth_cap_for_backend "cc" in
+  let gpu_cap = Autotune.queue_depth_cap_for_backend Ir.Backend_intf.hip_facts
+  and cc_cap = Autotune.queue_depth_cap_for_backend Ir.Backend_intf.cc_facts in
   (* 16 ms a launch: over the 10 ms batch target, so there is nothing to amortize. *)
   let slow ?repeats ?walls timing cap =
     synthetic_call ?repeats ?walls ~timing ~cap ~fixed_ms:0. ~launch_ms:16. ()
@@ -677,7 +677,7 @@ let () =
    still batches. *)
 let () =
   Stdio.printf "\n== singles far over the target take no depth-2 probe ==\n";
-  let gpu_cap = Autotune.queue_depth_cap_for_backend "hip" in
+  let gpu_cap = Autotune.queue_depth_cap_for_backend Ir.Backend_intf.hip_facts in
   let at_ratio = Autotune.slow_singles_ratio *. Autotune.queued_batch_ms in
   let settle c =
     match c.decisions with [ (d : Autotune.batch_decision) ] -> Some d.settle | _ -> None
@@ -730,8 +730,9 @@ let () =
   let call ~backend ~timing ~persistent =
     let timed_batches = ref 0 in
     synthetic_call ~timing
-      ~cap:(Autotune.queue_depth_cap_for_backend backend)
-      ~retry_contended:(Autotune.retry_contended_window_for_backend backend)
+      ~cap:(Autotune.queue_depth_cap_for_backend (Context.backend_facts_of_name backend))
+      ~retry_contended:
+        (Autotune.retry_contended_window_for_backend (Context.backend_facts_of_name backend))
       ~fixed_ms:0. ~launch_ms:1.
       ~walls:(fun _ d ->
         if d = 1 && Poly.equal timing Autotune.Queued then 1.
@@ -778,7 +779,7 @@ let () =
      resume the very window it just refused. *)
   let slow =
     synthetic_call ~timing:Autotune.Queued
-      ~cap:(Autotune.queue_depth_cap_for_backend "metal")
+      ~cap:(Autotune.queue_depth_cap_for_backend Ir.Backend_intf.metal_facts)
       ~retry_contended:true ~fixed_ms:0. ~launch_ms:16.
       ~walls:(fun nth _ -> if nth <= 16 && nth % 4 <> 0 then 48. else 16.)
       ()
@@ -790,7 +791,7 @@ let () =
     && Option.is_some (Autotune.admitted_timing_ms slow.reading));
   let quiet =
     synthetic_call ~timing:Autotune.Queued
-      ~cap:(Autotune.queue_depth_cap_for_backend "metal")
+      ~cap:(Autotune.queue_depth_cap_for_backend Ir.Backend_intf.metal_facts)
       ~retry_contended:true ~fixed_ms:0. ~launch_ms:1. ()
   in
   p_all "an admitted Metal window gets no retry or extra dispatches" [ quiet ] ~f:(fun c ->
@@ -799,7 +800,7 @@ let () =
       && c.all_launches = c.calibration_launches + (c.settled_depth * c.window_batches));
   let unresolved_clock =
     synthetic_call ~timing:Autotune.Queued
-      ~cap:(Autotune.queue_depth_cap_for_backend "metal")
+      ~cap:(Autotune.queue_depth_cap_for_backend Ir.Backend_intf.metal_facts)
       ~retry_contended:true ~fixed_ms:0. ~launch_ms:1.
       ~walls:(fun nth d -> if d > 1 && nth % 4 = 0 then 0. else Float.of_int d)
       ()
@@ -849,7 +850,7 @@ let () =
    gh-ocannl-1098 a rescue probe below its shallowest over-target batch times it (below). *)
 let () =
   Stdio.printf "\n== the no-verdict fallback is wall-bounded ==\n";
-  let gpu_cap = Autotune.queue_depth_cap_for_backend "hip" in
+  let gpu_cap = Autotune.queue_depth_cap_for_backend Ir.Backend_intf.hip_facts in
   let unresolved what ?(fixed_ms = 0.) ~launch_ms clean =
     let c =
       synthetic_call ~timing:Autotune.Queued ~cap:gpu_cap ~fixed_ms ~launch_ms
@@ -1746,7 +1747,10 @@ let () =
   let limits = Context.hardware_limits ctx and backend = Context.backend_name ctx in
   let capabilities = Context.codegen_capabilities ctx in
   let key objective =
-    Option.value_exn (SC.cache_key ~timing_identity ~objective ~limits ~capabilities canon ~backend)
+    Option.value_exn
+      (SC.cache_key
+         ~facts:(Context.backend_facts_of_name backend)
+         ~timing_identity ~objective ~limits ~capabilities canon ~backend)
   in
   p "the cache key is stable within one objective" (String.equal (key "queued") (key "queued"));
   p "the cache key separates the two timing objectives"
@@ -1755,32 +1759,43 @@ let () =
     ~f:(fun backend ->
       String.is_suffix
         (Option.value_exn
-           (SC.cache_key ~timing_identity ~objective:"queued" ~limits ~capabilities canon ~backend))
+           (SC.cache_key
+              ~facts:(Context.backend_facts_of_name backend)
+              ~timing_identity ~objective:"queued" ~limits ~capabilities canon ~backend))
         ~suffix:"-tqueued-v3");
   p_all "CUDA and HIP queued keys cannot replay the prior timing-policy generation"
     [ "cuda"; "hip" ] ~f:(fun backend ->
       let key objective =
-        SC.cache_key ~timing_identity ~objective ~limits ~capabilities canon ~backend
+        SC.cache_key
+          ~facts:(Context.backend_facts_of_name backend)
+          ~timing_identity ~objective ~limits ~capabilities canon ~backend
       in
       not (Option.equal String.equal (key "queued") (key "queued-v2")));
   p_all "isolated keys retain their unchanged timing generation" [ "cuda"; "hip"; "cc"; "metal" ]
     ~f:(fun backend ->
       String.is_suffix
         (Option.value_exn
-           (SC.cache_key ~timing_identity ~objective:"isolated" ~limits ~capabilities canon ~backend))
+           (SC.cache_key
+              ~facts:(Context.backend_facts_of_name backend)
+              ~timing_identity ~objective:"isolated" ~limits ~capabilities canon ~backend))
         ~suffix:"-tisolated");
   Verdict.p_all "cc and Metal queued keys retain their unchanged timing generation"
     [ "cc"; "multidev_cc"; "metal" ] ~f:(fun backend ->
       String.is_suffix
         (Option.value_exn
-           (SC.cache_key ~timing_identity ~objective:"queued" ~limits ~capabilities canon ~backend))
+           (SC.cache_key
+              ~facts:(Context.backend_facts_of_name backend)
+              ~timing_identity ~objective:"queued" ~limits ~capabilities canon ~backend))
         ~suffix:"-tqueued");
   (* Derived, not restated: a caller that resolved no mode of its own must key exactly as one that
      resolved the configured mode, or a test's hand-built entry would sit under a key no search
      looks up. *)
   p "an omitted objective keys as the configured one"
     (String.equal
-       (Option.value_exn (SC.cache_key ~timing_identity ~limits ~capabilities canon ~backend))
+       (Option.value_exn
+          (SC.cache_key
+             ~facts:(Context.backend_facts_of_name backend)
+             ~timing_identity ~limits ~capabilities canon ~backend))
        (key (SC.objective_tag ())));
   (* The tag a key carries is the mode's own spelling, so a report's objective and the entry that
      stored its times name the same thing. *)

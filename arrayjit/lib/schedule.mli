@@ -1028,30 +1028,12 @@ val log_launches : bool Lazy.t
     its launch grid/block dims and statement count — for diffing what two compiles of nominally
     identical code actually emit. *)
 
-val backend_is_gpu : string -> bool
-(** Whether the named backend binds hardware indices (currently: name contains ["cuda"], ["hip"] or
-    ["metal"]).
-
-    This and {!backend_is_cpu} are what a test asks to decide whether it may evaluate a GPU-only or
-    CPU-only leg, so [test/operations/marker_backend_vocabulary] holds them to covering
-    [Backends.all_of_backend] by exactly one each: a backend neither knows would read as CPU at
-    every caller phrased [if backend_is_gpu ... else ...]. *)
-
-val backend_is_cpu : string -> bool
-(** Whether the named backend renders [Grid] loops on the CPU pool (currently: name contains
-    ["cc"]). *)
-
-val backend_seeds_untuned_default : string -> bool
-(** Whether the untuned compile seeds its plan on the named backend ([Autotune.seeded_default]):
-    CUDA and HIP. Here rather than in [Autotune] so that {!Schedule_cache.codegen_tag} can scope the
-    seeded plan's numerics gate by it (gh-ocannl-1405). *)
-
 val code_footprint : Low_level.t -> Set.M(Tn).t * bool
 (** All tensor nodes the code references (scope ids' backing nodes included) — the set a fission
     segment's traced store is filtered to — and whether it reads the merge buffer. *)
 
 val may_keep_off_device :
-  backend_name:string ->
+  facts:Backend_intf.backend_facts ->
   limits:Backend_intf.hardware_limits ->
   Tn.Placements.t ->
   Tn.t ->
@@ -1060,20 +1042,21 @@ val may_keep_off_device :
 (** gh-ocannl-1554: whether some schedule can keep this existing node off the device, the premise on
     which the device-memory floor ([Backends.link_floor]) leaves it out. The one schedule op that
     turns an existing node [Local] is {!constructor-Fuse_epilogue}'s shared placement, of a fusion
-    target (written, read by the fused tail) not {!settled_on_device}; it exists only on GPU
-    backends, and charges the node's whole size to the workgroup memory that
-    {!check_hardware_limits_classified} holds to [max_workgroup_memory_bytes] for every kernel a
-    compile emits, so a node larger than that limit cannot leave the device. [None] as the limit
-    bounds nothing. *)
+    target (written, read by the fused tail) not {!settled_on_device}; it exists only where the
+    backend states [workgroup_shared_placement], and charges the node's whole size to the workgroup
+    memory that {!check_hardware_limits_classified} holds to [max_workgroup_memory_bytes] for every
+    kernel a compile emits, so a node larger than that limit cannot leave the device. [None] as the
+    limit bounds nothing. *)
 
-val search_shaping_key_read : backend_name:string -> string -> bool
-(** Whether a search on [backend_name] can read the default pipeline's configuration key [key]
-    (gh-ocannl-1331): the GPU-only keys ([automatic_gpu_schedule], [gpu_schedule_*], the lane modes,
-    [gpu_fission_keep_mapping]) exactly where {!backend_is_gpu} holds, the CPU-only ones
-    ([automatic_cpu_schedule], [cpu_schedule_min_work]) where {!backend_is_cpu} does, and any other
-    key everywhere. [Autotune.search_shaping_key_read] adds the seeded plan's keys. *)
+val search_shaping_key_read : facts:Backend_intf.backend_facts -> string -> bool
+(** Whether a search on a backend with [facts] can read the default pipeline's configuration key
+    [key] (gh-ocannl-1331): the GPU-only keys ([automatic_gpu_schedule], [gpu_schedule_*], the lane
+    modes, [gpu_fission_keep_mapping]) exactly where {!Backend_intf.binds_hardware_grid} holds, the
+    CPU-only ones ([automatic_cpu_schedule], [cpu_schedule_min_work]) where
+    {!Backend_intf.renders_on_host_pool} does, and any other key everywhere.
+    [Autotune.search_shaping_key_read] adds the seeded plan's keys. *)
 
-val automatic_schedule_active : backend_name:string -> bool
+val automatic_schedule_active : facts:Backend_intf.backend_facts -> bool
 (** Whether {!maybe_default_schedule} (and {!maybe_default_schedules}) would apply a default preset
     on this backend rather than the identity: the backend binds Grid loops, the corresponding config
     gate ([automatic_gpu_schedule] / [automatic_cpu_schedule]) is on, and runtime kernel logging
@@ -1085,7 +1068,7 @@ val default_pipeline_fissions : unit -> bool
     default pipeline fissions into per-segment kernels (subject to {!automatic_schedule_active}), or
     applies the whole-routine {!maybe_default_schedule} instead. *)
 
-val default_schedule_fingerprint : backend_name:string -> string
+val default_schedule_fingerprint : facts:Backend_intf.backend_facts -> string
 (** A stable summary of the policy and configuration that shape the untuned default pipeline on this
     backend: the {!automatic_schedule_active} gate (["inactive"] when it is off — the untuned
     default is then the unscheduled serial form), the policy's version tags (bumped when a change
@@ -1096,7 +1079,7 @@ val default_schedule_fingerprint : backend_name:string -> string
     not cover per-device hardware limits — cache consumers already key per backend. *)
 
 val maybe_default_schedule :
-  backend_name:string ->
+  facts:Backend_intf.backend_facts ->
   ?limits:Backend_intf.hardware_limits ->
   static_indices:Indexing.static_symbol list ->
   Low_level.optimized ->
@@ -1284,7 +1267,7 @@ val fission_segmented :
     restored first. *)
 
 val maybe_default_schedules :
-  backend_name:string ->
+  facts:Backend_intf.backend_facts ->
   ?limits:Backend_intf.hardware_limits ->
   static_indices:Indexing.static_symbol list ->
   Low_level.optimized ->

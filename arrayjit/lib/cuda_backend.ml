@@ -1049,6 +1049,8 @@ end = struct
       | _ -> ("(" ^ typ_of_prec to_ ^ ")(", ")")
   end
 
+  let backend_facts = Backend_intf.cuda_facts
+
   let codegen_capabilities () =
     let module Config = Cuda_syntax_config (struct
       let procs = [||]

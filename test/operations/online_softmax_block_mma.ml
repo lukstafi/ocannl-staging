@@ -130,7 +130,9 @@ let forward ?(model = model) ?lowered_transform ~name ~on ~block ~seq ~d_k () =
 (* The default pipeline under [limits], as [Schedule.maybe_default_schedules] runs it (the fission
    seam, locals promoted on a GPU, the GPU preset and the schedule-aware merge rule read against
    those limits), and whether any segment's schedule carries a [Fold_mma]. *)
-let pipeline ?(gpu = Sched.backend_is_gpu backend_name) ~limits () =
+let pipeline
+    ?(gpu = Ir.Backend_intf.binds_hardware_grid (Context.backend_facts_of_name backend_name))
+    ~limits () =
   let emitted = ref false in
   let transform (o : LL.optimized) =
     let preset seg = if gpu then Sched.default_gpu ~limits seg else Sched.default_cpu seg in

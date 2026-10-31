@@ -85,7 +85,7 @@ let apply schedule opt =
    precisions, so where a tensor tile is advertised a vanished tensorized seed fails rather than
    skipping. *)
 let folded_seed_claims ~tag ~what ~pre ~out ~seed ~want ~matches =
-  let on_gpu = Sched.backend_is_gpu backend_name in
+  let on_gpu = Ir.Backend_intf.binds_hardware_grid (Context.backend_facts_of_name backend_name) in
   let limits = Context.hardware_limits (Context.auto ()) in
   let site = Option.value_exn (Autotune.detect_matmul pre.LL.llc) in
   let capability =
@@ -187,7 +187,7 @@ let () =
   p_all2 "private qkv matches the materialized run with discriminating operands" got want
     ~f:Float.equal;
   let staged_label = "staged tiled qkv with zero forwarded matches the materialized run" in
-  if Sched.backend_is_gpu backend_name then begin
+  if Ir.Backend_intf.binds_hardware_grid (Context.backend_facts_of_name backend_name) then begin
     let staged =
       Autotune.sketch_seed_params ~is_gpu:true ~is_cpu:false
         ~limits:Ir.Backend_intf.no_hardware_limits pre
@@ -551,7 +551,7 @@ let () =
     (synthetic_seeds Ir.Backend_intf.no_hardware_limits) ~f:(fun q -> q.Autotune.sk_mma);
   (* Off a GPU backend these claims are skipped by name, in the order this one sequence makes them
      (gh-ocannl-1703). *)
-  let on_gpu = Sched.backend_is_gpu backend_name in
+  let on_gpu = Ir.Backend_intf.binds_hardware_grid (Context.backend_facts_of_name backend_name) in
   let leg = Verdict.leg ~when_:on_gpu ~on:backend_name () in
   let folded = lazy (folded_per_cell (snd (Ll_test.tuner_segments opt))) in
   in_leg ~leg

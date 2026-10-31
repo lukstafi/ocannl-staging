@@ -41,8 +41,8 @@ open Verdict.Claims
 let () = Utils.settings.output_debug_files_in_build_directory <- true
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 let () = Generated.init ~backend_name
-let is_gpu = Sched.backend_is_gpu backend_name
-let is_cpu = Sched.backend_is_cpu backend_name
+let is_gpu = Ir.Backend_intf.binds_hardware_grid (Context.backend_facts_of_name backend_name)
+let is_cpu = Ir.Backend_intf.renders_on_host_pool (Context.backend_facts_of_name backend_name)
 let cache_dir = "autotune_cache_fission_replay"
 
 (* The dune sandbox persists across runs: a previous run's entry would turn the first lookup into a
@@ -150,6 +150,7 @@ let fission rut ?arity_cuts ?fold_zeros ?keep_mapping ?segmentation () =
 let cache_key rut =
   Cache_plant.key
     ~backend:(Context.backend_name rut.base_ctx)
+    ~facts:(Context.backend_facts rut.base_ctx)
     ~timing_identity:(Context.timing_identity rut.base_ctx)
     ~limits:rut.limits ~capabilities:rut.caps rut.base_canon
 
@@ -158,6 +159,7 @@ let store ~cache_dir rut segments =
   ignore
     (Cache_plant.plant ~segments ~cache_dir
        ~backend:(Context.backend_name rut.base_ctx)
+       ~facts:(Context.backend_facts rut.base_ctx)
        ~timing_identity:(Context.timing_identity rut.base_ctx)
        ~limits:rut.limits ~capabilities:rut.caps rut.base_canon
       : SC.cache_io list)

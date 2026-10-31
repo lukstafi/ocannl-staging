@@ -9263,29 +9263,20 @@ let fission_default ?promote_locals ?keep_mapping ~preset ~zero_sched ~static_in
 let automatic_gpu_schedule = lazy (Utils.registered_flag ~arg_name:"automatic_gpu_schedule")
 let automatic_cpu_schedule = lazy (Utils.registered_flag ~arg_name:"automatic_cpu_schedule")
 
-let backend_is_gpu name =
-  String.is_substring name ~substring:"cuda"
-  || String.is_substring name ~substring:"hip"
-  || String.is_substring name ~substring:"metal"
-
-let backend_is_cpu name = String.is_substring name ~substring:"cc"
-
-let backend_seeds_untuned_default name =
-  String.is_substring name ~substring:"cuda" || String.is_substring name ~substring:"hip"
-
 (* gh-ocannl-1554: whether some schedule can keep the existing node [tn] off the device -- the
    premise the device-memory floor ([Backends.link_floor]) leaves such a node out on. The only
    schedule op that turns an existing node's placement [Local] is the shared epilogue placement of
    [apply_fuse_epilogue] (every other [Local] update in this module is of a node the op minted), and
    it does so for a fusion target -- written by the reduction, read by the fused tail -- that is not
-   [settled_on_device]. Shared placement exists only on the GPU backends (CPU codegen rejects a
-   non-empty [workgroup_shared]), and the target is then charged its whole [size_in_bytes] by
-   [workgroup_memory_bytes], which [check_hardware_limits_classified] holds to
-   [max_workgroup_memory_bytes] for every kernel a compile emits: a larger node cannot leave the
-   device in any kernel the hardware gate admits. An unknown limit bounds nothing. *)
-let may_keep_off_device ~backend_name ~(limits : Backend_intf.hardware_limits) plc tn
-    (node : Low_level.traced_array) =
-  backend_is_gpu backend_name
+   [settled_on_device]. Shared placement exists only where the backend states
+   [workgroup_shared_placement] (CPU codegen rejects a non-empty [workgroup_shared]), and the target
+   is then charged its whole [size_in_bytes] by [workgroup_memory_bytes], which
+   [check_hardware_limits_classified] holds to [max_workgroup_memory_bytes] for every kernel a
+   compile emits: a larger node cannot leave the device in any kernel the hardware gate admits. An
+   unknown limit bounds nothing. *)
+let may_keep_off_device ~(facts : Backend_intf.backend_facts)
+    ~(limits : Backend_intf.hardware_limits) plc tn (node : Low_level.traced_array) =
+  facts.Backend_intf.workgroup_shared_placement
   && (not (settled_on_device plc tn))
   && node.Low_level.has_assignment && node.Low_level.read_by_other
   && Option.for_all limits.Backend_intf.max_workgroup_memory_bytes ~f:(fun limit ->
@@ -9294,17 +9285,17 @@ let may_keep_off_device ~backend_name ~(limits : Backend_intf.hardware_limits) p
 
 (* gh-ocannl-1331: the default pipeline's [Search_shaping] keys that only one kind of backend reads
    -- the GPU presets, lane geometry and fission mapping, and the CPU preset's threshold -- each
-   through the predicate its read sites are gated on ([backend_is_gpu] / [backend_is_cpu], or the
-   [is_gpu] / [is_cpu] the tuner derives from them). Any other key is read wherever a search runs:
-   an omission over-keys, which costs a warm cache its records but never replays one across
-   regimes. *)
-let search_shaping_key_read ~backend_name key =
+   through the predicate its read sites are gated on ([Backend_intf.binds_hardware_grid] /
+   [renders_on_host_pool], or the [is_gpu] / [is_cpu] the tuner derives from them). Any other key is
+   read wherever a search runs: an omission over-keys, which costs a warm cache its records but
+   never replays one across regimes. *)
+let search_shaping_key_read ~facts key =
   match key with
   | "automatic_gpu_schedule" | "gpu_fission_keep_mapping" | "gpu_schedule_block_size"
   | "gpu_schedule_min_parallel" | "gpu_schedule_workgroup_fill" | "gpu_lane_preamble_reduction"
   | "gpu_lane_all_reduce_simdgroups" | "gpu_serial_lanes" ->
-      backend_is_gpu backend_name
-  | "automatic_cpu_schedule" | "cpu_schedule_min_work" -> backend_is_cpu backend_name
+      Backend_intf.binds_hardware_grid facts
+  | "automatic_cpu_schedule" | "cpu_schedule_min_work" -> Backend_intf.renders_on_host_pool facts
   | _ -> true
 
 let schedule_fission = lazy (Utils.registered_flag ~arg_name:"schedule_fission")
@@ -9312,18 +9303,18 @@ let schedule_fission = lazy (Utils.registered_flag ~arg_name:"schedule_fission")
 (* Per-compile launch-geometry trace on stderr; consumed by backend [compile]. *)
 let log_launches = lazy (Utils.get_global_flag ~default:false ~arg_name:"schedule_log_launches")
 
-let automatic_schedule_active ~backend_name =
+let automatic_schedule_active ~facts =
   (not (Utils.debug_log_from_routines ()))
-  && ((backend_is_gpu backend_name && Lazy.force automatic_gpu_schedule)
-     || (backend_is_cpu backend_name && Lazy.force automatic_cpu_schedule))
+  && ((Backend_intf.binds_hardware_grid facts && Lazy.force automatic_gpu_schedule)
+     || (Backend_intf.renders_on_host_pool facts && Lazy.force automatic_cpu_schedule))
 
 let default_pipeline_fissions () = Lazy.force schedule_fission
 
-let default_schedule_fingerprint ~backend_name =
-  if not (automatic_schedule_active ~backend_name) then "inactive"
+let default_schedule_fingerprint ~facts =
+  if not (automatic_schedule_active ~facts) then "inactive"
   else
     let fission = Lazy.force schedule_fission in
-    if backend_is_gpu backend_name then
+    if Backend_intf.binds_hardware_grid facts then
       let bs = Utils.registered_int ~arg_name:"gpu_schedule_block_size" in
       let mp = Utils.registered_int ~arg_name:"gpu_schedule_min_parallel" in
       let fill = gpu_schedule_workgroup_fill () in
@@ -9370,22 +9361,22 @@ let default_schedule_fingerprint ~backend_name =
       [%string
         "cpu:policy=scratch-chains-v1+fork-join-v1:fission=%{fission#Bool}:min_work=%{mw#Int}"]
 
-let maybe_default_schedule ~backend_name ?(limits = Backend_intf.no_hardware_limits) ~static_indices
+let maybe_default_schedule ~facts ?(limits = Backend_intf.no_hardware_limits) ~static_indices
     (opt : Low_level.optimized) : Low_level.optimized =
   (* [automatic_schedule_active] keeps logged runs serial: runtime kernel logging is
      line-interleaved under parallel execution, and serial logs stay deterministic and readable. *)
-  if not (automatic_schedule_active ~backend_name) then opt
-  else if backend_is_gpu backend_name then
+  if not (automatic_schedule_active ~facts) then opt
+  else if Backend_intf.binds_hardware_grid facts then
     apply_classified ~static_indices (default_gpu ~limits opt) opt
   else apply_classified ~static_indices (default_cpu opt) opt
 
-let maybe_default_schedules ~backend_name ?(limits = Backend_intf.no_hardware_limits)
-    ~static_indices (opt : Low_level.optimized) : Low_level.optimized list =
-  if not (automatic_schedule_active ~backend_name) then [ opt ]
+let maybe_default_schedules ~facts ?(limits = Backend_intf.no_hardware_limits) ~static_indices
+    (opt : Low_level.optimized) : Low_level.optimized list =
+  if not (automatic_schedule_active ~facts) then [ opt ]
   else
-    let gpu = backend_is_gpu backend_name in
+    let gpu = Backend_intf.binds_hardware_grid facts in
     if not (Lazy.force schedule_fission) then
-      [ maybe_default_schedule ~backend_name ~limits ~static_indices opt ]
+      [ maybe_default_schedule ~facts ~limits ~static_indices opt ]
     else
       let preset o = if gpu then default_gpu ~limits o else default_cpu o in
       (* CPU zero segments stay whole-node: a serial kernel renders them as [memset], which is hard

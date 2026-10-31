@@ -96,7 +96,7 @@ let named name (comp : Asgns.comp) : Asgns.comp =
 
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 let skipped = Verdict.skipped ~backend:backend_name
-let on_cpu = Sched.backend_is_cpu backend_name
+let on_cpu = Ir.Backend_intf.renders_on_host_pool (Context.backend_facts_of_name backend_name)
 
 (* Which backend actually ran, on stderr (the golden is backend-uniform, gh-ocannl-622). *)
 let () = Stdio.eprintf "schedule_strided_1x1: backend %s (not part of the golden)\n%!" backend_name

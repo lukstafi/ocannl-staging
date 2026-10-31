@@ -77,7 +77,7 @@ let resolution (c : BI.codegen_capabilities) =
 let () =
   (* --- Synthetic records: the derivation itself, independent of any backend --- *)
   let tag capabilities =
-    SC.codegen_tag ~backend:"cc" ~limits:BI.no_hardware_limits ~capabilities ()
+    SC.codegen_tag ~facts:Ir.Backend_intf.cc_facts ~limits:BI.no_hardware_limits ~capabilities ()
   in
   let base = BI.no_codegen_capabilities in
   p "a changed accumulator resolution moves the codegen identity"
@@ -146,7 +146,7 @@ let () =
         Numerics.set_policy policy;
         let capabilities = Context.codegen_capabilities ctx in
         let identity =
-          SC.codegen_tag ~backend:(Context.backend_name ctx) ~limits:(Context.hardware_limits ctx)
+          SC.codegen_tag ~facts:(Context.backend_facts ctx) ~limits:(Context.hardware_limits ctx)
             ~capabilities ()
         in
         let uniform =
@@ -199,7 +199,7 @@ let () =
   let first_policy, _, first_identity = List.hd_exn rows in
   Numerics.set_policy first_policy;
   let again =
-    SC.codegen_tag ~backend:(Context.backend_name ctx) ~limits:(Context.hardware_limits ctx)
+    SC.codegen_tag ~facts:(Context.backend_facts ctx) ~limits:(Context.hardware_limits ctx)
       ~capabilities:(Context.codegen_capabilities ctx)
       ()
   in

@@ -77,12 +77,13 @@ let skipped = Verdict.skipped ~backend:backend_name
    tolerances documented at their sites. Rendering outcomes themselves use the MMA census. *)
 let on_metal = String.is_substring backend_name ~substring:"metal"
 let on_hip = String.is_substring backend_name ~substring:"hip"
-let on_gpu = Sched.backend_is_gpu backend_name
+let on_gpu = Ir.Backend_intf.binds_hardware_grid (Context.backend_facts_of_name backend_name)
 let on_cuda = on_gpu && (not on_metal) && not on_hip
 
 module Generated = Test_utils.Generated
 
 let () = Generated.init ~backend_name
+let facts = Context.backend_facts_of_name backend_name
 
 (* gh-ocannl-1032: HIP's tensor-core path needs TWO things — an RDNA3/RDNA3.5+ wave32 device AND a
    discoverable rocWMMA header tree — and [Hip_backend] gates both [hardware_limits.mma] and
@@ -1891,13 +1892,13 @@ let () =
                 && update_has_trailing_barrier
             | _ -> false
           in
-          count_sub ("threadgroup float " ^ Generated.node_ident "tile_") = 2
+          count_sub ("threadgroup float " ^ Generated.node_ident ~facts "tile_") = 2
           && has "simdgroup_multiply_accumulate"
           && has "threadgroup_barrier" && has "tile_mma fragment update" && resident
-          && not (has ("float " ^ Generated.node_ident "fragment_"))
+          && not (has ("float " ^ Generated.node_ident ~facts "fragment_"))
         else
           (* CUDA/HIP: the shared tiles, read by the scalar fallback. *)
-          count_sub ("__shared__ float " ^ Generated.node_ident "tile_") = 2
+          count_sub ("__shared__ float " ^ Generated.node_ident ~facts "tile_") = 2
           && has "__syncthreads()"
       in
       p label ok);

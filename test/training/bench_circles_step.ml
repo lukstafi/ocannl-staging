@@ -87,7 +87,9 @@ let () =
   in
   printf "backend: %s\n" backend;
   census "default pipeline (min_parallel=1024)"
-    (Sched.maybe_default_schedules ~backend_name:backend ~limits ~static_indices opt);
+    (Sched.maybe_default_schedules
+       ~facts:(Context.backend_facts_of_name backend)
+       ~limits ~static_indices opt);
   (* The autotune fissioned preset annotates with min_parallel:1 — what the tuned winner runs. *)
   let preset o = Sched.default_gpu ~min_parallel:1 ~limits o in
   let zero_sched tns = Sched.zero_expansion ~limits tns in

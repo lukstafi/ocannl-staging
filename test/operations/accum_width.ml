@@ -43,7 +43,7 @@ let () = Utils.settings.output_debug_files_in_build_directory <- true
 open Verdict.Claims
 
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
-let on_cpu = Sched.backend_is_cpu backend_name
+let on_cpu = Ir.Backend_intf.renders_on_host_pool (Context.backend_facts_of_name backend_name)
 let codegen_capabilities = Context.codegen_capabilities (Context.auto ())
 
 type rival_values = { once_narrowed : float; per_step : float }
@@ -1223,7 +1223,7 @@ let privatized_seed ~storage_tile ~seeded (opt : LL.optimized) : Sched.schedule 
   let p =
     List.find_exn
       (Autotune.sketch_seed_params
-         ~is_gpu:(Sched.backend_is_gpu backend_name)
+         ~is_gpu:(Ir.Backend_intf.binds_hardware_grid (Context.backend_facts_of_name backend_name))
          ~is_cpu:on_cpu ~limits:(Lazy.force hardware_limits) opt)
       ~f:(fun p -> (not p.Autotune.sk_mma) && (not p.sk_conv) && not p.sk_epilogue)
   in

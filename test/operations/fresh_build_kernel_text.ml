@@ -82,7 +82,9 @@ let () =
     | [ (a1, a2); (b1, b2); _ ] -> digits a1 = digits a2 && digits b1 < digits b2
     | _ -> false);
   let srcs = List.map builds ~f:snd in
-  let normalized = List.map srcs ~f:Test_utils.Generated.normalize_minted in
+  let normalized =
+    List.map srcs ~f:(Test_utils.Generated.normalize_minted ~facts:(Context.backend_facts ctx))
+  in
   let first = List.hd_exn normalized in
   List.iteri normalized ~f:(fun i s ->
       if not (String.equal s first) then

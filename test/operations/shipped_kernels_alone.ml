@@ -75,7 +75,8 @@ let () =
       (Ir.Low_level.Staged_compilation
          (fun () ->
            PPrint.string
-             (Ir.C_syntax.node_ident_prefix_for_backend backend_name ^ "sk_staged[0] = 2.0f;")))
+             ((Context.backend_facts_of_name backend_name).node_ident_prefix
+            ^ "sk_staged[0] = 2.0f;")))
   in
   let got = Ll_test.execute ~name:"sk_staged" o ~seed:[ (tn, [| -1.0 |]) ] ~read:[ tn ] in
   p "a kernel whose only access to a node is staged code still declares it, and the write lands"

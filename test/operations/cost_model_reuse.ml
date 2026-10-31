@@ -475,7 +475,8 @@ let () =
              sector_rate;
              wg_capacity = None;
            })
-      ~backend:"cuda" ~limits:rated_limits ~accum_prec:Fn.id ~static_indices:[] (hermetic base)
+      ~facts:Ir.Backend_intf.cuda_facts ~limits:rated_limits ~accum_prec:Fn.id ~static_indices:[]
+      (hermetic base)
     |> Option.bind ~f:(fun plan -> plan.Autotune.sp_start)
     |> Option.map ~f:(fun start -> start.Autotune.gate_tag)
   in

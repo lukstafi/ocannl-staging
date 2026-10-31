@@ -100,7 +100,10 @@ let schedules ~tuner_presets opt =
          ~zero_sched:(fun _ -> [])
          ~static_indices:[] opt)
       ~f:(fun (_, _, _, post) -> post)
-  else Sched.maybe_default_schedules ~backend_name ~static_indices:[] opt
+  else
+    Sched.maybe_default_schedules
+      ~facts:(Context.backend_facts_of_name backend_name)
+      ~static_indices:[] opt
 
 (* Compiles and runs [comp] twice: scheduled (capturing the segments, and whether each [scratch]
    node is still scratch after scheduling) and unscheduled. Returns the segments, the scratch flags,

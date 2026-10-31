@@ -217,7 +217,8 @@ let () =
   let opt = Context.lowered_for_decisions (Context.auto ()) comp Ir.Indexing.Empty in
   let census ?(backend = "cuda") reduction_sink =
     Ll_test.seeded_census
-      (Autotune.seeded_plan ~min_reduction:0 ~reduction_sink ~backend
+      (Autotune.seeded_plan ~min_reduction:0 ~reduction_sink
+         ~facts:(Context.backend_facts_of_name backend)
          ~limits:Ir.Backend_intf.no_hardware_limits ~accum_prec:Fn.id ~static_indices:[] opt)
   in
   p "structural: for cuda the untuned plan sinks a segment with the seeding off, seeding none"

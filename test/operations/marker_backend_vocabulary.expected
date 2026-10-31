@@ -1,8 +1,8 @@
 the ocannl-backend marker vocabulary is exactly OCANNL's backends plus none: true
-every backend OCANNL has is classified CPU or GPU, by exactly one of the predicates: true
-a name neither predicate knows is undecided: true
-a name both predicates claim is undecided too: true
-and a backend name proper is decided: true
+every accepted backend name reaches the facts its backend's module states: true
+every backend OCANNL has states facts consistent with one another: true
+a name that is not a backend's is refused, never classified by what it contains: true
+and a record breaking any one relation is reported: true
 every backend OCANNL has has an emitted-code extension the reader writes for it: true
 the reader writes every backend OCANNL has under its own name: true
 every deprecated alias the reader resolves names the backend get_backend selects: true

@@ -5,7 +5,6 @@ the merged chain kernel parallelizes: true
 capture: one aligned segment: true
 capture: the merged segment is hardware-annotated: true
 capture: traced store covers the whole chain: true
-capture: identity on non-scheduling backends: true
 replication: two segments: true
 replication: both segments annotated: true
 replication: consumer segment carries a replica of the local's definition: true

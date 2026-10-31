@@ -36,9 +36,9 @@ module L = Ll_test
 open Verdict.Claims
 
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
-let splits_here = Autotune.seeded_split_backend backend_name
-let is_gpu = Sched.backend_is_gpu backend_name
-let is_cpu = Sched.backend_is_cpu backend_name
+let splits_here = Autotune.seeded_split_backend (Context.backend_facts_of_name backend_name)
+let is_gpu = Ir.Backend_intf.binds_hardware_grid (Context.backend_facts_of_name backend_name)
+let is_cpu = Ir.Backend_intf.renders_on_host_pool (Context.backend_facts_of_name backend_name)
 
 let preset opt =
   if is_gpu then Sched.default_gpu ~min_parallel:1 ~limits:Ir.Backend_intf.no_hardware_limits opt
@@ -189,8 +189,9 @@ let () =
         (Option.is_none (extent opt site.sr_axis));
       p "the untuned split takes it at 32 blocks, the square root of its 1024-row chain"
         (List.exists
-           (Autotune.seeded_split_sites ~backend:"cuda" ~min_serial:1 ~static_indices:[] opt)
-           ~f:(fun (s, b) -> Ir.Tnode.equal s.Autotune.sr_target g && b = 32));
+           (Autotune.seeded_split_sites ~facts:Ir.Backend_intf.cuda_facts ~min_serial:1
+              ~static_indices:[] opt) ~f:(fun (s, b) ->
+             Ir.Tnode.equal s.Autotune.sr_target g && b = 32));
       parity ~what:"coalesced (b, s)" ~comp ~tn:g ~exact ~site ();
       (* The prelude the search stores and a later process replays. *)
       let canon = SC.canonicalize opt in
@@ -259,7 +260,8 @@ let () =
       p "its split loop ranges over the whole contraction" (site.sr_red = ch * ce);
       (* A 256-row chain: below 32 * 32, so no block count is within its square root. *)
       let split =
-        Autotune.seeded_split_sites ~backend:"cuda" ~min_serial:1 ~static_indices:[] opt
+        Autotune.seeded_split_sites ~facts:Ir.Backend_intf.cuda_facts ~min_serial:1
+          ~static_indices:[] opt
       in
       p_none
         "the untuned split declines this site, its chain shorter than every block count squared"
@@ -438,7 +440,9 @@ let () =
      threshold of 1. The controls: twice the serial chain, and cc, split nothing. *)
   let opt = capture comp in
   let sites ~backend ~min_serial =
-    Autotune.seeded_split_sites ~backend ~min_serial ~static_indices:[] opt
+    Autotune.seeded_split_sites
+      ~facts:(Context.backend_facts_of_name backend)
+      ~min_serial ~static_indices:[] opt
   in
   p "structural: for cuda the untuned split takes the table fixture's bias gradient at 32 blocks"
     (List.exists

@@ -49,7 +49,7 @@ let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~d
 (* Intentional dialect identity: the remaining branch pins the exact MSL fragment-store and barrier
    ordering versus the CUDA/HIP emitted spellings. Whether MMA fired is censused. *)
 let on_metal = String.is_substring backend_name ~substring:"metal"
-let on_gpu = Sched.backend_is_gpu backend_name
+let on_gpu = Ir.Backend_intf.binds_hardware_grid (Context.backend_facts_of_name backend_name)
 
 module Generated = Test_utils.Generated
 

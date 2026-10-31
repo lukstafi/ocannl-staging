@@ -76,7 +76,7 @@ let () =
   (let plc = Context.placements reference
    and grad t = (Option.value_exn ~here:[%here] t.Tensor.diff).grad
    and backend = Context.backend_name reference in
-   let on_cpu = Ir.Schedule.backend_is_cpu backend in
+   let on_cpu = Ir.Backend_intf.renders_on_host_pool (Context.backend_facts_of_name backend) in
    gated ~when_:on_cpu ~on:backend "the warm-up commits w.grad virtual"
      (Ir.Tnode.Placements.known_virtual plc (grad w));
    gated ~when_:on_cpu ~on:backend "the warm-up places y.grad as routine-local scratch"

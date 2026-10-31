@@ -386,7 +386,9 @@ let () =
       let composed, _ = forward ~heads ~on:false in
       let rewritten, optimized = forward ~heads ~on:true in
       let segments backend_name =
-        S.maybe_default_schedules ~backend_name ~static_indices:[] optimized
+        S.maybe_default_schedules
+          ~facts:(Context.backend_facts_of_name backend_name)
+          ~static_indices:[] optimized
         |> List.map ~f:(fun (o : LL.optimized) -> o.llc)
       in
       (* The CPU pipeline first: the GPU one promotes statement-crossing locals in this lineage. *)
@@ -468,7 +470,11 @@ let train_step ~bwd =
     Context.compile
       ~lowered_transform:(fun o ->
         captured := Some (copy o);
-        let segments = S.maybe_default_schedules ~backend_name ~limits ~static_indices:[] o in
+        let segments =
+          S.maybe_default_schedules
+            ~facts:(Context.backend_facts_of_name backend_name)
+            ~limits ~static_indices:[] o
+        in
         executed := List.map segments ~f:(fun (seg : LL.optimized) -> LL.flat_lines [ seg.llc ]);
         segments)
       ctx update Ir.Indexing.Empty
@@ -515,7 +521,7 @@ let computes stmt ~writes =
 (* The GPU pipeline's segments, as their top-level statements, each run on a fresh copy of the
    captured lowering. *)
 let gpu_segments ?(limits = cheap) (o : LL.optimized) =
-  S.maybe_default_schedules ~backend_name:"metal" ~limits ~static_indices:[] (copy o)
+  S.maybe_default_schedules ~facts:Ir.Backend_intf.metal_facts ~limits ~static_indices:[] (copy o)
   |> List.map ~f:(fun (seg : LL.optimized) -> LL.flat_lines [ seg.LL.llc ])
 
 (* The top-level statements of the GPU pipeline's segments that compute a node named by [writes]. *)
@@ -663,7 +669,8 @@ let () =
      (cut: both on their lanes; admitted: dV off the lanes)"
   in
   let executed_dv = List.filter fused_executed ~f:(List.exists ~f:(computes ~writes:writes_dv)) in
-  if not (S.backend_is_gpu backend_name) then skipped ~backend:backend_name claim
+  if not (Ir.Backend_intf.binds_hardware_grid (Context.backend_facts_of_name backend_name)) then
+    skipped ~backend:backend_name claim
   else
     p_all claim executed_dv ~f:(fun seg ->
         let dv = List.filter seg ~f:(computes ~writes:writes_dv)
@@ -705,7 +712,11 @@ let execute_pipeline case =
   let ctx, routine =
     Context.compile ~name:case.name ~prelowered:case.opt
       ~lowered_transform:(fun o ->
-        let segments = S.maybe_default_schedules ~backend_name ~limits ~static_indices:[] o in
+        let segments =
+          S.maybe_default_schedules
+            ~facts:(Context.backend_facts_of_name backend_name)
+            ~limits ~static_indices:[] o
+        in
         executed := List.map segments ~f:(fun (seg : LL.optimized) -> LL.flat_lines [ seg.llc ]);
         segments)
       ctx Ir.Assignments.empty_comp Ir.Indexing.Empty
@@ -764,5 +775,6 @@ let () =
       let claim =
         Printf.sprintf "%s, executed on the run's device: the value pass keeps its lanes" what
       in
-      if not (S.backend_is_gpu backend_name) then skipped ~backend:backend_name claim
+      if not (Ir.Backend_intf.binds_hardware_grid (Context.backend_facts_of_name backend_name)) then
+        skipped ~backend:backend_name claim
       else p_exists claim (List.concat executed) ~f:lane_under_serial)

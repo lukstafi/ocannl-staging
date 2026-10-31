@@ -40,11 +40,12 @@ let nonzero name (a : float array) =
 let approx_tol _ = 1e-2
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 let skipped = Verdict.skipped ~backend:backend_name
-let has_shared = Sched.backend_is_gpu backend_name
+let has_shared = Ir.Backend_intf.binds_hardware_grid (Context.backend_facts_of_name backend_name)
 
 module Generated = Test_utils.Generated
 
 let () = Generated.init ~backend_name
+let facts = Context.backend_facts_of_name backend_name
 
 let named name (comp : Asgns.comp) : Asgns.comp =
   { comp with asgns = Asgns.Block_comment (name, comp.asgns) }
@@ -156,7 +157,8 @@ let () =
        licence, off by default (gh-ocannl-998) -- or, with [fp_contract] on, an FMA: Metal spells it
        [fma(], CUDA and HIP [fmaf(]. The three patterns are disjoint, so the counts add. *)
     p "unrolled register tile structure (GPU) or rejected (CPU)"
-      (count_sub ("(" ^ Generated.node_ident "acc_mc1" ^ "[") + count_sub "fma(" + count_sub "fmaf("
+      (count_sub ("(" ^ Generated.node_ident ~facts "acc_mc1" ^ "[")
+       + count_sub "fma(" + count_sub "fmaf("
        = tm * tn
       && count_sub "if (" = 2
       && String.is_substring src ~substring:"acc_mc1"
@@ -164,8 +166,8 @@ let () =
       (* This is intentionally dialect identity: the assertion counts the language's literal
          shared-address-space declaration in emitted source. *)
       if String.is_substring backend_name ~substring:"metal" then
-        count_sub ("threadgroup float " ^ Generated.node_ident "tile_") = 2
-      else count_sub ("__shared__ float " ^ Generated.node_ident "tile_") = 2))
+        count_sub ("threadgroup float " ^ Generated.node_ident ~facts "tile_") = 2
+      else count_sub ("__shared__ float " ^ Generated.node_ident ~facts "tile_") = 2))
   else (
     (match
        try

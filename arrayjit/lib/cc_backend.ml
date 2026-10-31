@@ -1694,6 +1694,8 @@ struct
     let full_printf_support = C_syntax.printf_support_unless_uniform ()
   end)
 
+  let node_ident_prefix = Backend_intf.cc_facts.node_ident_prefix
+
   (* The prelude's linkage macro and the outlined parts' attribute (gh-ocannl-1603) are macros: a
      node or routine spelled like one would expand. *)
   let ident_blacklist =

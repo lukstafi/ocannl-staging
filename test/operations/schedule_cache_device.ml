@@ -103,9 +103,15 @@ let () =
       { fixture with toolchain_signature = Some "driver-A:compiler-B" };
     ]
   in
-  let key timing_identity = SC.cache_key ~timing_identity ~limits ~capabilities canon ~backend in
+  let key timing_identity =
+    SC.cache_key
+      ~facts:(Context.backend_facts_of_name backend)
+      ~timing_identity ~limits ~capabilities canon ~backend
+  in
   let placement_key timing_identity =
-    SC.placement_key ~timing_identity ~limits ~capabilities canon ~backend
+    SC.placement_key
+      ~facts:(Context.backend_facts_of_name backend)
+      ~timing_identity ~limits ~capabilities canon ~backend
   in
   p_pairwise_distinct "device, driver and compiler changes independently separate schedule keys"
     (List.map identities ~f:(fun i -> Option.value_exn (key (Some i))))
@@ -121,7 +127,8 @@ let () =
       SC.version = SC.placement_entry_version;
       backend;
       numerics = SC.numerics_tag ();
-      codegen = SC.codegen_tag ~backend ~limits ~capabilities ();
+      codegen =
+        SC.codegen_tag ~facts:(Context.backend_facts_of_name backend) ~limits ~capabilities ();
       objective = SC.objective_tag ();
       problem_digest = SC.digest canon;
       decision = SC.Materialize_all;

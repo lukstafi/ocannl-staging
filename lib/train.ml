@@ -988,10 +988,11 @@ let tune_placements ?name ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?r
           let limits = Context.hardware_limits ctx in
           let capabilities = Context.codegen_capabilities ctx in
           let backend = Context.backend_name ctx in
+          let facts = Context.backend_facts ctx in
           Option.map
             (SC.placement_key ~timing_identity:(Context.timing_identity ctx) ~limits ~capabilities
-               problem ~backend)
-            ~f:(fun key -> (problem, key, limits, capabilities, backend))
+               ~facts problem ~backend)
+            ~f:(fun key -> (problem, key, limits, capabilities, facts, backend))
         else None
       with
       | store -> store
@@ -1012,7 +1013,7 @@ let tune_placements ?name ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?r
   let refined_decision accepted =
     match store with
     | None -> Some (SC.Refined [])
-    | Some (problem, _, _, _, _) ->
+    | Some (problem, _, _, _, _, _) ->
         let registry = SC.base_registry problem in
         Option.map
           (List.map accepted ~f:(fun (tn, flip) ->
@@ -1040,7 +1041,7 @@ let tune_placements ?name ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?r
   let persist ~decision ~(shipped : Autotune.report option) ~shipped_ms ~a_ms ~b_ms =
     match store with
     | None -> ()
-    | Some (problem, key, limits, capabilities, backend) ->
+    | Some (problem, key, limits, capabilities, facts, backend) ->
         let unclean =
           !call_budget_stopped_flips || not (List.for_all !observed ~f:placement_evidence_clean)
         in
@@ -1062,7 +1063,7 @@ let tune_placements ?name ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?r
               SC.version = SC.placement_entry_version;
               backend;
               numerics = SC.numerics_tag ();
-              codegen = SC.codegen_tag ~backend ~limits ~capabilities ();
+              codegen = SC.codegen_tag ~facts ~limits ~capabilities ();
               objective = SC.objective_tag ();
               problem_digest = SC.digest problem;
               decision;
@@ -1077,7 +1078,7 @@ let tune_placements ?name ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?r
   let replay =
     match store with
     | None -> None
-    | Some (problem, key, limits, capabilities, backend) -> (
+    | Some (problem, key, limits, capabilities, facts, backend) -> (
         match SC.lookup_placements ~dir:cache_dir ~key:(Some key) with
         | None ->
             logf "placement store: no decision recorded for this problem";
@@ -1087,7 +1088,7 @@ let tune_placements ?name ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?r
                  (String.equal e.SC.problem_digest (SC.digest problem)
                  && String.equal e.SC.backend backend
                  && String.equal e.SC.numerics (SC.numerics_tag ())
-                 && String.equal e.SC.codegen (SC.codegen_tag ~backend ~limits ~capabilities ())
+                 && String.equal e.SC.codegen (SC.codegen_tag ~facts ~limits ~capabilities ())
                  && String.equal e.SC.objective (SC.objective_tag ())) ->
             (* Belt-and-braces like the schedule cache's: the key carries every one of these, so
                only a hand-moved file fails here -- and every one is checked, since a decision

@@ -110,7 +110,9 @@ let () =
 
   (* 4. Kernel-fission segment census (structural, using the metal analysis on the captured lowered
      code; runs identically under every configured backend). *)
-  let segs = Sched.maybe_default_schedules ~backend_name:"metal" ~static_indices:[] opt in
+  let segs =
+    Sched.maybe_default_schedules ~facts:Ir.Backend_intf.metal_facts ~static_indices:[] opt
+  in
   printf "fission segments of forward+backprop: %d\n" (List.length segs);
 
   (* 5. Masked and normalized variant: positions with mask=0 are excluded, sum divided by the

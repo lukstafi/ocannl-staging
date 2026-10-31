@@ -103,7 +103,9 @@ let () =
   let key_of policy =
     Numerics.set_policy policy;
     Option.value_exn
-      (SC.cache_key ~timing_identity ~limits:(Context.hardware_limits ctx)
+      (SC.cache_key
+         ~facts:(Context.backend_facts_of_name backend)
+         ~timing_identity ~limits:(Context.hardware_limits ctx)
          ~capabilities:(Context.codegen_capabilities ctx)
          canon ~backend)
   in

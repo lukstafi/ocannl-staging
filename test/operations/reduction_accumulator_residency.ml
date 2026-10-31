@@ -41,6 +41,7 @@ module Tn = Ir.Tnode
 let () = Utils.settings.output_debug_files_in_build_directory <- true
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 let () = Test_utils.Generated.init ~backend_name
+let facts = Context.backend_facts_of_name backend_name
 let rows = 6
 let cols = 7
 
@@ -583,7 +584,7 @@ let () =
   Verdict.p "conditional reduction casts its controlling device read"
     (Bool.equal
        (String.is_substring source
-          ~substring:("volatile float*)" ^ Test_utils.Generated.node_ident "res_guard_mask"))
+          ~substring:("volatile float*)" ^ Test_utils.Generated.node_ident ~facts "res_guard_mask"))
        volatility.requested)
 
 (* {1 The volatility census's own bracket}

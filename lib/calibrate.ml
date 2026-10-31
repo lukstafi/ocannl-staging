@@ -83,7 +83,7 @@ let working_set ?(m = 256) ?(n = 1024)
     ?(ks = [ 256; 512; 1024; 2048; 4096; 8192; 16384; 32768; 65536 ]) ?(repeats = 10) ctx =
   if m <= 0 || n <= 0 || repeats <= 0 || List.exists ks ~f:(fun k -> k <= 0) then
     raise (Utils.User_error "Calibrate.working_set: extents and repeats must be positive");
-  let backend_name = Context.backend_name ctx in
+  let facts = Context.backend_facts ctx in
   let limits = Context.hardware_limits ctx in
   let _capacity, max_resident_threads = Autotune.ranking_capacity ~limits in
   let cyc len modulus stride =
@@ -114,7 +114,7 @@ let working_set ?(m = 256) ?(n = 1024)
          in
          List.iter (Ir.Low_level.flat_lines [ opt.Ir.Low_level.llc ]) ~f:(fun stmt ->
              if List.is_empty !loops && writes stmt then loops := nest [] stmt));
-        Ir.Schedule.maybe_default_schedules ~backend_name ~limits ~static_indices:[] opt
+        Ir.Schedule.maybe_default_schedules ~facts ~limits ~static_indices:[] opt
       in
       let comp = named (tag ^ "_wgrad") (Train.forward dw) in
       let run_ctx, routine =

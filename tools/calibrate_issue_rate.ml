@@ -67,7 +67,7 @@ let () =
   let limits = Context.hardware_limits ctx in
   let ms = Option.value_map ~default:"n/a" ~f:(Printf.sprintf "%.4f") in
   let points =
-    if Autotune.seeded_default_backend backend then (
+    if Autotune.seeded_default_backend (Context.backend_facts ctx) then (
       let points = Cal.issue_sweep ?m:!m ?n:!n ?ks:!ks ?repeats:!repeats ctx in
       Stdio.printf "# backend %s: the seeded sketch, threshold 32, split and sink off\n" backend;
       Stdio.printf "# %8s %14s %10s %8s %10s %12s %10s %10s\n" "k" "scalar_ops" "mma_ops" "kernels"

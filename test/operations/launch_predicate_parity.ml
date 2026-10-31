@@ -439,7 +439,8 @@ let () =
      conv sketch is a tensorized pipeline, and its scalar fallback computes the same values, so
      parity alone cannot say it ran tensorized: each routine's mma census must. *)
   let capability =
-    if not (Sched.backend_is_gpu backend) then `Withheld `Backend
+    if not (Ir.Backend_intf.binds_hardware_grid (Context.backend_facts_of_name backend)) then
+      `Withheld `Backend
     else
       let site = Option.value_exn ~here:[%here] (Autotune.detect_conv biased_opt.LL.llc) in
       Ll_test.tensorized_matmul_capability ~is_gpu:true ~is_cpu:false ~limits:real_limits

@@ -89,7 +89,7 @@ let () = Unix.putenv "OCANNL_CC_BACKEND_FP_CONTRACT" "off"
 let () = Utils.settings.output_debug_files_in_build_directory <- true
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 let () = Generated.init ~backend_name
-let on_cpu = Sched.backend_is_cpu backend_name
+let on_cpu = Ir.Backend_intf.renders_on_host_pool (Context.backend_facts_of_name backend_name)
 let codegen_capabilities = Context.codegen_capabilities (Context.auto ())
 
 open Verdict.Claims
