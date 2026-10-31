@@ -293,9 +293,11 @@ files.
   lhs's creation rows equal up to renaming (`Row.canonical_rows`); the creation check applies only
   to a lhs first bound by that step (a `%cd`-style step into an existing shape has solved rows).
   Traces use `Prohibit_grad` tracers, so an application whose operands need gradients builds
-  backward helper steps the trace lacked (layer_norm's `sqrt`/`/.` under a model): they register
-  as unmatched, which is why unmatched steps are tolerated and only an UNBUILT trace step is a
-  divergence. Checkpoints, rewinds and closures are refused while a guide is installed
+  gradient helper steps the trace lacked (layer_norm's `sqrt`/`/.` under a model; `sin`'s
+  gradient builds a `cos x` that, matched positionally, took the body's own `cos x` step): steps
+  built under `Shape.with_backward_construction` (`Tensor.op`'s `grad_asn`) are left out of the
+  skeleton and never matched. Other steps the trace lacked are tolerated too (unmatched); only an
+  UNBUILT trace step is a divergence. Checkpoints, rewinds and closures are refused while a guide is installed
   (`refuse_while_guided`), which is what keeps its cursor consistent; a closure built inside a
   guided body therefore stays pending. Shape-variable ids are not neutral under guided (inline
   registration mints variables guided skips): goldens printing open shapes after a schemed

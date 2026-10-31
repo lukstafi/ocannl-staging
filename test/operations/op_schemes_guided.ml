@@ -58,6 +58,7 @@ let counted f =
         guided_steps = d (fun c -> c.guided_steps);
         fallback_steps = d (fun c -> c.fallback_steps);
         unmatched_steps = d (fun c -> c.unmatched_steps);
+        backward_steps = d (fun c -> c.backward_steps);
         inline_registrations = d (fun c -> c.inline_registrations);
       } )
 
@@ -146,6 +147,17 @@ let%op flagged_plain () x =
 let reset_flags () =
   List.iter [ extra; drop; rewire; concrete; close_inside; checkpoint_inside ] ~f:(fun r ->
       r := false)
+
+(* Gradient helpers: [sin]'s gradient code builds a [cos x] when [x] needs a gradient -- at the
+   application, never at the trace -- ahead of the body's own [cos x]. *)
+let%op sin_cos () x =
+  let y = sin x in
+  cos x + y
+
+let%op sin_cos_plain () x =
+  let y = sin x in
+  cos x + y
+[@@ocannl.no_scheme]
 
 (* Nesting: a closure built inside the body, and a function of sub-layers. *)
 let%op const_layer () x = { cw = 0.5; o = [ 4 ] } * x
@@ -306,6 +318,20 @@ let () =
       let msg', ran', usable' = conflict `Check in
       p "as in checking mode"
         (has_substring ~substring:"applying the shape scheme layer to y" msg' && ran' = 0 && usable'));
+  Verdict.case "gradient helpers do not take the forward steps' places" (fun () ->
+      let x () = Tensor.term_init ~grad_spec:Require_grad [| 0.5; -1.0; 2.0 |] ~label:[ "x" ] () in
+      Tensor.unsafe_reinitialize ();
+      let f = sin_cos () in
+      let r, c = counted (fun () -> f (x ())) in
+      report "sin_cos" c;
+      p "with a differentiable argument, every forward step is guided and nothing diverges"
+        (c.guided_steps > 0 && c.unmatched_steps = 0);
+      p "the gradient helpers register normally" (c.backward_steps > 0);
+      let schemed = closed_dims [ r ] in
+      Tensor.unsafe_reinitialize ();
+      let plain = closed_dims [ sin_cos_plain () (x ()) ] in
+      p "and the application closes as the opted-out twin's does"
+        (List.equal (List.equal Int.equal) schemed plain));
   Verdict.case "nested applications run under the outer guide" (fun () ->
       Tensor.unsafe_reinitialize ();
       let f = stack () in

@@ -2224,7 +2224,22 @@ let refuse_while_guided what =
 
 (* What a recording trace learns per registered step (gh-ocannl-1761), newest first: the step's lhs
    creation rows (canonical) and the shape ids its [get_inequalities] attempted to unmark. *)
-type step_log_entry = { log_step : update_id; log_creation : Row.t list; log_unmarks : int list }
+type step_log_entry = {
+  log_step : update_id;
+  log_creation : Row.t list;
+  log_unmarks : int list;
+  log_backward : bool;
+}
+
+(* Gradient code under construction (gh-ocannl-1761): [Tensor.op]'s [grad_asn] may build helper
+   tensors, and it builds them only when an operand needs a gradient -- which a trace's tracers
+   never do -- so their steps are not part of the graph a guided application follows. *)
+let backward_depth = ref 0
+[@@mutation_serial.exempt "a dynamic-scope depth, restored by with_backward_construction's finally"]
+
+let with_backward_construction f =
+  Int.incr backward_depth;
+  Exn.protect ~f ~finally:(fun () -> Int.decr backward_depth)
 
 let trace_step_log : step_log_entry list option ref = ref None
 [@@mutation_serial.exempt "the shape-scheme trace's own record, saved and restored by the trace"]
@@ -4043,6 +4058,7 @@ type registration_counts = {
   guided_steps : int;
   fallback_steps : int;
   unmatched_steps : int;
+  backward_steps : int;
   inline_registrations : int;
 }
 [@@deriving sexp_of]
@@ -4054,6 +4070,7 @@ let zero_counts =
     guided_steps = 0;
     fallback_steps = 0;
     unmatched_steps = 0;
+    backward_steps = 0;
     inline_registrations = 0;
   }
 
@@ -4112,7 +4129,13 @@ let propagate_inline (update_step : update_step) : unit =
                   unmark_log := outer)
             in
             ( result,
-              Some { log_step = update_step.id; log_creation = creation; log_unmarks = !unmarks } )
+              Some
+                {
+                  log_step = update_step.id;
+                  log_creation = creation;
+                  log_unmarks = !unmarks;
+                  log_backward = !backward_depth > 0;
+                } )
       in
       active_update_steps := update_step :: !active_update_steps;
       active_constraints := ineqs @ !active_constraints;
@@ -4968,8 +4991,13 @@ module Scheme = struct
                 Hashtbl.add_multi created ~key:sh.id ~data:(sh, c);
                 Created c)
       in
+      (* Gradient helpers are left out: an application builds its own, as its operands need. *)
+      let forward_steps =
+        List.filter steps ~f:(fun step ->
+            match Hashtbl.find log step.id with Some e -> not e.log_backward | None -> true)
+      in
       let skeleton =
-        List.fold steps ~init:[] ~f:(fun acc step ->
+        List.fold forward_steps ~init:[] ~f:(fun acc step ->
             let shapes = slot_shapes step in
             let slots = Array.map shapes ~f:classify in
             let entry = Hashtbl.find log step.id in
@@ -5312,14 +5340,16 @@ module Scheme = struct
     in
     let register (step : update_step) =
       let matched =
-        if !cursor >= n then None
+        if !backward_depth > 0 || !cursor >= n then None
         else
           let sk = s.skeleton.(!cursor) in
           Option.map (match_step sk step) ~f:(fun binds -> (sk, binds))
       in
       match matched with
       | None ->
-          counts := { !counts with unmatched_steps = !counts.unmatched_steps + 1 };
+          counts :=
+            if !backward_depth > 0 then { !counts with backward_steps = !counts.backward_steps + 1 }
+            else { !counts with unmatched_steps = !counts.unmatched_steps + 1 };
           propagate_inline step
       | Some (sk, binds) -> (
           Int.incr cursor;

@@ -28,6 +28,9 @@ the conflict raises, naming the function and the application: true
 before the body ran: true
 and the session stays usable: true
 as in checking mode: true
+with a differentiable argument, every forward step is guided and nothing diverges: true
+the gradient helpers register normally: true
+and the application closes as the opted-out twin's does: true
 the outer application is guided: true
 the inner applications run plain: true
 the inner steps are the outer guide's: true

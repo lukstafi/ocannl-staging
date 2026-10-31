@@ -446,14 +446,20 @@ type registration_counts = {
   guided_steps : int;
   fallback_steps : int;
   unmatched_steps : int;
+  backward_steps : int;
   inline_registrations : int;
 }
 [@@deriving sexp_of]
 (** Registration statistics (gh-ocannl-1761), process-wide since the last reset: guided and checked
     [%op] applications; matched steps registered guided (no [get_inequalities]) or normally (a
-    fallback kind); steps a guided application's trace lacked (registered normally); and every
-    registration outside a trace that ran [get_inequalities]. Projection derivation is not counted.
-*)
+    fallback kind); steps a guided application's trace lacked, and the gradient helpers its body
+    built (both registered normally); and every registration outside a trace that ran
+    [get_inequalities]. Projection derivation is not counted. *)
+
+val with_backward_construction : (unit -> 'a) -> 'a
+(** Runs gradient-code construction ([Tensor.op]'s [grad_asn]): the helper tensors it builds depend
+    on which operands need gradients, so a shape-scheme trace leaves their steps out of its skeleton
+    and a guided application registers them normally ([backward_steps]). *)
 
 val registration_counts : unit -> registration_counts
 val reset_registration_counts : unit -> unit

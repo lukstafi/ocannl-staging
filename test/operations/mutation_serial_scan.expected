@@ -32,6 +32,7 @@ tensor/shape.ml: active_constraints (ref) -- fingerprinted by mutated_since; cap
 tensor/shape.ml: active_instances (ref) -- fingerprinted by mutated_since; captured by capture_globals
 tensor/shape.ml: tracing (ref) -- exempt: the shape-scheme traces in progress, restored by the trace's own finally
 tensor/shape.ml: active_guide (ref) -- exempt: the guided application in progress, installed and removed by Scheme.guided's own finally
+tensor/shape.ml: backward_depth (ref) -- exempt: a dynamic-scope depth, restored by with_backward_construction's finally
 tensor/shape.ml: trace_step_log (ref) -- exempt: the shape-scheme trace's own record, saved and restored by the trace
 tensor/shape.ml: taint (ref) -- exempt: the taint itself: a record of the first failure, not inference state
 tensor/shape.ml: discarded_updates (ref) -- accounted; kept by rewinds: a registry of what rewinds discarded: rewinds extend it, never restore it
