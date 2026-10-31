@@ -1840,13 +1840,16 @@ comments:</p>
 <span id="cb19-3"><a href="#cb19-3" aria-hidden="true" tabindex="-1"></a>  | Block_comment <span class="kw">of</span> <span class="dt">string</span> * t</span>
 <span id="cb19-4"><a href="#cb19-4" aria-hidden="true" tabindex="-1"></a>  ...</span></code></pre></div>
 <p>Schematic example:
-<code>~~(&quot;space&quot; &quot;separated&quot; &quot;comment&quot; &quot;tensor p debug_name:&quot; p; &lt;scope of the comment&gt;)</code>.
+<code>~~(&quot;space&quot; &quot;separated&quot; &quot;comment&quot; &quot;tensor p label_name:&quot; p; &lt;scope of the comment&gt;)</code>.
 The content of the comment uses application syntax, must be composed of
 strings, <code>&lt;tensor&gt;</code>, <code>&lt;tensor&gt;.value</code>
 (equivalent to <code>&lt;tensor&gt;</code>),
 <code>&lt;tensor&gt;.grad</code> components, where
 <code>&lt;tensor&gt;</code> is any tensor expression or tensor
-identifier.</p>
+identifier. A tensor component renders as its value node’s
+<code>Ir.Tnode.label_name</code> (with <code>.grad</code> appended for a
+<code>.grad</code> component), so the comment does not depend on which
+code names a renderer minted first.</p>
 <p>This syntax used to be very important, because comments in
 assignments are used to derive file names for generated code. Now, the
 <code>%cd</code> syntax automatically introduces block comments for code
