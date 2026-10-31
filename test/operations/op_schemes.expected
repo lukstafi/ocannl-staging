@@ -1,0 +1,44 @@
+creating the closure traces its scheme once: true
+each application checks the scheme: true
+the applications do not trace again: true
+the body ran once at the trace and once per application: true
+the applications close as the opted-out twin's do: true
+the closure's creation raises, naming the scheme of [broken]: true
+control (opted out): the error comes at the application, not naming the function: true
+a feature size conflicting with the shared parameter raises, naming the function: true
+the body did not run: true
+control (opted out): the body's own error, after the body started: true
+control (schemes off): the body's own error: true
+with_step: no scheme, the function applies as before: true
+with_mask: no scheme, the function applies as before: true
+rebound: no scheme, the function applies as before: true
+layer_plain: no scheme, the function applies as before: true
+labelled tensor parameters proven by their operand use get a scheme: true
+a returned function after its sub-layers is traced once they exist: true
+random number generation: unschemed, by the trace's refusal: true
+and the application ran unchecked: true
+control: the explicit trace of the same function still raises a shape error: true
+the check of a fitting argument ran: true
+and left the session as it was: true
+the check of a conflicting argument raises, naming the scheme: true
+and left the session as it was too: true
+twenty traces leave no node in the per-node registry: true
+and the weak registry keeps none of their nodes once unreachable: true
+a handle leaked from a trace is still refused, naming the trace: true
+building the closure raises, naming the function and the opt-out: true
+control (opted out): the same function builds and applies: true
+nothing is traced at the definition: true
+the first application traces, every application checks: true
+the second application does not trace again: true
+after a session reset, the scheme is traced again: true
+after the closure, an application with the shared feature size succeeds: true
+after the closure, a conflicting feature size is refused, naming the function: true
+inside the outer trace, the inner closure stays unschemed: true
+at the application, the inner closure is traced and checked, after the outer check: true
+the session hands out the same ids with schemes on and off: true
+and the same node uids, relative to the run's first node: true
+and the same shape variable ids, relative to the run's start: true
+the loss, the parameters (random initialization included) and their gradients are the same: true
+control (no id neutrality): the traces shift the session's ids: true
+control (no id neutrality): and its node uids: true
+control (no id neutrality): and its shape variable ids: true

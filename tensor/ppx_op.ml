@@ -120,7 +120,227 @@ let translate_block_tensor ~loc ~loop ~label ~opt_label:_ axis_kind elems =
       ( reduce_vbss vbss,
         [%expr stack ?label:[%e opt_expr ~loc label] [%e axis_expr] [%e rhses_array]] )
 
-let rec translate ~dsl_name ~num_configs ~is_toplevel ?(in_block = false) ~opt_label ?label expr =
+(* {2 Automatic shape schemes (gh-ocannl-1751)}
+
+   A [%op] function whose returned function takes only tensors gets a shape scheme: the closure
+   built at its [()] application traces it (a function without a [()] stage: its first application),
+   and each application checks it before the body runs. The ppx has no types, so which parameters
+   are tensors is decided syntactically: - an unlabelled variable parameter is a tensor: the
+   convention [docs/syntax_extensions.md] states for the parameters to the right of [()] and of a
+   function directly under [%op]; - a labelled [~x] (no default) is a tensor only with evidence: it
+   occurs directly as an operand of a tensor operation below, and its name is never rebound in the
+   body; - optional and defaulted parameters, and any other pattern, are not. A function with any
+   other parameter stays unschemed, its expansion unchanged. A wrong classification -- an unlabelled
+   non-tensor parameter, a shadowed operator -- is a compile error, which [[@@ocannl.no_scheme]]
+   escapes. The result needs no classification: the trace ignores it. *)
+
+let no_scheme_attr = "ocannl.no_scheme"
+let scheme_attr = "ocannl.scheme"
+let has_attr_named name attrs = List.exists attrs ~f:(fun a -> String.equal a.attr_name.txt name)
+
+let drop_attr_named name attrs =
+  List.filter attrs ~f:(fun a -> not (String.equal a.attr_name.txt name))
+
+let opted_out (e : expression) = has_attr_named no_scheme_attr e.pexp_attributes
+
+let opt_out (e : expression) =
+  if opted_out e then e
+  else
+    let loc = e.pexp_loc in
+    {
+      e with
+      pexp_attributes =
+        Ast_helper.Attr.mk ~loc { txt = no_scheme_attr; loc } (PStr []) :: e.pexp_attributes;
+    }
+
+(* Operators and functions whose every positional operand is a tensor in [TDSL.O] and [NTDSL.O]. *)
+let tensor_operand_ops =
+  Hash_set.of_list
+    (module String)
+    [
+      "+";
+      "-";
+      "*";
+      "*.";
+      "/.";
+      "@^";
+      "@-";
+      "add";
+      "sub";
+      "mul";
+      "div";
+      "relu";
+      "sat01";
+      "exp";
+      "log";
+      "exp2";
+      "log2";
+      "sin";
+      "cos";
+      "sqrt";
+      "recip";
+      "recip_sqrt";
+      "neg";
+      "tanh";
+      "where";
+      "fma";
+      "mul3";
+    ]
+
+(* Operators whose first positional operand is a tensor: the einsum and concat operators (their
+   second is a spec or an operand applied to one), and the pointwise power. *)
+let first_operand_ops =
+  Hash_set.of_list
+    (module String)
+    ("**." :: Einsum_parser.concat_operator_with_generated_specs
+    :: (Einsum_parser.binary_operators_with_generated_specs
+      @ Einsum_parser.unary_operators_with_generated_specs))
+
+let is_ident name (e : expression) =
+  match e.pexp_desc with Pexp_ident { txt = Lident n; _ } -> String.equal n name | _ -> false
+
+(* Whether [name] occurs in [body] directly as a tensor operand (outside [%oc]). *)
+let tensor_operand_evidence name body =
+  let found = ref false in
+  let visitor =
+    object
+      inherit Ast_traverse.iter as super
+
+      method! expression e =
+        match e.pexp_desc with
+        | Pexp_extension ({ txt = "oc"; _ }, _) -> ()
+        | Pexp_apply ({ pexp_desc = Pexp_ident { txt = Lident op; _ }; _ }, args) ->
+            let positional =
+              List.filter_map args ~f:(function Nolabel, a -> Some a | _ -> None)
+            in
+            let operands =
+              if Hash_set.mem tensor_operand_ops op then positional
+              else if Hash_set.mem first_operand_ops op then List.take positional 1
+              else []
+            in
+            let operands =
+              List.concat_map operands ~f:(fun a ->
+                  match a.pexp_desc with
+                  (* A concat's operand tuple. *)
+                  | Pexp_tuple elems
+                    when String.equal op Einsum_parser.concat_operator_with_generated_specs ->
+                      elems
+                  | _ -> [ a ])
+            in
+            if List.exists operands ~f:(is_ident name) then found := true;
+            super#expression e
+        | _ -> super#expression e
+    end
+  in
+  visitor#expression body;
+  !found
+
+(* Whether a pattern in [body] binds [name]. *)
+let rebinds name body =
+  let found = ref false in
+  let visitor =
+    object
+      inherit Ast_traverse.iter as super
+
+      method! pattern p =
+        (match p.ppat_desc with
+        | (Ppat_var { txt; _ } | Ppat_alias (_, { txt; _ })) when String.equal txt name ->
+            found := true
+        | _ -> ());
+        super#pattern p
+    end
+  in
+  visitor#expression body;
+  !found
+
+(* The tensor parameters of a function, or [None] when one parameter is not a tensor. *)
+let tensor_params params body =
+  Option.all
+  @@ List.map params ~f:(fun param ->
+      match param.pparam_desc with
+      | Pparam_val (Nolabel, None, { ppat_desc = Ppat_var { txt; _ }; _ }) -> Some (Nolabel, txt)
+      | Pparam_val (Labelled l, None, { ppat_desc = Ppat_var { txt; _ }; _ })
+        when tensor_operand_evidence txt body && not (rebinds txt body) ->
+          Some (Labelled l, txt)
+      | _ -> None)
+
+(* Marks a function eligible for a scheme, carrying its name expression. *)
+let mark_schemed ~name (e : expression) =
+  let loc = e.pexp_loc in
+  {
+    e with
+    pexp_attributes =
+      Ast_helper.Attr.mk ~loc { txt = scheme_attr; loc } (PStr [ Ast_helper.Str.eval ~loc name ])
+      :: e.pexp_attributes;
+  }
+
+let schemed_name (e : expression) =
+  List.find_map e.pexp_attributes ~f:(fun a ->
+      if String.equal a.attr_name.txt scheme_attr then
+        match a.attr_payload with
+        | PStr [ { pstr_desc = Pstr_eval (name, _); _ } ] -> Some name
+        | _ -> None
+      else None)
+
+let eligible_function (e : expression) =
+  match e.pexp_desc with
+  | Pexp_function ((_ :: _ as params), _, Pfunction_body body) when not (opted_out e) ->
+      Option.is_some (tensor_params params body)
+  | _ -> false
+
+(* Marks [e]'s tail function -- through [let], [;], [let open] and [let module] -- when eligible. *)
+let rec mark_tail ~name (e : expression) =
+  match e.pexp_desc with
+  | Pexp_function _ -> if eligible_function e then mark_schemed ~name e else e
+  | Pexp_let (rf, vbs, body) -> { e with pexp_desc = Pexp_let (rf, vbs, mark_tail ~name body) }
+  | Pexp_sequence (e1, e2) -> { e with pexp_desc = Pexp_sequence (e1, mark_tail ~name e2) }
+  | Pexp_open (d, body) -> { e with pexp_desc = Pexp_open (d, mark_tail ~name body) }
+  | Pexp_letmodule (n, m, body) ->
+      { e with pexp_desc = Pexp_letmodule (n, m, mark_tail ~name body) }
+  | _ -> e
+
+(* The schemed form of a translated function [fn] with tensor parameters [params]: [let
+   __ocannl_body = fn in let __ocannl_scheme = make ~name ~arity trace in fun params -> apply
+   __ocannl_scheme [args] (fun () -> __ocannl_body params)]. *)
+let wrap_schemed ~loc ~make ~name ~params (fn : expression) =
+  let open Ast_builder.Default in
+  let fn = { fn with pexp_attributes = drop_attr_named scheme_attr fn.pexp_attributes } in
+  let vars = List.map params ~f:(fun (_, v) -> evar ~loc v) in
+  let call =
+    pexp_apply ~loc (evar ~loc "__ocannl_body")
+      (List.map2_exn params vars ~f:(fun (l, _) v -> (l, v)))
+  in
+  let tensors = elist ~loc vars in
+  let tracer_pat = plist ~loc (List.map params ~f:(fun (_, v) -> pvar ~loc v)) in
+  let arity = eint ~loc (List.length params) in
+  let returned =
+    pexp_function ~loc
+      (List.map params ~f:(fun (l, v) ->
+           { pparam_desc = Pparam_val (l, None, pvar ~loc v); pparam_loc = loc }))
+      None
+      (Pfunction_body
+         [%expr Tensor.Scheme.For_ppx.apply __ocannl_scheme [%e tensors] (fun () -> [%e call])])
+  in
+  [%expr
+    let __ocannl_body = [%e fn] in
+    let __ocannl_scheme =
+      [%e make] ~name:[%e name] ~arity:[%e arity] (function
+        | [%p tracer_pat] ->
+            let (_ : _) = [%e call] in
+            ()
+        | _ -> assert false)
+    in
+    [%e returned]]
+
+let default_scheme_name ~loc ?name () =
+  match name with
+  | Some name -> Ast_builder.Default.estring ~loc name
+  | None ->
+      Ast_builder.Default.estring ~loc
+        (Printf.sprintf "%%op function at %s:%d" loc.loc_start.pos_fname loc.loc_start.pos_lnum)
+
+let rec translate ~dsl_name ~num_configs ~is_toplevel ?(in_block = false) ?scheme_name ~opt_label
+    ?label expr =
   let loc = expr.pexp_loc in
   let loop = translate ~dsl_name ~num_configs ~is_toplevel:false ~opt_label in
   (* Block-element loop: like [loop] but flags that the immediate sub-expression sits in
@@ -529,7 +749,18 @@ let rec translate ~dsl_name ~num_configs ~is_toplevel ?(in_block = false) ~opt_l
             let body =
               match (after_unit, body) with
               | [], Pfunction_body body -> body
-              | _ -> { expr with pexp_desc = Pexp_function (after_unit, constr, body) }
+              | _ ->
+                  {
+                    expr with
+                    pexp_desc = Pexp_function (after_unit, constr, body);
+                    pexp_attributes = drop_attr_named no_scheme_attr expr.pexp_attributes;
+                  }
+            in
+            (* The function the closure returns gets its scheme, traced when the closure is
+               built. *)
+            let body =
+              if opted_out expr || not (String.equal dsl_name "TDSL") then body
+              else mark_tail ~name:(default_scheme_name ~loc ?name:scheme_name ()) body
             in
             translate ~dsl_name ~num_configs ~is_toplevel:false ~opt_label ?label body
           in
@@ -539,6 +770,7 @@ let rec translate ~dsl_name ~num_configs ~is_toplevel ?(in_block = false) ~opt_l
               expr with
               pexp_desc =
                 Pexp_function (before_unit @ [ unit_param ], constr, Pfunction_body inner_body);
+              pexp_attributes = drop_attr_named no_scheme_attr expr.pexp_attributes;
             } )
       | None ->
           (* No unit parameter, everything is "after_unit" *)
@@ -583,8 +815,30 @@ let rec translate ~dsl_name ~num_configs ~is_toplevel ?(in_block = false) ~opt_l
                 in
                 (List.concat vbs, Pfunction_cases (cases, loc, attrs))
           in
-          (vbs, { expr with pexp_desc = Pexp_function (args, constr, body) }))
-  | { pexp_desc = Pexp_function (args, constr, body); _ } ->
+          let fn = { expr with pexp_desc = Pexp_function (args, constr, body) } in
+          let fn =
+            match (expr.pexp_desc, String.equal dsl_name "TDSL" && not (opted_out expr)) with
+            | Pexp_function (_ :: _, _, Pfunction_body orig_body), true -> (
+                match tensor_params args orig_body with
+                | Some params ->
+                    wrap_schemed ~loc ~make:[%expr Tensor.Scheme.For_ppx.deferred]
+                      ~name:(default_scheme_name ~loc ?name:scheme_name ())
+                      ~params
+                      {
+                        fn with
+                        pexp_attributes = drop_attr_named no_scheme_attr fn.pexp_attributes;
+                      }
+                | None -> fn)
+            | _ -> { fn with pexp_attributes = drop_attr_named no_scheme_attr fn.pexp_attributes }
+          in
+          (vbs, fn))
+  | { pexp_desc = Pexp_function (args, constr, body); _ } -> (
+      let scheme =
+        match (schemed_name expr, body) with
+        | Some name, Pfunction_body orig_body ->
+            Option.map (tensor_params args orig_body) ~f:(fun params -> (name, params))
+        | _ -> None
+      in
       let vbs, body =
         match body with
         | Pfunction_body body ->
@@ -601,7 +855,19 @@ let rec translate ~dsl_name ~num_configs ~is_toplevel ?(in_block = false) ~opt_l
             in
             (List.concat vbs, Pfunction_cases (cases, loc, attrs))
       in
-      (vbs, { expr with pexp_desc = Pexp_function (args, constr, body) })
+      let fn =
+        {
+          expr with
+          pexp_desc = Pexp_function (args, constr, body);
+          pexp_attributes =
+            drop_attr_named no_scheme_attr (drop_attr_named scheme_attr expr.pexp_attributes);
+        }
+      in
+      ( vbs,
+        match scheme with
+        | Some (name, params) ->
+            wrap_schemed ~loc ~make:[%expr Tensor.Scheme.For_ppx.closure] ~name ~params fn
+        | None -> fn ))
   | [%expr
       while [%e? test_expr] do
         [%e? body_expr]
@@ -680,8 +946,11 @@ let rec translate ~dsl_name ~num_configs ~is_toplevel ?(in_block = false) ~opt_l
   | expr -> (no_vbs, expr)
 
 let translate ?(dsl_name = "TDSL") ?ident_label ?(bind_vbs_under_open = true) expr =
+  let scheme_name =
+    match ident_label with Some { ppat_desc = Ppat_var { txt; _ }; _ } -> Some txt | _ -> None
+  in
   let vbs, expr =
-    translate ~dsl_name ~num_configs:(ref 0) ~is_toplevel:true ~opt_label:None
+    translate ~dsl_name ~num_configs:(ref 0) ~is_toplevel:true ?scheme_name ~opt_label:None
       ~label:(opt_pat2string_list ~loc:expr.pexp_loc ident_label)
       expr
   in
@@ -697,6 +966,25 @@ let translate ?(dsl_name = "TDSL") ?ident_label ?(bind_vbs_under_open = true) ex
 
 let translate_tdsl ?ident_label expr = translate ?ident_label expr
 
+(* [[@@ocannl.no_scheme]] on a binding, and [let rec] (whose right-hand side must stay a syntactic
+   function), opt the bound function out of its scheme. *)
+let opt_out_binding recflag vb =
+  let attr = has_attr_named no_scheme_attr vb.pvb_attributes in
+  match recflag with
+  | Recursive ->
+      {
+        vb with
+        pvb_expr = opt_out vb.pvb_expr;
+        pvb_attributes = drop_attr_named no_scheme_attr vb.pvb_attributes;
+      }
+  | Nonrecursive when attr ->
+      {
+        vb with
+        pvb_expr = opt_out vb.pvb_expr;
+        pvb_attributes = drop_attr_named no_scheme_attr vb.pvb_attributes;
+      }
+  | Nonrecursive -> vb
+
 let expr_expander ~loc ~path:_ payload =
   match payload with
   | { pexp_desc = Pexp_let (recflag, bindings, body); _ } ->
@@ -705,6 +993,7 @@ let expr_expander ~loc ~path:_ payload =
       let vbss, bindings =
         List.unzip
         @@ List.map bindings ~f:(fun vb ->
+            let vb = opt_out_binding recflag vb in
             let vbs, v =
               translate ~bind_vbs_under_open:false ?ident_label:(Some vb.pvb_pat) vb.pvb_expr
             in
@@ -720,4 +1009,51 @@ let expr_expander ~loc ~path:_ payload =
       let vbs, expr = translate_tdsl ?ident_label:None expr in
       let_opt ~loc vbs expr
 
-let str_expander ~loc ~path = str_expander_with_punning translate_tdsl ~loc ~path
+let str_expander ~loc ~path payload =
+  let payload =
+    List.map payload ~f:(fun item ->
+        match item.pstr_desc with
+        | Pstr_value (recflag, bindings) ->
+            {
+              item with
+              pstr_desc = Pstr_value (recflag, List.map bindings ~f:(opt_out_binding recflag));
+            }
+        | _ -> item)
+  in
+  str_expander_with_punning translate_tdsl ~loc ~path payload
+
+(* The [%op] functions a structure's [let%op] items get a scheme for, as the expansion gives them:
+   each scheme's name, and whether it is traced at its [()] stage ([true]) or at its first
+   application. Lets a test hold a list of definitions to what the expansion schemes, rather than to
+   a copy of it. *)
+let schemed_definitions (str : structure) =
+  let found = ref [] in
+  let visitor =
+    object
+      inherit Ast_traverse.iter as super
+
+      method! expression e =
+        (match e.pexp_desc with
+        | Pexp_apply
+            ( {
+                pexp_desc =
+                  Pexp_ident
+                    { txt = Ldot (Ldot (Ldot (Lident "Tensor", "Scheme"), "For_ppx"), kind); _ };
+                _;
+              },
+              args )
+          when String.equal kind "closure" || String.equal kind "deferred" ->
+            List.iter args ~f:(function
+              | Labelled "name", { pexp_desc = Pexp_constant (Pconst_string (name, _, _)); _ } ->
+                  found := (name, String.equal kind "closure") :: !found
+              | _ -> ())
+        | _ -> ());
+        super#expression e
+    end
+  in
+  List.iter str ~f:(fun item ->
+      match item.pstr_desc with
+      | Pstr_extension (({ txt = "op"; _ }, PStr payload), _) ->
+          visitor#structure_item (str_expander ~loc:item.pstr_loc ~path:"" payload)
+      | _ -> ());
+  List.rev !found

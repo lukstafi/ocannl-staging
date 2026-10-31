@@ -25,3 +25,6 @@ let rules =
   ]
 
 let () = Driver.register_transformation ~rules "ppx_ocannl"
+
+(* For tests that pin a list of definitions to what the [%op] expansion schemes (gh-ocannl-1751). *)
+let schemed_definitions = Ppx_op.schemed_definitions

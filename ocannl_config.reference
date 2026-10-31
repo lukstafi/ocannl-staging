@@ -2076,6 +2076,14 @@
 # in shape error exceptions.
 #max_shape_error_origins=20
 
+# Automatic shape schemes of `%op` functions (gh-ocannl-1751): `check` (the default) traces the
+# scheme of a `%op` function whose returned function takes only tensors when its closure is built
+# (at its `()` application, or at the first application without a `()` stage), and checks each
+# application against it before the body runs, so a shape error inside the function is reported
+# naming it. `off` builds every function as before, unchecked. Either way the graph, its tensor ids
+# and the generated code are the same. Read once per process. See docs/syntax_extensions.md.
+#op_shape_schemes=check
+
 # Whether Persistence.load / Persistence.restore wrap a checkpoint's payloads as private
 # (copy-on-write) memory mappings of the file instead of decoding them into fresh host buffers.
 # Only payloads whose file bytes are already their buffer's bytes are mapped; padded tensor nodes

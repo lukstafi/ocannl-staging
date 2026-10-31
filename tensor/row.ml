@@ -100,6 +100,25 @@ let uid = ref 0
 [@@mutation_serial.exempt
   "a fresh-id counter: ids are never reused, so a rewind need not restore it"]
 
+(* Variables minted inside an id-neutral window (gh-ocannl-1751: a shape-scheme trace, a check) come
+   from a reserved range with a counter of their own, never reused: the window's variables are all
+   discarded, and the ids the session mints -- printed in shapes and errors -- are then the same
+   whether or not the window ran. *)
+let reserved_uid_base = 1 lsl 40
+
+let reserved_uid = ref reserved_uid_base
+[@@mutation_serial.exempt
+  "a fresh-id counter of the id-neutral windows: never reused, so never restored"]
+
+let with_reserved_vars f =
+  if !uid >= reserved_uid_base then f ()
+  else
+    let saved = !uid in
+    uid := !reserved_uid;
+    Exn.protect ~f ~finally:(fun () ->
+        reserved_uid := max !reserved_uid !uid;
+        uid := saved)
+
 let get_var ?name () : dim_var =
   Int.incr uid;
   { id = !uid; name }

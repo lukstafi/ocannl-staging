@@ -246,7 +246,7 @@ Using [inline declarations](#inline-declarations), this becomes more concise:
   ...
 ```
 
-When there is a function directly under the `%op` extension point, like in the example above, or directly under a function taking a unit parameter `()`, the function parameter (to the right of `()`) should be a tensor. That's because `%op` uses this tensor's (value's) label to enrich the label of the resulting tensor.
+When there is a function directly under the `%op` extension point, like in the example above, or directly under a function taking a unit parameter `()`, the function parameter (to the right of `()`) should be a tensor. That's because `%op` uses this tensor's (value's) label to enrich the label of the resulting tensor, and because automatic shape schemes take such an unlabelled parameter to be a tensor (see [Automatic shape schemes](#automatic-shape-schemes)). A labelled or optional parameter there may be anything.
 
 When the declaration is followed by a literal float, the float provides the initial value to initialize the tensor. Otherwise, the tensor value cells are initialized with the default parameter initialization: a centered, scaled packed `uniform ()` over `[-0.25, 0.25)` (`Operation.centered_uniform_param_init` with `scale = 0.5`), configurable by setting the reference `TDSL.default_param_init`.
 
@@ -850,6 +850,41 @@ let mlp ~label ~hid_dims () =
   in
   fun x -> List.fold layers ~init:x ~f:(fun x layer -> layer x)
 ```
+
+### Automatic shape schemes
+
+A `%op` function gets a *shape scheme* automatically (gh-ocannl-1751), on top of the explicit layer `Tensor.Scheme` (gh-ocannl-404, see [shape inference](./shape_inference.md#shape-schemes)), in *checking mode*:
+
+- **When it is traced.** The closure built at the `()` application traces the scheme of the function it returns, after the closure's inline `{ w }` parameters exist, so their dimensions are fixed in the scheme and everything the function creates is fresh per application. `block conf ()` gets one scheme per closure: a later `block conf' ()` traces its own. A function without a `()` stage (`let%op gelu x = ...`) is traced at its first application instead: tracing it at the definition would run at module initialization.
+- **What an application does.** It checks the scheme against its arguments' shapes, in a window that is always rewound, then runs the body, which builds and registers the graph as it always has. The scheme only checks; it never replaces the body (that is gh-ocannl-1761).
+- **What it reports.** A shape error that does not depend on the arguments raises when the closure is built, as `tracing the shape scheme <function>: ...`. One that does raises at the application, before the body runs, as `applying the shape scheme <function> to <arguments>: ...`.
+
+**Which functions qualify.** The returned function -- right after `()`, or the function a unit body ends in, through `let`, `;` and `let open`, as in `Nn_blocks.mlp` -- must take only tensors. The ppx has no types, so it decides syntactically:
+
+- an unlabelled variable parameter is a tensor (the convention above);
+- a labelled `~x` is a tensor only when `x` occurs directly as an operand of a tensor operation (an einsum or concatenation, `+`, `*`, `*.`, `relu`, ...) and is never rebound in the body;
+- an optional or defaulted parameter, and any other pattern, is not.
+
+A function with a parameter that is not a tensor -- `dropout ~rate () ~train_step x`, `multi_head_attention ... () ~train_step ?mask x`, the transformer blocks -- stays unschemed, and expands exactly as before: its parameter's value does not exist yet when the closure is built, and the body may branch on it. So do `let%op rec` and `function`-case bodies. An unlabelled parameter that is not a tensor, against the convention, is a compile error; opt out.
+
+**Refused traces degrade silently.** A function whose trace a scheme cannot carry -- random number generation inside it (including a closure built inside it whose parameters take the default random initialization), an external capture reference, forcing dims or projections, a body that cannot run on tracers -- stays unschemed, once the trace's rewind succeeded. It is a valid function, and its applications report what they always reported.
+
+**Side effects.** The trace runs the body once more per closure. Under the rewind it leaves no shape state, no tensor and no session id behind (traces and checks allocate tensor ids, node uids and shape-variable ids from reserved ranges, so printed ids and shapes, compilation choices, generated code and random draws are the same with or without schemes), but OCaml side effects of the body (a counter, a print) happen.
+
+**Opting out.** `[@@ocannl.no_scheme]` on the binding, or `[@ocannl.no_scheme]` on a `fun` expression, leaves a function unschemed: for a body whose constraints depend on something other than its closure and its arguments' shapes (mutable state, say), or whose side effects must run exactly once per application. The configuration key `op_shape_schemes=off` switches the schemes off for the whole process.
+
+#### Checking a definition early
+
+A block's `()` trace reports an argument-independent error only when the closure is built. To catch it at the definition, apply the definition to a trial or default configuration with `Tensor.Scheme.check_definition`, which runs the trial in a window that is always rewound and allocates no session id, and names the definition in its error:
+
+```ocaml doc-check=op_schemes_check_definition
+open Ocannl.Nn_blocks.DSL_modules
+
+let%op block ~hid_dim () x = relu (({ w } * x) + { b = 0.; o = [ hid_dim ] })
+let () = ignore (Tensor.Scheme.check_definition ~name:"block" (fun () -> ignore (block ~hid_dim:8 ())))
+```
+
+It catches the errors that hold for every configuration, and the configuration-dependent ones of the trial configuration only; it costs one trace (and the trial's construction) at program start. Prefer it to a bare `let _ = block conf ()`, which leaves the trial's parameters registered in the session. It does not reach the functions that stay unschemed (`~train_step` after `()`), beyond the sub-blocks their trial builds. `lib/nn_blocks.ml` does not run it at load time; `test/operations/nn_blocks_definitions` runs it over every schemed block.
 
 ## The syntax extension %%extend_dsls
 

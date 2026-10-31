@@ -421,6 +421,19 @@ val set_on_closure : (unit -> unit) -> unit
 val check_can_rewind : ?what:string -> unit -> unit
 (** Raises when called within a construction window; [what] names the caller in the message. *)
 
+val can_checkpoint : unit -> bool
+(** Whether an explicit checkpoint can be taken now: outside a construction window and untainted. *)
+
+exception Untraceable_scheme of string
+(** A shape-scheme trace refused by design (gh-ocannl-1751): the function is valid, but a scheme
+    cannot carry what it does -- a precision-dependent total-elements constraint, an external
+    capture reference bound in the trace, or forcing dims or projections during the trace. Raised by
+    {!Scheme.trace}, prefixed ["tracing the shape scheme <label>: "]; a contradiction raises
+    [Row.Shape_error] instead. *)
+
+val tracing_in_progress : unit -> bool
+(** Whether a shape-scheme trace is running. *)
+
 (** {3 Checkpoints (gh-ocannl-903)}
 
     The shape-inference half of [Tensor.checkpoint]: use that. A checkpoint snapshots the open
@@ -524,10 +537,11 @@ module Scheme : sig
       [Row.var_mark] (so their variables are generalized) and before this call (so their own
       constraints are not the scheme's). Must run inside a rewound window ([Tensor.with_rewind]),
       which undoes the trace. While [f] runs, [finish_inference] raises. Refuses, with
-      [Row.Shape_error] prefixed ["tracing the shape scheme <label>: "] like every error of the
-      trace: a precision-dependent total-elements constraint, a capture reference made outside the
-      window and bound or set in it, and a contradiction among the window's constraints (solved at
-      Stage1 once more at the end, so a trailing [set_dim] is checked too). *)
+      [Untraceable_scheme] on what a scheme cannot carry: a precision-dependent total-elements
+      constraint, a capture reference made outside the window and bound or set in it, or forcing
+      dims or projections; and [Row.Shape_error] on a contradiction among the window's constraints
+      (solved at Stage1 once more at the end, so a trailing [set_dim] is checked too). Both are
+      prefixed ["tracing the shape scheme <label>: "]. *)
 
   val instantiate :
     ?sabotage:sabotage -> t -> application:string -> args:shape list -> results:shape list -> unit
@@ -540,4 +554,14 @@ module Scheme : sig
       arity mismatch, a boundary or anchored shape discarded by a rewind, or a closure since the
       trace when the scheme depends on open state no anchored shape holds; after registering
       (tainting the session, as a failed construction does), on a contradiction. *)
+
+  val check : ?sabotage:sabotage -> t -> application:string -> args:shape list -> unit
+  (** [instantiate] against [args] with no results, then puts back everything it wrote (the session
+      and solver globals, the taint, the rows of the arguments and anchored shapes): an
+      argument-dependent shape error raises as [instantiate]'s does, and the session is unchanged
+      either way. Costs what [instantiate] does, independent of the open frontier. *)
+
+  val stale : t -> bool
+  (** Whether {!instantiate} would refuse the scheme for a closure since its trace (the scheme
+      depends on open state no anchored shape holds): trace it again. *)
 end

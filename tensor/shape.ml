@@ -2185,6 +2185,13 @@ let tracing : string list ref = ref []
 [@@mutation_serial.exempt
   "the shape-scheme traces in progress, restored by the trace's own finally"]
 
+(* A trace refused by design (gh-ocannl-1751): what the function does is valid, but a scheme cannot
+   carry it. Distinct from [Row.Shape_error], a contradiction, so that an automatic scheme can
+   degrade to an unschemed function on this one and stay loud on the other. *)
+exception Untraceable_scheme of string
+
+let tracing_in_progress () = not (List.is_empty !tracing)
+
 (** {3 Session consistency (gh-ocannl-1301)}
 
     [finish_inference] is the session's only commit point. A construction that fails after mutating
@@ -2250,6 +2257,7 @@ let mutated_since fp =
 
 let exn_summary = function
   | Row.Shape_error (msg, _) -> msg
+  | Untraceable_scheme msg -> msg
   | Utils.User_error msg -> msg
   | exn -> Exn.to_string exn
 
@@ -2261,9 +2269,20 @@ let with_taint_on_failure ~describe f =
     if mutated_since fp then taint_session ~provenance:(describe exn);
     Stdlib.Printexc.raise_with_backtrace exn bt
 
-(* Update-id ranges [(lo, hi]] discarded by rewinds, with the rewind's provenance. *)
-let discarded_updates : (int * int * string) list ref = ref []
+(* Update-id ranges [(lo, hi]] discarded by rewinds, with the rewind's provenance, keyed by [lo].
+   Checkpoints nest, so the ranges are nested or disjoint, and a rewind's [hi] is the newest update
+   id: a new range contains every range starting at or after its [lo], which it replaces -- the
+   newest range containing a step is the provenance reported. The ranges stay disjoint, and a step
+   is looked up by the one range starting below it (gh-ocannl-1751: automatic shape schemes rewind a
+   trace per closure, so a long session accumulates ranges). *)
+let discarded_updates : (int * string) Map.M(Int).t ref = ref (Map.empty (module Int))
 [@@mutation_serial.kept "a registry of what rewinds discarded: rewinds extend it, never restore it"]
+
+let add_discarded_updates ~lo ~hi provenance =
+  let kept, _, _ = Map.split !discarded_updates lo in
+  discarded_updates := Map.set kept ~key:lo ~data:(hi, provenance)
+[@@mutation_serial.boundary
+  "part of a rewind: it records the discarded update range, which no rewind restores"]
 
 (* Called after every successful closure; [Tensor] records its checkpoint here. *)
 let on_closure : (unit -> unit) ref = ref (fun () -> ())
@@ -2274,8 +2293,8 @@ let set_on_closure f = on_closure := f
 
 let check_step_live (step : update_step) =
   let (Update_id.Update_id n) = step.id in
-  List.iter !discarded_updates ~f:(fun (lo, hi, provenance) ->
-      if n > lo && n <= hi then
+  Option.iter (Map.closest_key !discarded_updates `Less_than n) ~f:(fun (_lo, (hi, provenance)) ->
+      if n <= hi then
         raise
         @@ Row.Shape_error
              ( [%string
@@ -2291,6 +2310,8 @@ let check_can_rewind ?(what = "Tensor.rewind_to_last_closure") () =
            ^ ": called from within [op_asn], mid-construction of a tensor operation -- not \
               supported; rewind after the construction returns or raises",
            [] )
+
+let can_checkpoint () = !construction_depth = 0 && Option.is_none !taint
 
 (** {3 Checkpoints (gh-ocannl-903)}
 
@@ -2413,6 +2434,9 @@ module Checkpoint = struct
     globals : globals;
     row_globals : Row.globals;
     shapes : Shape_record.snapshot list;
+    shape_index : (int, Shape_record.t list) Hashtbl.t Lazy.t;
+        (** [shapes] by id (several physical shapes can share one), for [in_frontier]: a rewind asks
+            it of every open shape, so a linear search made it quadratic in the frontier. *)
     steps : Update_step_record.snapshot list;
     refs : Delayed_ref.snapshot list;
     ref_uids : Set.M(Int).t;
@@ -2447,6 +2471,9 @@ module Checkpoint = struct
         !checkpoint_seq)
     in
     let steps = !active_update_steps in
+    let shapes =
+      List.map (open_shapes ~instances:!active_instances steps) ~f:Shape_record.snapshot
+    in
     (* A closure's checkpoint snapshots no reference: rewinding to the last closure discards every
        reference the discarded work bound or set, as gh-ocannl-1301 specifies. *)
     let refs = if closure then [] else Delayed_ref.snapshot_live () in
@@ -2459,15 +2486,22 @@ module Checkpoint = struct
       update_mark = !update_uid;
       globals = capture_globals ();
       row_globals = Row.capture_globals ();
-      shapes = List.map (open_shapes ~instances:!active_instances steps) ~f:Shape_record.snapshot;
+      shapes;
+      shape_index =
+        lazy
+          (let index = Hashtbl.create (module Int) in
+           List.iter shapes ~f:(fun snap ->
+               let (sh : Shape_record.t) = Shape_record.snapshot_shape snap in
+               Hashtbl.add_multi index ~key:sh.id ~data:sh);
+           index);
       steps = List.map steps ~f:Update_step_record.snapshot;
       refs;
       ref_uids = Set.of_list (module Int) (List.map refs ~f:Delayed_ref.snapshot_uid);
       failed_reads_mark = !failed_reads;
     }
 
-  let in_frontier ck sh =
-    List.exists ck.shapes ~f:(fun s -> phys_equal (Shape_record.snapshot_shape s) sh)
+  let in_frontier ck (sh : Shape_record.t) =
+    List.mem (Hashtbl.find_multi (Lazy.force ck.shape_index) sh.id) sh ~equal:phys_equal
 
   (* Why [ck] can no longer be rewound to, if it cannot. Checked before a rewind writes anything. *)
   let refusal ck =
@@ -2536,7 +2570,7 @@ module Checkpoint = struct
       List.iter (open_shapes ~instances:!active_instances !active_update_steps) ~f:(fun sh ->
           if not (in_frontier ck sh) then mark_discarded sh ~provenance);
       if !update_uid > ck.update_mark then
-        discarded_updates := (ck.update_mark, !update_uid, provenance) :: !discarded_updates;
+        add_discarded_updates ~lo:ck.update_mark ~hi:!update_uid provenance;
       (* The references the window bound or set that the checkpoint holds no snapshot of: made in
          the window (or, for the closure's checkpoint, every one touched since). *)
       List.iter !open_refs ~f:(fun uid ->
@@ -3282,7 +3316,7 @@ let unsafe_reinitialize () =
   tracing := [];
   construction_depth := 0;
   taint := None;
-  discarded_updates := [];
+  discarded_updates := Map.empty (module Int);
   open_refs := [];
   Hashtbl.clear discarded_refs;
   row_numbered_refs := [];
@@ -4054,13 +4088,12 @@ let finish_inference (() : unit) : unit =
   | [] -> ()
   | label :: _ ->
       raise
-      @@ Row.Shape_error
-           ( [%string
-               "finish_inference: shape inference was finalized while tracing the shape scheme \
-                %{label} (via Shape.to_dims, Shape.to_padding or a projections handle) -- not \
-                supported: a closure would commit the trace's work, which the trace must leave \
-                undone. Do not force dims or projections inside a traced function."],
-             [] ));
+      @@ Untraceable_scheme
+           [%string
+             "finish_inference: shape inference was finalized while tracing the shape scheme \
+              %{label} (via Shape.to_dims, Shape.to_padding or a projections handle) -- not \
+              supported: a closure would commit the trace's work, which the trace must leave \
+              undone. Do not force dims or projections inside a traced function."]);
   if !construction_depth > 0 then
     raise
     @@ Row.Shape_error
@@ -4492,7 +4525,7 @@ module Scheme = struct
       && List.mem (Hashtbl.find_multi frontier sh.id) sh ~equal:phys_equal
       && not (List.mem args sh ~equal:phys_equal)
     in
-    let refuse msg = raise @@ Row.Shape_error (msg, []) in
+    let refuse msg = raise @@ Untraceable_scheme msg in
     try
       tracing := label :: !tracing;
       trace_touches := Some [];
@@ -4648,11 +4681,19 @@ module Scheme = struct
         closure_bound;
         closure_at_trace = !closure_count;
       }
-    with Row.Shape_error (msg, trace) ->
-      let bt = Stdlib.Printexc.get_raw_backtrace () in
-      Stdlib.Printexc.raise_with_backtrace
-        (Row.Shape_error ([%string "tracing the shape scheme %{label}: %{msg}"], trace))
-        bt
+    with
+    | Row.Shape_error (msg, trace) ->
+        let bt = Stdlib.Printexc.get_raw_backtrace () in
+        Stdlib.Printexc.raise_with_backtrace
+          (Row.Shape_error ([%string "tracing the shape scheme %{label}: %{msg}"], trace))
+          bt
+    | Untraceable_scheme msg ->
+        let bt = Stdlib.Printexc.get_raw_backtrace () in
+        Stdlib.Printexc.raise_with_backtrace
+          (Untraceable_scheme [%string "tracing the shape scheme %{label}: %{msg}"])
+          bt
+
+  let stale s = !closure_count <> s.closure_at_trace && Option.is_some s.closure_bound
 
   let instantiate ?sabotage s ~application ~(args : shape list) ~(results : shape list) =
     check_untainted ();
@@ -4765,4 +4806,23 @@ module Scheme = struct
     with Row.Shape_error (msg, trace) ->
       let bt = Stdlib.Printexc.get_raw_backtrace () in
       Stdlib.Printexc.raise_with_backtrace (Row.Shape_error (prefix ^ msg, trace)) bt
+
+  (* What [instantiate] writes, put back: the session globals, the solver's, the taint, and the rows
+     of the shapes it substitutes the solution into (the arguments and the anchored shapes). *)
+  let restore_after_check ~globals ~row_globals ~taint:taint0 rows =
+    restore_globals globals;
+    Row.restore_globals row_globals;
+    taint := taint0;
+    List.iter rows ~f:(fun (sh, batch, input, output) -> set_rows sh ~batch ~input ~output)
+
+  let check ?sabotage s ~application ~args =
+    let globals = capture_globals () and row_globals = Row.capture_globals () and taint0 = !taint in
+    let rows =
+      List.map
+        (args @ List.map s.anchors ~f:fst)
+        ~f:(fun (sh : shape) -> (sh, sh.batch, sh.input, sh.output))
+    in
+    Exn.protect
+      ~f:(fun () -> instantiate ?sabotage s ~application ~args ~results:[])
+      ~finally:(fun () -> restore_after_check ~globals ~row_globals ~taint:taint0 rows)
 end

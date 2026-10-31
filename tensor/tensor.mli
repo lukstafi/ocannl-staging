@@ -445,6 +445,55 @@ module Scheme : sig
       failure at the closure names it too. The next closure applies the solution to [args] and
       [results] and closes them. Valid across closures, unless the scheme depends on open state no
       shape it used holds (then refused after a closure: trace again). *)
+
+  (** {3 Automatic schemes of [%op] functions (gh-ocannl-1751)}
+
+      [%op] gives a function a scheme when every parameter of the function it returns is a tensor
+      parameter ([docs/syntax_extensions.md] says which qualify). The closure built at the [()]
+      application -- or, for a function without a [()] stage, its first application -- traces the
+      scheme; each application then checks the scheme against its arguments' shapes, in a window
+      that is always rewound, before the body runs and registers as it always does. A shape error
+      that does not depend on the arguments raises at the trace, prefixed
+      ["tracing the shape scheme <function>: "]; one that does raises at the application, before the
+      body runs, prefixed ["applying the shape scheme <function> to <arguments>: "]. A trace a
+      scheme cannot carry (random number generation, an external capture reference, forcing dims, or
+      a body that cannot run on tracers) leaves the function unschemed, as it was before, once its
+      rewind succeeded. Ids are unaffected: traces and checks allocate tensor ids, node uids and
+      shape-variable ids from reserved ranges. *)
+
+  type handle
+  (** A function's scheme slot: one per closure. *)
+
+  val status : handle -> string
+  (** ["pending"], ["schemed"], or ["unschemed: <reason>"]. *)
+
+  type event =
+    | Traced of string  (** A function's scheme was traced. *)
+    | Unschemed of string * string  (** A function was left unschemed, with the reason. *)
+    | Checked of string  (** An application was checked against its function's scheme. *)
+
+  val check_definition : name:string -> (unit -> unit) -> string list
+  (** [check_definition ~name (fun () -> ignore (block conf ()))] runs a trial application of a
+      [%op] block definition inside a window that is always rewound and allocates no session ids, so
+      the [()] traces of the block and of the sub-blocks it builds run, and with them any shape
+      error that does not depend on the arguments, prefixed ["checking the definition <name>: "].
+      Returns the labels of the schemes traced, innermost first; the session is unchanged
+      afterwards. It catches errors that hold for every configuration and those of the trial
+      configuration only; it costs the trial's construction and traces. Prefer it to a bare
+      [block conf ()], which leaves the trial's parameters in the session. *)
+
+  (** The runtime the [%op] expansion calls. Not for direct use. *)
+  module For_ppx : sig
+    val closure : name:string -> arity:int -> (tensor list -> unit) -> handle
+    (** Traces now, the body applied to tracers: the [()] stage of a [%op] function. *)
+
+    val deferred : name:string -> arity:int -> (tensor list -> unit) -> handle
+    (** Traces at the first application: a [%op] function without a [()] stage. *)
+
+    val apply : handle -> tensor list -> (unit -> 'a) -> 'a
+    (** [apply h args body] checks [h]'s scheme against [args] (tracing it first when pending or
+        stale), then runs [body]. Inside a trace, and when unschemed, only runs [body]. *)
+  end
 end
 
 (** Diagnostics and negative controls for the checkpoint machinery's tests. *)
@@ -463,6 +512,20 @@ module For_testing : sig
     results:Shape.t list ->
     unit
   (** {!Scheme.instantiate} with one part of the mechanism disabled: negative controls. *)
+
+  val observe_schemes : (unit -> 'a) -> on_event:(Scheme.event -> unit) -> 'a
+  (** Runs the function, reporting the automatic schemes' events to [on_event]. *)
+
+  val set_op_shape_schemes : bool option -> unit
+  (** Overrides the [op_shape_schemes] setting in-process ([None]: back to the setting). *)
+
+  val discarded_registry_sizes : unit -> int * int
+  (** The number of nodes the rewinds' registry of discarded nodes holds, and of the still-reachable
+      nodes the weak registry of finished id-neutral windows (traces, definition checks) holds. *)
+
+  val without_id_neutrality : (unit -> 'a) -> 'a
+  (** Runs the function with the shape-scheme windows allocating session ids: a negative control of
+      their id neutrality. *)
 
   val rewind_omitting : omit:string -> checkpoint -> unit
   (** {!rewind} skipping one restore category: to show a test's oracle notices it. *)
