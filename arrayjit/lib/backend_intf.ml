@@ -1374,7 +1374,9 @@ type ('dev, 'runner, 'event) device = {
   mutable merge_buffer_capacity : int;
       (** Byte capacity of the reserved merge-buffer pool; drives the grow decision. *)
   updating_for : 'event Hashtbl.M(Tnode).t;
-      (** The completion event for the most recent updating (writing to) a node via this device. *)
+      (** The completion event for the most recent updating (writing to) a node via this device,
+          while it is not done: each new write drops the done entries first (gh-ocannl-1747), so the
+          table does not keep the nodes of graphs nobody holds. *)
   mutable updating_for_merge_buffer : (Tnode.t * 'event option) option;
       (** The tensor node that was most recently scheduled to be in the device's merge buffer. See
           also {!field-updating_for}. *)

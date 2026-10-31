@@ -1,0 +1,13 @@
+released: every graph computed t = 2 w: true
+released: the live working pools are back to the baseline: true
+released: the device's used-memory gauge is back to the baseline: true
+released: the driver's free bytes came back (within half a buffer): true
+released: every graph's nodes are reclaimed: true
+released: every parameter's host-init array is reclaimed: true
+unreleased: every graph computed t = 2 w: true
+unreleased: two working pools per graph stay in the pool table (gh-ocannl-550): true
+unreleased: the driver's free bytes fell by the pools' bytes (within half a buffer): true
+unreleased: every graph's nodes are reclaimed all the same: true
+forward_once: one parameter pool per graph stays after releasing the returned context: true
+literal: the constant bytes grew by each graph's literal: true
+literal: every literal's node is kept by the device's constant cache: true
