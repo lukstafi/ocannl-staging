@@ -670,6 +670,11 @@ files.
   failing before it frees is queued and retried by the next recompute, since no caller holds the
   child; a padded
   read's fringe is refilled host-side with the padding value. Printers ask the query first and show
-  `observability_tag`; a failure after a readable answer propagates (no catch-all). Guards:
-  `observability_query`, `recompute_on_read` (bitwise parity against a materialized run, ledger and
-  pool counts, an injected transfer failure), `for_print_test`.
+  `observability_tag`; a failure after a readable answer propagates (no catch-all). A printer names
+  every node it shows up front (`to_dag` renders twice: a recording pass, then the real one) and
+  reads the readable ones through `Context.to_host_all`, whose `Recomputable` nodes share ONE
+  throwaway routine, one sequenced copy per node (gh-ocannl-1737). Count routines with
+  `Context.backend_compiles` against a unit measured by a single-node read, never an assumed 1: a
+  Metal routine also counts its link-time library compile. Guards: `observability_query`,
+  `recompute_on_read` (bitwise parity against a materialized run, ledger and pool counts, an
+  injected transfer failure), `for_print_test`, `print_tree_one_recompute`.

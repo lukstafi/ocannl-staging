@@ -803,4 +803,5 @@ val printf_tree :
   unit
 (** [printf_tree] is a wrapper around {!Tensor.print_tree} that assumes [~force:true], and by
     default sets [~with_value:true], [~with_grad:true], and [~depth:9]. It takes an explicit context
-    and retrieves values on demand, like {!printf}. *)
+    and retrieves values on demand, like {!printf}; the tree's virtual nodes are recomputed
+    together, by one routine ({!Context.to_host_all}, gh-ocannl-1737). *)

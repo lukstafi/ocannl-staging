@@ -1728,18 +1728,29 @@ let header t =
    them requires an explicit context, off by default for [Tensor.print] and on for [Train.printf].
    gh-ocannl-777: whether the node can be read is asked first ({!Context.observability}); a readable
    node is read -- a virtual one recomputed -- and any failure of that read propagates, while an
-   unreadable one is shown as a placeholder naming why. No context: [<no-context>]. *)
-let retrieve_for_print ?ctx (tn : Tn.t) : (Nd.t, string) Either.t =
+   unreadable one is shown as a placeholder naming why. No context: [<no-context>]. gh-ocannl-1737:
+   a printer names every node it will show up front and reads the readable ones together
+   ({!Context.to_host_all}), so all the virtual nodes of a tree are recomputed by one routine. The
+   result answers for exactly the nodes it was given. *)
+let retrieve_all_for_print ?ctx (tns : Tn.t list) : Tn.t -> (Nd.t, string) Either.t =
   match ctx with
-  | None -> Second "<no-context>"
-  | Some ctx -> (
-      let obs = Context.observability ctx tn in
-      match Context.observability_tag obs with
-      | None -> First (Context.to_host ctx tn)
-      | Some tag -> Second tag)
+  | None -> fun _ -> Second "<no-context>"
+  | Some ctx ->
+      let answers = Hashtbl.create (module Tn) in
+      let readable =
+        List.filter (List.dedup_and_sort tns ~compare:Tn.compare) ~f:(fun tn ->
+            match Context.observability_tag (Context.observability ctx tn) with
+            | None -> true
+            | Some tag ->
+                Hashtbl.set answers ~key:tn ~data:(Either.Second tag);
+                false)
+      in
+      List.iter2_exn readable (Context.to_host_all ctx readable) ~f:(fun tn nd ->
+          Hashtbl.set answers ~key:tn ~data:(Either.First nd));
+      Hashtbl.find_exn answers
 
-let optional_payload ?ctx ~present ~missing v =
-  match retrieve_for_print ?ctx v with
+let optional_payload ~retrieve ~present ~missing v =
+  match (retrieve v : (Nd.t, string) Either.t) with
   | First nd -> present nd
   | Second tag -> `Vlist (false, [ `Text (missing ()); `Text tag ])
 
@@ -1758,6 +1769,9 @@ let%debug5_sexp to_dag ?(single_node = false) ?(embedded_only = false) ?entries_
   in
   if not embedded_only then scan_for_embedded { subtensor = t; embedded = true };
 
+  (* gh-ocannl-1737: the dag is rendered twice when values are read -- a first pass only records the
+     nodes it shows, so that the second reads all of them at once. *)
+  let retrieve = ref (retrieve_all_for_print []) in
   let visited = if embedded_only then None else Some (Hash_set.create (module Int)) in
   let rec to_dag { subtensor = t; embedded } : PrintBox_utils.dag =
     let id = Int.to_string t.value.id in
@@ -1809,7 +1823,7 @@ let%debug5_sexp to_dag ?(single_node = false) ?(embedded_only = false) ?entries_
         `Subtree_with_ID (id, `Tree (add_shape [ `Text txt ], children))
     | _, true, false, _ | _, true, true, None ->
         let node =
-          optional_payload ?ctx t.value
+          optional_payload ~retrieve:!retrieve t.value
             ~present:(fun v_array ->
               `Box
                 (Nd.render_array ~brief:true ~prefix:txt ?entries_per_axis ~labels ~indices v_array))
@@ -1821,7 +1835,7 @@ let%debug5_sexp to_dag ?(single_node = false) ?(embedded_only = false) ?entries_
           grad_txt diff ^ if (not should_elide) && not embedded then " non-emb" else ""
         in
         let node =
-          optional_payload ?ctx diff.grad
+          optional_payload ~retrieve:!retrieve diff.grad
             ~present:(fun g_array ->
               `Box (Nd.render_array ~brief:true ~prefix ?entries_per_axis ~labels ~indices g_array))
             ~missing:(fun () -> prefix ^ " " ^ where_located diff.grad)
@@ -1830,7 +1844,7 @@ let%debug5_sexp to_dag ?(single_node = false) ?(embedded_only = false) ?entries_
     | _, true, true, Some diff ->
         let node =
           let value =
-            optional_payload ?ctx t.value
+            optional_payload ~retrieve:!retrieve t.value
               ~present:(fun v_array ->
                 `Box
                   (Nd.render_array ~brief:true ~prefix:txt ?entries_per_axis ~labels ~indices
@@ -1838,7 +1852,7 @@ let%debug5_sexp to_dag ?(single_node = false) ?(embedded_only = false) ?entries_
               ~missing:(fun () -> txt ^ " " ^ where_located t.value)
           in
           let grad =
-            optional_payload ?ctx diff.grad
+            optional_payload ~retrieve:!retrieve diff.grad
               ~present:(fun g_array ->
                 `Box
                   (Nd.render_array ~brief:true ~prefix:(grad_txt diff) ?entries_per_axis ~labels
@@ -1849,7 +1863,17 @@ let%debug5_sexp to_dag ?(single_node = false) ?(embedded_only = false) ?entries_
         in
         `Subtree_with_ID (id, `Tree (add_shape [ node ], children))
   in
-  to_dag { subtensor = t; embedded = true }
+  let root = { subtensor = t; embedded = true } in
+  Option.iter ctx ~f:(fun _ ->
+      let shown = ref [] in
+      (retrieve :=
+         fun tn ->
+           shown := tn :: !shown;
+           Second "");
+      ignore (to_dag root : PrintBox_utils.dag);
+      Option.iter visited ~f:Hash_set.clear;
+      retrieve := retrieve_all_for_print ?ctx !shown);
+  to_dag root
 
 let to_printbox ?single_node ?embedded_only ?entries_per_axis ?(with_id = false) ?(force = false)
     ?ctx ?(with_shape = false) ?(with_value = true) ~with_grad ~depth t =
@@ -1933,8 +1957,12 @@ let%debug5_sexp to_doc ?ctx ~force ~with_grad ~with_code ?(with_low_level = fals
   let open PPrint in
   (* Create document for tensor value *)
   let has_grad = with_grad && Option.is_some t.diff in
+  let retrieve =
+    retrieve_all_for_print ?ctx
+      (t.value :: (match t.diff with Some diff when with_grad -> [ diff.grad ] | _ -> []))
+  in
   let value_doc =
-    match retrieve_for_print ?ctx t.value with
+    match retrieve t.value with
     | Second tag -> string prefix_str ^^ string (" " ^ tag) ^^ if has_grad then break 1 else empty
     | First arr -> (
         match style with
@@ -1952,7 +1980,7 @@ let%debug5_sexp to_doc ?ctx ~force ~with_grad ~with_code ?(with_low_level = fals
     if with_grad then
       match t.diff with
       | Some diff -> (
-          match retrieve_for_print ?ctx diff.grad with
+          match retrieve diff.grad with
           | Second tag -> string (grad_txt diff) ^^ string (" " ^ tag)
           | First arr -> (
               match style with
