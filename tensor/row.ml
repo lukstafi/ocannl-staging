@@ -4878,6 +4878,26 @@ type proj_env = {
 
 type proj_equation = Proj_eq of proj * proj | Iterated of proj [@@deriving compare, equal, sexp]
 
+(** The refusal of a window kernel nothing sized (gh-ocannl-1691): no operand axis carries it, and a
+    padded window's extent equation omits it. Raised by [get_proj_equations] for the kernel its
+    local solve left a variable, and by [dim_to_proj] for one the projection environment does not
+    reach (gh-ocannl-1734). *)
+let unsized_kernel_error ~use_padding (v : dim_var) (dim : dim) =
+  let name = Option.value v.name ~default:(Dim_var.to_string v) in
+  let window = if use_padding then "a padded (=+) window's" else "the window's" in
+  Shape_error
+    ( [%string
+        "the window kernel %{name} has no size: no operand axis carries it, and %{window} extents \
+         do not determine it. Capture the kernel label and set it (x ++ \"s, 2*o=+k => s, o\" \
+         [\"k\"], then Shape.set_dim k 3), or give the window a kernel operand of known extent (x \
+         +* \"s, 2*o=+k; k => s, o\" w)"],
+      [ Dim_mismatch [ dim ] ] )
+
+let symbolic_kernel_error dim =
+  Shape_error
+    ( "projection_of_solved_dims: symbolic dimension not supported as convolution kernel",
+      [ Dim_mismatch [ dim ] ] )
+
 let%track4_sexp get_proj_equations (inequalities : constraint_ list) proj_axis_env env :
     proj_equation list =
   (* The difference between to_proj and dim_to_proj is that here we do not have a projection
@@ -4908,23 +4928,9 @@ let%track4_sexp get_proj_equations (inequalities : constraint_ list) proj_axis_e
               (* gh-ocannl-1691: no operand axis carries the kernel, and a padded window's extent
                  equation omits it, so nothing sized it. A captured, set kernel reaches here solved
                  (the projection-local sizing constraints of [Shape.bind_delayed_vars_to_envs]). *)
-              let name = Option.value v.name ~default:(Dim_var.to_string v) in
-              let window = if use_padding then "a padded (=+) window's" else "the window's" in
-              raise
-              @@ Shape_error
-                   ( [%string
-                       "the window kernel %{name} has no size: no operand axis carries it, and \
-                        %{window} extents do not determine it. Capture the kernel label and set it \
-                        (x ++ \"s, 2*o=+k => s, o\" [\"k\"], then Shape.set_dim k 3), or give the \
-                        window a kernel operand of known extent (x +* \"s, 2*o=+k; k => s, o\" w)"],
-                     [ Dim_mismatch [ dim ] ] )
+              raise @@ unsized_kernel_error ~use_padding v dim
           | Dim { d; _ } -> d
-          | Sym _ as dim ->
-              raise
-              @@ Shape_error
-                   ( "projection_of_solved_dims: symbolic dimension not supported as convolution \
-                      kernel",
-                     [ Dim_mismatch [ dim ] ] )
+          | Sym _ as dim -> raise @@ symbolic_kernel_error dim
           | Affine _ as dim ->
               raise
               @@ Shape_error
@@ -5236,7 +5242,7 @@ let%track7_sexp get_proj_index (proj_env : proj_env) (proj : proj) : Idx.axis_in
   in
   loop proj
 
-let rec dim_to_proj _proj_env : dim -> proj = function
+let rec dim_to_proj proj_env : dim -> proj = function
   | Var v -> Var v
   | Dim ({ proj_id = Some proj_id; _ } as solved_dim) -> Proj (proj_id, solved_dim)
   | Dim s -> Proj (Proj_id.fresh (), s)
@@ -5244,15 +5250,38 @@ let rec dim_to_proj _proj_env : dim -> proj = function
   | Sym s -> Proj (Proj_id.fresh (), solved_dim_of_sym s)
   | Affine { stride; over; conv = None; stride_offset } ->
       Conv_input
-        { stride; over = dim_to_proj _proj_env over; conv = None; stride_offset; target_id = None }
+        { stride; over = dim_to_proj proj_env over; conv = None; stride_offset; target_id = None }
   | Affine { stride; over; conv = Some { dilation; kernel; use_padding }; stride_offset } ->
-      (* FIXME: is this sufficient? *)
-      let kernel_size = match kernel with Dim { d; _ } -> d | _ -> assert false in
+      (* gh-ocannl-1734: the kernel's extent sizes a padded window's margins. The kernel here is the
+         dim as the row holds it, not substituted, so a variable is read through the projection
+         environment, as [get_proj_index] reads it; a kernel that environment does not size is the
+         same refusal as [get_proj_equations]'. *)
+      let rec extent_of_proj : proj -> int option = function
+        | Proj (_, { d; _ }) -> Some d
+        | Var v -> Option.bind (Hashtbl.find proj_env.v_env v) ~f:extent_of_proj
+        (* A kernel pinned to one position: [to_proj] maps every extent-1 axis there. *)
+        | Solved (Fixed_idx _) -> Some 1
+        | Solved _ | Conv_input _ | Concat _ -> None
+      in
+      let kernel_size =
+        match kernel with
+        | Dim { d; _ } -> d
+        | Var v -> (
+            match extent_of_proj (Var v) with
+            | Some d -> d
+            | None -> raise @@ unsized_kernel_error ~use_padding v kernel)
+        | Sym _ -> raise @@ symbolic_kernel_error kernel
+        | Affine _ | Concat _ ->
+            raise
+            @@ Shape_error
+                 ( "projection_of_solved_dims: a window kernel must be a single axis",
+                   [ Dim_mismatch [ kernel ] ] )
+      in
       Conv_input
         {
           stride;
-          over = dim_to_proj _proj_env over;
-          conv = Some { dilation; kernel = dim_to_proj _proj_env kernel; kernel_size; use_padding };
+          over = dim_to_proj proj_env over;
+          conv = Some { dilation; kernel = dim_to_proj proj_env kernel; kernel_size; use_padding };
           stride_offset;
           target_id = None;
         }
@@ -5268,7 +5297,10 @@ let rec dim_to_proj _proj_env : dim -> proj = function
             | Sym ({ sym_proj_id = None; _ } as s) ->
                 let proj_id = Proj_id.fresh () in
                 (proj_id, { (solved_dim_of_sym s) with proj_id = Some proj_id })
-            | _ -> failwith "dim_to_proj: Concat component not a solved dim")
+            | d ->
+                raise
+                @@ Shape_error
+                     ("dim_to_proj: concat component not fully solved", [ Dim_mismatch [ d ] ]))
       in
       Concat proj_dims
 
