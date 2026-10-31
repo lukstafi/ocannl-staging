@@ -2,14 +2,14 @@
 # Type-check the OCaml snippets a scan's cases module feeds its scanner, before its arms are trusted
 # (docs/agent-notes/build-and-test.md, Repository scans): the parser accepts programs the type
 # checker rejects, and an arm over one pins the scanner's reading of code no compiler would build.
-# Usage: tools/typecheck-scan-cases.sh [--stub STUB.mli | --no-stub] [-I DIR]... [--verbose] CASES.ml...
-#        tools/typecheck-scan-cases.sh --stubbed [--verbose]
+# Usage: tools/typecheck-scan-cases.sh [--stub STUB.mli | --no-stub] [-I DIR]... [--no-project-context]
+#                                      [--verbose] CASES.ml...
+#        tools/typecheck-scan-cases.sh --stubbed [--no-project-context] [--verbose]
 #
 # Each CASES module is read by tools/scan_case_snippets.exe (built here with dune; its header is the
 # contract): every {ocaml|...|ocaml} snippet in it becomes its own unit, type-checked with
 # `ocamlc -stop-after typing` and reported by its case name and line -- REJECTED with the compiler's
-# message, REFUSED by name when it carries project syntax (`let%op`, `[%cd ...]`, `[@@deriving]`)
-# that bare ocamlc cannot expand. Snippets spelled as ordinary "..." literals are not read.
+# message. Snippets spelled as ordinary "..." literals are not read.
 #
 # The stand-in names a table's snippets call come from a stub module compiled first and OPENED at
 # each snippet's top. A table's stub is its companion `scan_case_stubs/<table>.mli` beside it,
@@ -18,12 +18,21 @@
 # --stubbed checks every table under test/operations that has a companion stub. -I adds a
 # directory of compiled interfaces a snippet opens (`-I "$(opam var lib)/base"`).
 #
+# A snippet in project syntax (`let%op`, `[%cd ...]`, `[@@deriving]`, any extension node) is checked
+# in the context of the module of this repository the stub names in
+# `[@@@owning_module ("lib/nn_blocks.ml", "open Ocannl_tensor.Operation.DSL_modules")]`: dune builds
+# that module's directory, and the arm, after that prelude and the stub's open, is compiled with the
+# flags dune reports for that module (its stanza's ppx driver, opens and libraries) -- which needs
+# the project's dependencies installed. Without such a declaration, or under --no-project-context,
+# the snippet is REFUSED by name and not compiled.
+#
 # Exit status: the worst over the tables -- 0 clean, 1 a rejected snippet or a stale known
-# rejection, 2 a usage error, a build or stub that fails, or a table in which nothing was checked.
+# rejection, 2 a usage error, a build or stub that fails (an owning module's context included), or a
+# table in which nothing was checked.
 set -u
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd) || exit 2
-usage() { sed -n '5,6p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
-stub_mode=companion stub= stubbed=0 verbose=() includes=() tables=()
+usage() { sed -n '5,7p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
+stub_mode=companion stub= stubbed=0 verbose=() includes=() tables=() context=()
 while [ $# -gt 0 ]; do
   case $1 in
     --stub)
@@ -37,6 +46,7 @@ while [ $# -gt 0 ]; do
       includes+=(-I "$2")
       shift ;;
     --verbose) verbose=(--verbose) ;;
+    --no-project-context) context=(--no-project-context) ;;
     -h|--help) sed -n '2,${/^#/!q;p;}' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     -*) echo "typecheck-scan-cases: unknown option '$1'" >&2; usage ;;
     *) tables+=("$1") ;;
@@ -93,8 +103,8 @@ for table in "${tables[@]}"; do
   esac
   printf '== %s%s\n' "$table" "${stub_args[1]:+ (stub ${stub_args[1]})}"
   rc=0
-  "$engine" ${verbose[@]+"${verbose[@]}"} ${stub_args[@]+"${stub_args[@]}"} \
-    ${includes[@]+"${includes[@]}"} "$table" || rc=$?
+  "$engine" --root "$root" ${verbose[@]+"${verbose[@]}"} ${context[@]+"${context[@]}"} \
+    ${stub_args[@]+"${stub_args[@]}"} ${includes[@]+"${includes[@]}"} "$table" || rc=$?
   [ "$rc" -le "$worst" ] || worst=$rc
 done
 exit "$worst"

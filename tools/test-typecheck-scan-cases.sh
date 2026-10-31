@@ -9,11 +9,23 @@
 # no compiler accepts turns it red until the arm is fixed or listed as a known rejection. The other
 # legs run it over fixture tables planted here: an ill-typed arm and a duplicate top-level module (it
 # parses; the type checker rejects it) are REJECTED by name while their well-typed neighbours, an arm
-# rebinding a stub name over the open and both case-table shapes are not; project syntax is REFUSED
-# by name; the companion stub is found beside its table; a known rejection holds only while the
-# compiler still rejects that arm with its listed text; a run that checked nothing, a stub that
-# does not compile or lists a malformed or repeated rejection, and a usage error each exit 2; the
-# engine is found under a moved DUNE_BUILD_DIR; and no arm sees a neighbouring arm's compiled unit.
+# rebinding a stub name over the open and both case-table shapes are not; project syntax with no
+# owning module declared is REFUSED by name; the companion stub is found beside its table; a known
+# rejection holds only while the compiler still rejects that arm with its listed text; a run that
+# checked nothing, a stub that does not compile or lists a malformed or repeated rejection or
+# owning module, and a usage error each exit 2; the engine is found under a moved DUNE_BUILD_DIR; no
+# arm sees a neighbouring arm's compiled unit; and an `~interface:` snippet is compiled as a
+# signature.
+#
+# The legs tagged #project check project-syntax arms (`let%op`, extensions) in an owning module's
+# context, which builds that module of this repository and so needs the project's dependencies:
+# leg 10 checks every arm of the repository tables that leg 1 refuses (run without the context), and
+# leg 11 plants a negative control -- an `let%op` arm no compiler builds, the spelling a scan table
+# carried until gh-ocannl-1587, and an extension no preprocessor expands are REJECTED beside an
+# accepted arm, which only the stanza's ppx and the declared prelude make well-typed. Where the
+# project's libraries are not installed (dune reports `Library "..." not found`), both are counted
+# skips; CI's toolchain job expects them (tools/harness-skips-ci-toolchain.txt), and the build
+# matrix runs them.
 #
 # It needs dune and ocamlc (the subject builds its engine, which links ppxlib, and compiles each
 # snippet); without them every leg is a counted skip.
@@ -81,8 +93,8 @@ let plain = ("an ordinary literal is not a snippet", "let x = 1 + \"one\"")
 EOF
 
 leg1() {
-  run --stubbed
-  expect_rc "the repository's stubbed tables" 0
+  run --stubbed --no-project-context
+  expect_rc "the repository's stubbed tables, project syntax refused" 0
   local tables
   tables=$(grep -c '^typecheck-scan-cases: .* 0 rejected, .* 0 stale listing' "$out")
   if [ "$tables" -ge 2 ]; then report 0 "at least two tables were checked clean ($tables)"
@@ -101,6 +113,7 @@ leg2() {
   has "the well-typed arm, over the stub's name, is accepted" "ok        $table:3: a well-typed arm"
   has "a rebinding of a stub name is legal over the open" "ok        $table:10: an arm rebinding a stub name"
   has "project syntax is refused by name" "REFUSED   $table:13: a project-syntax arm"
+  has "for want of an owning module" "the stub declares no [@@@owning_module] to check it in"
   has "an application's arm is named by its unlabelled string" \
     "ok        $table:16: an application-shaped arm"
   has "a snippet outside a case is named by its line" "ok        $table:17: (unnamed snippet)"
@@ -218,5 +231,146 @@ leg7() {
 harness_leg_run '7: usage errors exit 2' leg7
 harness_leg_run '8: the engine is run from the build directory dune was told to use' leg8
 harness_leg_run '9: each arm is compiled apart from the others' leg9
+
+# The project-syntax fixtures: a table whose arms need lib/nn_blocks.ml's stanza (its ppx, its
+# libraries) and the DSL open its stub's prelude carries, and the stub naming that module.
+mkdir -p "$TMP/p/scan_case_stubs"
+pstub=$TMP/p/scan_case_stubs/project_scan_cases.mli
+cat >"$pstub" <<'EOF'
+val use_padding : bool
+[@@@owning_module "lib/nn_blocks.ml", "open! Base\nopen Ocannl_tensor.Operation.DSL_modules"]
+EOF
+ptable=$TMP/p/project_scan_cases.ml
+cat >"$ptable" <<'EOF'
+let cases =
+  [
+    ("a well-typed op arm", {ocaml|let%op f ?(stride = 1) () x = x ++ "stride*o+k => o"|ocaml});
+    ("an op arm without its unit parameter", {ocaml|let%op f ?(stride = 1) x = x ++ "stride*o+k => o"|ocaml});
+    ("an extension no preprocessor expands", {ocaml|[%%no_such_extension let x = 1]|ocaml});
+    ("a plain arm beside them", {ocaml|let y = not use_padding|ocaml});
+  ]
+EOF
+# Whether the run just made failed only for want of the project's installed libraries: the one
+# reason a #project leg skips rather than fails.
+project_absent() {
+  [ "$rc" = 2 ] && grep -qE 'Library "[^"]+" not found' "$err"
+}
+project_absent_reason() {
+  printf "the project's libraries are not installed (dune: %s)" \
+    "$(grep -m1 -oE 'Library "[^"]+" not found' "$err")"
+}
+
+leg10() {
+  run --stubbed --no-project-context
+  local refused checked tables clean
+  refused=$(grep -c '^REFUSED ' "$out")
+  run --stubbed
+  if project_absent; then
+    skip "the repository tables' project-syntax arms, checked in their owning modules' contexts" \
+      "$(project_absent_reason)"
+    return
+  fi
+  expect_rc "the repository's stubbed tables, project syntax in context" 0
+  lacks "no arm is refused in context" "REFUSED "
+  checked=$(sed -n 's/^CONTEXT   \([0-9][0-9]*\) project-syntax .*/\1/p' "$out" | awk '{ n += $1 } END { print n + 0 }')
+  if [ "$refused" -gt 0 ] && [ "$checked" = "$refused" ]; then
+    report 0 "every arm refused without the context is checked in it ($refused)"
+  else
+    report 1 "every arm refused without the context is checked in it" \
+      "$refused refused, $checked checked in context: $(grep '^CONTEXT' "$out" | tr '\n' '|')"
+  fi
+  tables=$(grep -c '^== ' "$out")
+  clean=$(grep -c '^typecheck-scan-cases: .* 0 rejected, .*; 0 refused; 0 stale listing' "$out")
+  if [ "$tables" -ge 2 ] && [ "$clean" = "$tables" ]; then report 0 "every table is clean ($tables)"
+  else report 1 "every table is clean" "$clean of $tables in: $(grep '^typecheck-scan-cases' "$out" | tr '\n' '|')"
+  fi
+}
+harness_leg_run '10: the repository tables project-syntax arms type-check in their owning contexts #project' leg10
+
+leg11() {
+  run --verbose "$ptable"
+  if project_absent; then
+    skip "planted project-syntax arms, checked in an owning module's context" "$(project_absent_reason)"
+    return
+  fi
+  expect_rc "a table with project-syntax arms no compiler builds" 1
+  has "the op arm the stanza's ppx makes well-typed is accepted" "ok        $ptable:3: a well-typed op arm"
+  has "an op arm without its unit parameter is rejected by name" \
+    "REJECTED  $ptable:4: an op arm without its unit parameter"
+  has "with the compiler's reading of the expansion" "which is not a record type"
+  has "at its own line of the table, through the ppx" "File \"$ptable\", line 4"
+  has "an extension no preprocessor expands is rejected" \
+    "REJECTED  $ptable:5: an extension no preprocessor expands"
+  has "as the compiler leaves it" "Uninterpreted extension 'no_such_extension'"
+  has "a plain arm beside them is still checked" "ok        $ptable:6: a plain arm beside them"
+  has "the context is named" "CONTEXT   3 project-syntax snippet(s) checked in the context of lib/nn_blocks.ml"
+  has "the summary counts every decision" \
+    "4 snippet(s) checked: 2 accepted, 2 rejected, 0 known rejection(s); 0 refused; 0 stale"
+
+  local stub="$TMP/p/variant.mli"
+  { cat "$pstub"
+    printf '%s\n' '[@@@known_rejection ("an op arm without its unit parameter", "not a record type")]'
+    printf '%s\n' '[@@@known_rejection ("an extension no preprocessor expands", "Uninterpreted extension")]'
+  } >"$stub"
+  run --stub "$stub" "$ptable"
+  expect_rc "both project-syntax rejections listed with their text" 0
+  has "a listed project-syntax rejection is still printed" \
+    "REJECTED (known: the stub lists it)  $ptable:4: an op arm without its unit parameter"
+
+  printf '%s\n' 'val use_padding : bool' '[@@@owning_module "lib/nn_blocks.ml"]' >"$stub"
+  run --stub "$stub" "$ptable"
+  expect_rc "the owning module without the prelude's DSL open" 1
+  has "rejects the arm only the prelude makes well-typed" "REJECTED  $ptable:3: a well-typed op arm"
+
+  printf '%s\n' 'val use_padding : bool' \
+    '[@@@owning_module "lib/nn_blocks.ml", "open No_such_module_anywhere"]' >"$stub"
+  run --stub "$stub" "$ptable"
+  expect_rc "a prelude that does not compile" 2
+  if grep -qF "prelude of $stub does not compile" "$err"; then report 0 "is named as the prelude"
+  else report 1 "is named as the prelude" "stderr: $(head -n 6 "$err" | tr '\n' '|')"
+  fi
+}
+harness_leg_run '11: a project-syntax arm no compiler builds is rejected in its owning context #project' leg11
+
+leg12() {
+  run --no-project-context "$ptable"
+  expect_rc "--no-project-context over a table with project-syntax arms" 0
+  has "refuses them by name" "REFUSED   $ptable:3: a well-typed op arm"
+  has "saying why" "--no-project-context: not built in its owning module's context"
+  has "and checks the plain arm" "1 snippet(s) checked: 1 accepted, 0 rejected, 0 known rejection(s); 3 refused"
+
+  local stub="$TMP/p/declared.mli"
+  printf '%s\n' 'val use_padding : bool' '[@@@owning_module 3]' >"$stub"
+  run --stub "$stub" "$ptable"
+  expect_rc "an owning module that is not a string" 2
+  printf '%s\n' 'val use_padding : bool' '[@@@owning_module ""]' >"$stub"
+  run --stub "$stub" "$ptable"
+  expect_rc "an empty owning module" 2
+  printf '%s\n' 'val use_padding : bool' '[@@@owning_module "lib/nn_blocks.ml"]' \
+    '[@@@owning_module "tensor/tensor.ml"]' >"$stub"
+  run --stub "$stub" "$ptable"
+  expect_rc "two owning modules" 2
+  printf '%s\n' 'val use_padding : bool' '[@@@owning_module "no/such_module.ml"]' >"$stub"
+  run --stub "$stub" "$ptable"
+  expect_rc "an owning module the repository does not have" 2
+  if grep -qF 'no such file' "$err"; then report 0 "is named as missing before any build"
+  else report 1 "is named as missing before any build" "stderr: $(head -n 6 "$err" | tr '\n' '|')"
+  fi
+
+  local itable="$TMP/t/interface_cases.ml"
+  cat >"$itable" <<'CASES'
+let () =
+  case ~interface:{ocaml|val f : ?feature:bool -> unit -> unit|ocaml} "a case with its interface" {ocaml|let f ?(feature = true) () = ignore feature|ocaml};
+  case ~interface:{ocaml|val g : no_such_type|ocaml} "a case with an ill-typed interface" {ocaml|let g = 1|ocaml}
+CASES
+  run --no-stub --verbose "$itable"
+  expect_rc "a table with an ill-typed interface snippet" 1
+  has "a well-typed interface is accepted as a signature" "ok        $itable:2: a case with its interface (interface)"
+  has "beside its implementation" "ok        $itable:2: a case with its interface"
+  has "an ill-typed interface is rejected by its case's name" \
+    "REJECTED  $itable:3: a case with an ill-typed interface (interface)"
+  has "as a type error, not as a value declaration outside a signature" "Unbound type constructor no_such_type"
+}
+harness_leg_run '12: project syntax refused without its context, owning-module declarations and interface snippets' leg12
 
 finish

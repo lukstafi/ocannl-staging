@@ -31,32 +31,33 @@ let () =
   case "forwarding an optional argument is a use" {ocaml|let f ?scale x = helper ?scale x|ocaml}
     ~implemented:true ~honest:true;
   case "an op spec coefficient is a ppx-generated use"
-    {ocaml|let%op f ?(stride = 1) x = x ++ "stride*o+k => o"|ocaml} ~implemented:true ~honest:true;
+    {ocaml|let%op f ?(stride = 1) () x = x ++ "stride*o+k => o"|ocaml} ~implemented:true
+    ~honest:true;
   case "an op axis label is not a ppx-generated use"
-    {ocaml|let%op f ?(o = 1) x = x ++ "i => o"|ocaml} ~implemented:false ~honest:false;
+    {ocaml|let%op f ?(o = 1) () x = x ++ "i => o"|ocaml} ~implemented:false ~honest:false;
   case "an op dilation coefficient is a ppx-generated use"
-    {ocaml|let%op f ?(dilation = 1) x = x ++ "o<+dilation*k => o"|ocaml} ~implemented:true
+    {ocaml|let%op f ?(dilation = 1) () x = x ++ "o<+dilation*k => o"|ocaml} ~implemented:true
     ~honest:true;
   case "a concat coefficient is a ppx-generated use"
-    {ocaml|let%op f ?(stride = 1) x = (x, x) ++^ "stride*o+k; i => o"|ocaml} ~implemented:true
+    {ocaml|let%op f ?(stride = 1) () x = (x, x) ++^ "stride*o+k; i => o"|ocaml} ~implemented:true
     ~honest:true;
   case "a qualified custom operator does not generate a use"
-    {ocaml|let%op f ?(stride = 1) x = let _ = stride in My.( ++ ) x "stride*o+k => o"|ocaml}
+    {ocaml|let%op f ?(stride = 1) () x = let _ = stride in My.( ++ ) x "stride*o+k => o"|ocaml}
     ~implemented:false ~honest:false;
   case "an einsum-shaped argument outside a unary PPX spec position is not a generated use"
-    {ocaml|let%op f ?(stride = 1) x = let _ = stride in let ( ++ ) x _ = x in x ++ spec "stride*o+k => o"|ocaml}
+    {ocaml|let%op f ?(stride = 1) () x = let _ = stride in let ( ++ ) x _ = x in x ++ spec "stride*o+k => o"|ocaml}
     ~implemented:false ~honest:false;
   case "an axis-only literal without the PPX dispatch guard generates no read"
-    {ocaml|let%op f ?(stride = 1) x = let _ = stride in let ( ++ ) x _ = x in x ++ "stride*o+k"|ocaml}
+    {ocaml|let%op f ?(stride = 1) () x = let _ = stride in let ( ++ ) x _ = x in x ++ "stride*o+k"|ocaml}
     ~implemented:false ~honest:false;
   case "concat generated reads are op-only"
-    {ocaml|let%cd f ?(stride = 1) x = let _ = stride in let ( ++^ ) x _ = x in x ++^ "stride*o+k; i => o"|ocaml}
+    {ocaml|let f ?(stride = 1) x = let _ = stride in let ( ++^ ) x _ = x in [%cd x ++^ "stride*o+k; i => o"]|ocaml}
     ~implemented:false ~honest:false;
   case "legacy convolution padding is a ppx-generated use"
-    {ocaml|let%op f ?(use_padding = true) x = x ++ "stride*o+k => o"|ocaml} ~implemented:true
+    {ocaml|let%op f ?(use_padding = true) () x = x ++ "stride*o+k => o"|ocaml} ~implemented:true
     ~honest:true;
   case "a shadowed op spec coefficient does not use the outer option"
-    {ocaml|let%op f ?(stride = 1) x = let stride = 2 in x ++ "stride*o+k => o"|ocaml}
+    {ocaml|let%op f ?(stride = 1) () x = let stride = [%oc 2] in x ++ "stride*o+k => o"|ocaml}
     ~implemented:false ~honest:false;
   case "an unrelated string in an op body does not use the option"
     {ocaml|let%op f ?(stride = 1) x = ignore "stride*o+k => o"; x|ocaml} ~implemented:false
@@ -71,7 +72,7 @@ let () =
     {ocaml|let f ?(stride = 1) x = [%op x ++ "stride*o+k => o"]|ocaml} ~implemented:true
     ~honest:true;
   case "an oc anti-quotation does not generate einsum coefficient reads"
-    {ocaml|let%op f ?(stride = 1) x = let _ = stride in [%oc let ( ++ ) x _ = x in x ++ "stride*o+k => o"]|ocaml}
+    {ocaml|let%op f ?(stride = 1) () x = let _ = stride in [%oc let ( ++ ) x _ = x in x ++ "stride*o+k => o"]|ocaml}
     ~implemented:false ~honest:false;
   case "ordinary label discarded through let-wildcard is rejected"
     {ocaml|let f ?(feature = true) () = let _ = feature in ()|ocaml} ~implemented:false
@@ -268,6 +269,7 @@ let service = let ignore x = enable x in { run = fun ?(_feature = true) () -> ig
   case "replacing an exported value removes its old nested optional APIs"
     {ocaml|type service = { run : ?feature:bool -> unit -> unit }
 let service = { run = fun ?(feature = true) () -> ignore feature }
+type other_service = { run : ?other:bool -> unit -> unit }
 let service = { run = fun ?(other = true) () -> enable other }|ocaml}
     ~implemented:true ~honest:true;
   case "an optional function in an exported packed module is inventoried"
@@ -310,7 +312,7 @@ let make ?(marker = true) x = if marker then (match x with g -> g) else (match x
 let g = ()|ocaml}
     ~implemented:true ~honest:true;
   case "a dynamic binary capture operand generates no read"
-    {ocaml|let%op f ?(stride = 1) kernel dynamic_dims = let _ = stride in let ( +* ) x y = x, y in kernel +* kernel "stride*o+k => o" dynamic_dims|ocaml}
+    {ocaml|let%op f ?(stride = 1) () kernel dynamic_dims = let _ = stride in let ( +* ) ?label:_ _ y = y in kernel +* kernel "stride*o+k => o" dynamic_dims|ocaml}
     ~implemented:false ~honest:false;
   case ~argument:"feature" "recursive-module definitions retain qualification"
     {ocaml|module rec A : sig val f : ?feature:bool -> unit -> unit end = struct
