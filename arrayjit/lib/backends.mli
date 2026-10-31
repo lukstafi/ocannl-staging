@@ -66,8 +66,14 @@ val buffer_aliased : Ir.Backend_intf.ctx_buffers -> Ir.Tnode.t -> bool
     read within the routine computing it, and a host read or a later routine's read of it is refused
     (the [aliased_read_error] of [to_host] and of linking). [false] for a node with no buffer. *)
 
+(** A device location {!finalize} gave up: a whole pool it freed, or one tenant location trimmed
+    from the tail of an upload arena whose pool a sibling still holds -- room a later upload is
+    handed at the same location (gh-ocannl-1738). *)
+type retired_location = Pool of int | Location of Ir.Backend_intf.buffer_loc
+
 val finalize :
   'dev 'runner 'event.
+  ?on_retire:(retired_location -> unit) ->
   (module Ir.Backend_intf.Backend
      with type dev = 'dev
       and type event = 'event
@@ -78,7 +84,10 @@ val finalize :
     per-device constants. Idempotent (guarded by the context's [finalized] flag), and freeing is
     per-[pool_id] rather than per-node: one pool holds several nodes. Upload siblings retain shared
     working pools until their last owner releases them. If cleanup raises after a strict prefix of
-    pools, retry skips that prefix and frees only the remainder.
+    pools, retry skips that prefix and frees only the remainder. [on_retire] is called once for
+    every location given up, as it is given up (so a cleanup that raises part way has reported
+    exactly what it freed): each freed pool, the root constant pools this release was the last
+    binder of, and each trimmed arena tenant.
 
     This is NOT optional if the memory matters (gh-ocannl-550, correcting the note that used to
     stand here). A pool's backend buffer is never garbage-collected, because the backend's private

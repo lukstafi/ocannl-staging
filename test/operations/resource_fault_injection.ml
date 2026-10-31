@@ -397,6 +397,9 @@ let () =
   let release_ctx = Context.from_host (Context.cpu ()) x.Tensor.value nd in
   let release_ctx = Context.from_host release_ctx z.Tensor.value nd_z in
   let before_release = AC.snapshot () in
+  p "both uploads are recorded as written before the release"
+    (Context.buffer_written release_ctx x.Tensor.value
+    && Context.buffer_written release_ctx z.Tensor.value);
   let raised, hits =
     injected ~at:2 FI.Finalize_before_free (fun () -> Context.release release_ctx)
   in
@@ -406,6 +409,11 @@ let () =
     (pools_freed before_release after_failed_release = 1
     && live_working_delta before_release after_failed_release = -1
     && contexts_released before_release after_failed_release = 0);
+  (* gh-ocannl-1738: the ledger's written records follow the frees exactly. Pools are freed in id
+     order, so the one completed free is [x]'s, minted first. *)
+  p "failed finalize retires the written record of the freed pool only"
+    ((not (Context.buffer_written release_ctx x.Tensor.value))
+    && Context.buffer_written release_ctx z.Tensor.value);
   let retry_hits = ref 0 in
   FI.with_callback
     (fun point -> if FI.equal_point point FI.Finalize_before_free then Int.incr retry_hits)
@@ -416,6 +424,8 @@ let () =
     && pools_freed before_release after_retry = 2
     && live_working_delta before_release after_retry = -2
     && contexts_released before_release after_retry = 1);
+  p "finalize retry retires the remaining written record"
+    (not (Context.buffer_written release_ctx z.Tensor.value));
   let second_hits = ref 0 in
   FI.with_callback (fun _ -> Int.incr second_hits) ~f:(fun () -> Context.release release_ctx);
   let after_second = AC.snapshot () in

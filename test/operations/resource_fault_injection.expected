@@ -45,9 +45,12 @@ mixed transfer destination releases all three pools exactly once: true
 finalize-await injection fired: true
 failed finalize await commits no cleanup state: true
 finalize-await control retry releases exactly once: true
+both uploads are recorded as written before the release: true
 finalize injection fired after one successful free: true
 failed finalize reports no release and records its one completed free: true
+failed finalize retires the written record of the freed pool only: true
 finalize retry calls free only for the unreleased pool: true
+finalize retry retires the remaining written record: true
 finalize control is idempotent after success: true
 cache-store control commits a readable entry: true
 cache-store injection fired: true

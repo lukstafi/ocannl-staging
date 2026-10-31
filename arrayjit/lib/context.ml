@@ -75,11 +75,12 @@ type execution_ledger = {
       (** The routine whose execution most recently wrote each concrete ordinary buffer. Unlike the
           immutable compile frontier, this follows re-execution order without conflating sibling
           contexts that allocate distinct buffers for the same tnode. External writes remove their
-          buffer. Entries outlive a {!release}, and a released upload leaf's arena tail is handed to
-          a survivor at the same location (gh-ocannl-1328); such an entry cannot mislead: only
-          [upload_slot] re-issues a location, and both of its callers ([from_host], [copy]) record
-          an external write over it, and every writer here is executed ([run] adds both,
-          [rollback_execution] removes both), so it could only ever report "ready". *)
+          buffer. Entries outlive a {!release} (unlike [written_buffers]'s), and a released upload
+          leaf's arena tail is handed to a survivor at the same location (gh-ocannl-1328); such an
+          entry cannot mislead: only [upload_slot] re-issues a location, and both of its callers
+          ([from_host], [copy]) record an external write over it, and every writer here is executed
+          ([run] adds both, [rollback_execution] removes both), so it could only ever report
+          "ready". *)
   merge_buffer_readers : (int * int) list Hashtbl.M(Int).t;
       (** [(consumer routine id, owning context id)] by synthetic merge-transfer id, one entry per
           release unit that keeps the consumer live (an upload fork adds one, see [derive]).
@@ -104,8 +105,9 @@ type execution_ledger = {
           [check_lineage_runnable] asks of a read-before-write input (gh-ocannl-1339). Ledger-wide
           and keyed by the concrete buffer rather than by the node or the immutable context value: a
           caller that discarded the context [run] returned does not lose the fact, and a sibling
-          that wrote ITS buffer for the same node does not vouch for this one. Shrinks only through
-          [rollback_execution], by [fresh_writes]. *)
+          that wrote ITS buffer for the same node does not vouch for this one. Shrinks through
+          [rollback_execution], by [fresh_writes], and through {!release}, by the locations it gave
+          up ([retire_written], gh-ocannl-1738). *)
   fresh_writes : Buffer_key.t list Hashtbl.M(Int).t;
       (** Per routine id, the [written_buffers] entries the routine's latest {!run} introduced —
           what [rollback_execution] withdraws for a run known not to have written. *)
@@ -1158,6 +1160,9 @@ let stored_components ctx tn =
             (Hashtbl.find c.BI.optimize_ctx.Ir.Low_level.computations tn));
     }
 
+let buffer_written ctx tn =
+  Option.exists (buffer_key ctx tn) ~f:(Set.mem ctx.ledger.written_buffers)
+
 let ledger_entries ctx =
   let l = ctx.ledger in
   Hashtbl.length l.routine_names + Set.length l.executed
@@ -1482,6 +1487,22 @@ let copy_nd (src : Nd.t) : Nd.t =
     }
     src
 
+(* gh-ocannl-1738: the written records of the locations a release gave up. A freed pool's locations
+   are never handed out again (pool ids are minted per device and never reused), but a trimmed
+   upload-arena tail is, at the same locations, to the next upload of a surviving sibling: an entry
+   left behind would vouch for a buffer nobody wrote since. Retired from [fresh_writes] too, so a
+   later rollback of a routine that wrote there cannot withdraw a later writer's entry. *)
+let retire_written ledger ~device_id retired =
+  let gone (d, (loc : BI.buffer_loc)) =
+    d = device_id
+    && List.exists retired ~f:(function
+      | Backends.Pool pool_id -> loc.pool_id = pool_id
+      | Backends.Location l -> BI.equal_buffer_loc l loc)
+  in
+  if not (List.is_empty retired) then (
+    ledger.written_buffers <- Set.filter ledger.written_buffers ~f:(fun key -> not (gone key));
+    Hashtbl.map_inplace ledger.fresh_writes ~f:(List.filter ~f:(fun key -> not (gone key))))
+
 let release ctx =
   let retire_readers () =
     Hashtbl.to_alist ctx.ledger.merge_buffer_readers
@@ -1492,19 +1513,25 @@ let release ctx =
         if List.is_empty remaining then Hashtbl.remove ctx.ledger.merge_buffer_readers transfer_id
         else Hashtbl.set ctx.ledger.merge_buffer_readers ~key:transfer_id ~data:remaining)
   in
+  let retired = ref [] in
+  let device_id = Backends.query ctx.wrapped { q = (fun _ c -> c.BI.device.device_id) } in
   match
     Backends.query ctx.wrapped
       {
         q =
           (fun (type d r e) ((module Backend) : (d, r, e) Backends.backend_module) c ->
-            Backends.finalize (module Backend) c);
+            Backends.finalize (module Backend) c ~on_retire:(fun r -> retired := r :: !retired));
       }
   with
-  | () -> retire_readers ()
+  | () ->
+      retire_written ctx.ledger ~device_id !retired;
+      retire_readers ()
   | exception exn ->
       (* gh-ocannl-1445: a release hook (graph execs) that fails runs after the pools were freed and
-         leaves the context finalized, so it is a released consumer all the same. *)
+         leaves the context finalized, so it is a released consumer all the same. A cleanup that
+         raised part way reported only what it did give up, so that is retired either way. *)
       let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+      retire_written ctx.ledger ~device_id !retired;
       if Backends.query ctx.wrapped { q = (fun _ c -> Atomic.get c.BI.finalized) } then
         retire_readers ();
       Stdlib.Printexc.raise_with_backtrace exn backtrace
@@ -1560,9 +1587,8 @@ let identity_copy ~(lhs : Tn.t) ~(rhs : Tn.t) : Asgns.t =
     }
 
 (* Undoes the throwaway routine's ledger records after its context is released: they are private to
-   it -- nothing is compiled from the child, and its output is the fresh [proxy] -- and a stale
-   [written_buffers] entry for the freed proxy buffer would otherwise vouch for whatever a later
-   allocation places at the same location. *)
+   it -- nothing is compiled from the child, and its output is the fresh [proxy]. (The release
+   itself already retired the freed proxy buffer's [written_buffers] entry, gh-ocannl-1738.) *)
 let retire_recompute_records ctx (routine : routine) =
   rollback_execution ctx routine.routine_id;
   Hashtbl.remove ctx.ledger.routine_names routine.routine_id

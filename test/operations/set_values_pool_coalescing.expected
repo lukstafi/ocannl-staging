@@ -53,8 +53,13 @@ after a sibling's release, the next upload takes the room it freed rather than a
 every upload of the surviving fork reads back: true
 releasing both leaves leaves no working pools or context owners (trimmed tail): true
 the released leaf's writer ran on its buffer: true
+before the release, the ledger records the leaf's tail as written: true
+the release retires the written record of the tail it trims: true
+the written records of the locations a sibling still holds stay: true
 the survivor's upload reuses the released tail: true
 a merge transfer from the reused location carries the survivor's upload: true
+the reused location is recorded as written by the survivor's upload: true
+the release retires the written record of a pool it frees: true
 releasing every leaf leaves no working pools or context owners (reused tail): true
 device copies
 24 uploads took at most 1 + ceil(log2 24) working pools: true
@@ -110,6 +115,11 @@ after a sibling's release, the next upload takes the room it freed rather than a
 every upload of the surviving fork reads back: true
 releasing both leaves leaves no working pools or context owners (trimmed tail): true
 the released leaf's writer ran on its buffer: true
+before the release, the ledger records the leaf's tail as written: true
+the release retires the written record of the tail it trims: true
+the written records of the locations a sibling still holds stay: true
 the survivor's upload reuses the released tail: true
 a merge transfer from the reused location carries the survivor's upload: true
+the reused location is recorded as written by the survivor's upload: true
+the release retires the written record of a pool it frees: true
 releasing every leaf leaves no working pools or context owners (reused tail): true

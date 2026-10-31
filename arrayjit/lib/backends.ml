@@ -1777,10 +1777,12 @@ struct
   include Backend_device
 end
 
+type retired_location = Pool of int | Location of Backend_intf.buffer_loc
+
 let debug_check_upload_arenas =
   lazy (Utils.get_global_flag ~default:false ~arg_name:"debug_check_upload_arenas")
 
-let finalize (type dev runner event)
+let finalize ?(on_retire = fun (_ : retired_location) -> ()) (type dev runner event)
     (module Backend : Backend with type dev = dev and type runner = runner and type event = event)
     (ctx : Backend.context) : unit =
   (* The flag means "this context's pools have been freed", NOT "a free was attempted" — so cleanup
@@ -1814,13 +1816,25 @@ let finalize (type dev runner event)
                   if not (List.is_empty remaining) then (
                     Hashtbl.set owners ~key:pool_id ~data:remaining;
                     List.iter ctx.upload_arenas.arenas ~f:(fun a ->
-                        if a.arena_pool_id = pool_id then
-                          a.tenants <-
+                        if a.arena_pool_id = pool_id then (
+                          let kept =
                             List.drop_while a.tenants ~f:(fun t ->
-                                not (List.exists remaining ~f:(fun tip -> holds_tenant !tip a t)))))
+                                not (List.exists remaining ~f:(fun tip -> holds_tenant !tip a t)))
+                          in
+                          (* The trimmed tail is room [upload_slot] hands out again, at the same
+                             locations (gh-ocannl-1738). A zero-sized tenant can share a kept one's
+                             location, which stays. *)
+                          let trimmed = List.length a.tenants - List.length kept in
+                          List.iter (List.take a.tenants trimmed) ~f:(fun t ->
+                              if
+                                not
+                                  (List.exists kept ~f:(fun k -> k.tenant_offset = t.tenant_offset))
+                              then on_retire (Location { pool_id; offset = t.tenant_offset }));
+                          a.tenants <- kept)))
                   else (
                     Resource_fault_injection.hit Finalize_before_free;
                     free_and_forget_pool ctx.device ~free_pool pool_id;
+                    on_retire (Pool pool_id);
                     Hashtbl.remove owners pool_id;
                     ctx.upload_arenas.arenas <-
                       List.filter ctx.upload_arenas.arenas ~f:(fun a -> a.arena_pool_id <> pool_id));
@@ -1849,6 +1863,7 @@ let finalize (type dev runner event)
            committed flag, like the hooks: the unit's own pools ARE freed, and the counts are
            already given back, so a failed free leaks the pool rather than freeing it twice. *)
         let unowned = reclaim_rooted_constants ctx.device ctx.held_constant_pools ~mode:`Release in
+        Set.iter unowned ~f:(fun pool_id -> on_retire (Pool pool_id));
         Option.iter Backend.free_pool ~f:(fun free_pool ->
             free_pools_continuing ctx.device ~free_pool (Set.to_list unowned));
         let violations = arena_violations () in
