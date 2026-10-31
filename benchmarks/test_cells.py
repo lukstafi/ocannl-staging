@@ -10,6 +10,8 @@ reported time comes from that revision's own `arrayjit/lib/schedule.ml` -- so a 
 proves which tree it was built from. Run through test_orchestrate.py, which imports these classes.
 """
 
+import contextlib
+import io
 import json
 import os
 import re
@@ -20,6 +22,7 @@ import sys
 import tempfile
 import textwrap
 import unittest
+import unittest.mock
 from pathlib import Path
 
 import box_gate
@@ -407,6 +410,27 @@ for p in positionals:
                 self.assertFalse(rec["ok"])
         _, _, rec = self.cell("exit3", name="refused")
         self.assertTrue(rec["refused"])
+
+    def test_a_survivor_stops_with_125(self):
+        # A group not proven gone is the one fault a driver must stop on, so both front ends that
+        # a shell driver calls name it apart (a real survivor is test_cell_group's to stage).
+        import bin_cells
+        import cell_group
+        import cells
+
+        def survive(**_):
+            raise cell_group.CleanupFailed("cells: child group 1 cleanup alive")
+
+        with unittest.mock.patch.object(cells, "run_one", survive), \
+                unittest.mock.patch.object(cells, "install_cancellation"), \
+                contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(cells.cell_main(["--backend", "cc", "--dir", str(self.dir / "s1"),
+                                              "--", str(self.exe)]), 125)
+        with unittest.mock.patch.object(cells, "run_cells", survive), \
+                unittest.mock.patch.object(cells, "install_cancellation"), \
+                contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(bin_cells.main(["--exe", str(self.exe), "--backend", "cc", "--out",
+                                             str(self.dir / "s2"), "--rounds", "2"]), 125)
 
     def test_usage_errors_run_nothing(self):
         proc, d, _ = self.cell(assignments=["OCANNL_LOG_LEVEL=1"], name="stated")

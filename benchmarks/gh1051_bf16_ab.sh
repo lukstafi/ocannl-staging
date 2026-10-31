@@ -71,8 +71,11 @@ for arm in false true; do
     --expect bf16_arithmetic="$arm" --expect default_prec=single -- \
     "$BENCH" "${SIZES[0]}" 10 "${SIZES[0]}" "${SIZES[0]}" 0 --ocannl_default_prec=single \
     --ocannl_bf16_arithmetic="$arm" --ocannl_output_debug_files_in_build_directory=true \
-    --ocannl_build_files_prefix="$prefix" ||
-    { echo "control identity run ($arm) exited $?"; FAIL=1; }
+    --ocannl_build_files_prefix="$prefix"
+  rc=$?
+  # A group that outlived its cleanup holds the device every later cell would be timed against.
+  [ "$rc" -eq 125 ] && { echo "control identity run ($arm): a process outlived its cleanup; stopping"; exit 125; }
+  [ "$rc" -eq 0 ] || { echo "control identity run ($arm) exited $rc"; FAIL=1; }
   mkdir -p "$OUT/identity_$arm"
   cp "$OUT/identity_run_$arm/build_files/$prefix"/*.hip "$OUT/identity_$arm/" 2>/dev/null
 done
@@ -90,8 +93,10 @@ for size in "${SIZES[@]}"; do
     done
   done
   python3 "$HERE/bin_cells.py" --exe "$BENCH" --backend hip --out "$OUT/n$size" \
-    --rounds "$ROUNDS" "${arms[@]}" -- "$size" 10 "$size" "$size" 0 >/dev/null ||
-    { echo "n=$size: bin_cells exited $? (see $OUT/n$size/report.md)"; FAIL=1; }
+    --rounds "$ROUNDS" "${arms[@]}" -- "$size" 10 "$size" "$size" 0 >/dev/null
+  rc=$?
+  [ "$rc" -eq 125 ] && { echo "n=$size: a process outlived its cleanup; stopping"; exit 125; }
+  [ "$rc" -eq 0 ] || { echo "n=$size: bin_cells exited $rc (see $OUT/n$size/report.md)"; FAIL=1; }
 done
 python3 "$HERE/gh1051_cells.py" ab "$OUT" "$LABEL" || FAIL=1
 exit $FAIL

@@ -45,8 +45,9 @@ interleaved) are its two front ends:
 
 Exit statuses a front end shares: 0 when every cell is clean; `REFUSED_EXIT` (3) when the only
 faults are cells that themselves exited `REFUSED_EXIT` -- a bench saying the machine refused its
-measurement (host contention, gh-ocannl-855), a fact about the box rather than a failed run; 1 for
-any other fault; 2 for a usage error.
+measurement (host contention, gh-ocannl-855), a fact about the box rather than a failed run;
+`SURVIVOR_EXIT` (125) when a cell's group was not proven gone, which stops the run and should stop
+a driver running several; 1 for any other fault; 2 for a usage error.
 
 Boundary: hermeticity here is about CONFIGURATION -- what the library reads. The machine (clocks,
 co-tenants, thermal and device state) is the operator's, through an exclusive measurement window.

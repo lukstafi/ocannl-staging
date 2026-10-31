@@ -87,6 +87,11 @@ for fixture in "${fixtures[@]}"; do
     -- --ocannl_autotune_search=false --ocannl_model_default_schedule=false \
     --ocannl_autotune_log=true >/dev/null || rc=$?
   echo "   bin_cells exit $rc (report: $fixture/report.md)"
+  if [[ $rc -eq 125 ]]; then
+    # A survivor holds the device every later cell would be timed against.
+    echo "gh1253_flip_cells: a process outlived its cleanup; stopping"
+    exit 125
+  fi
   if [[ $rc -ne 0 ]]; then failed=$((failed + 1)); fi
 done
 
