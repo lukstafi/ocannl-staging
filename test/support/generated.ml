@@ -464,24 +464,10 @@ let called_function line =
         callee
   | _ -> None
 
-(** [main_logic_lines source] is the 1-based numbers of the lines of a generated source that hold
-    its kernels' statements, in program order: each kernel's lines after its
-    {!Ir.C_syntax.main_logic_marker}, up to the closing brace of its definition -- with, where the
-    kernel was rendered OUTLINED (gh-ocannl-1603), each call to one of its parts replaced by that
-    part's body lines. So a reading of a kernel's statements does not depend on whether a size
-    threshold moved them into parts: the parts are found from what the renderer emitted -- the
-    definitions carrying {!Ir.Kernel_outline.part_attribute}, and the calls the main logic makes to
-    them -- not from how they are named. The kernel's signature, its local declarations and the
-    prepended builtins are none of these lines.
-
-    A source with no marker, a marker outside any definition, or a part definition no kernel's main
-    logic calls (a reading that would silently miss its statements) fails the run through
-    {!Verdict}. The empty source -- what {!read} answers after already failing -- reads as no lines.
-*)
-let main_logic_lines source =
-  let lines = Array.of_list (String.split_lines source) in
+(* The outlined parts' definitions of a source given as its lines and their brace pairs, by name,
+   each as the 0-based range of its body lines. *)
+let part_bodies lines intervals =
   let n = Array.length lines in
-  let intervals = brace_intervals lines in
   (* A line opening several braces: its first opens the construct the line's header declares, and
      that one closes last. *)
   let closing_of = Hashtbl.create (module Int) in
@@ -512,6 +498,26 @@ let main_logic_lines source =
                     Hashtbl.set parts
                       ~key:(Ir.Kernel_outline.trailing_ident prefix)
                       ~data:(opening + 1, closing - 1))));
+  parts
+
+(** [main_logic_lines source] is the 1-based numbers of the lines of a generated source that hold
+    its kernels' statements, in program order: each kernel's lines after its
+    {!Ir.C_syntax.main_logic_marker}, up to the closing brace of its definition -- with, where the
+    kernel was rendered OUTLINED (gh-ocannl-1603), each call to one of its parts replaced by that
+    part's body lines. So a reading of a kernel's statements does not depend on whether a size
+    threshold moved them into parts: the parts are found from what the renderer emitted -- the
+    definitions carrying {!Ir.Kernel_outline.part_attribute}, and the calls the main logic makes to
+    them -- not from how they are named. The kernel's signature, its local declarations and the
+    prepended builtins are none of these lines.
+
+    A source with no marker, a marker outside any definition, or a part definition no kernel's main
+    logic calls (a reading that would silently miss its statements) fails the run through
+    {!Verdict}. The empty source -- what {!read} answers after already failing -- reads as no lines.
+*)
+let main_logic_lines source =
+  let lines = Array.of_list (String.split_lines source) in
+  let intervals = brace_intervals lines in
+  let parts = part_bodies lines intervals in
   let reached = Hash_set.create (module String) in
   let markers =
     Array.filter_mapi lines ~f:(fun i line ->
@@ -562,3 +568,12 @@ let main_logic_lines source =
 let main_logic source =
   let lines = Array.of_list (String.split_lines source) in
   String.concat ~sep:"\n" (List.map (main_logic_lines source) ~f:(fun k -> lines.(k - 1)))
+
+(** [outlined_parts source] is the names of the outlined parts a generated source defines (the
+    definitions carrying {!Ir.Kernel_outline.part_attribute}), sorted: empty when no kernel of it
+    was rendered outlined (gh-ocannl-1603). What a run forcing outlining claims, so that a threshold
+    change leaving its kernels whole cannot turn the run into a second copy of the whole one
+    (gh-ocannl-1708). *)
+let outlined_parts source =
+  let lines = Array.of_list (String.split_lines source) in
+  Hashtbl.keys (part_bodies lines (brace_intervals lines)) |> List.sort ~compare:String.compare

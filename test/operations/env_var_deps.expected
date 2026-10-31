@@ -179,6 +179,7 @@ Ambient environment gates, by dune file and every alias whose build runs one:
   test/operations/dune                     @runtest-cc_kept_library-debug
   test/operations/dune                     @runtest-cc_kernel_outline
   test/operations/dune                     @runtest-cc_march_census-emission
+  test/operations/dune                     @runtest-cc_march_census-emission-outlined
   test/operations/dune                     @runtest-cc_march_census-w16_native_foreign
   test/operations/dune                     @runtest-cc_march_census-w16_native_host
   test/operations/dune                     @runtest-cc_march_census-w16_wide_foreign
@@ -298,6 +299,7 @@ Ambient environment gates, by dune file and every alias whose build runs one:
   test/operations/dune                     @runtest-test_config_consistency
   test/operations/dune                     @runtest-test_log_stmt_format
   test/operations/dune                     @runtest-test_threefry4x32
+  test/operations/dune                     @runtest-test_uniform_virtual_lane-outlined
   test/operations/dune                     @runtest-test_where_precision-extension
   test/operations/dune                     @runtest-test_where_precision-unoptimized
   test/operations/dune                     @runtest-tf32_reference_rounding-tf32
