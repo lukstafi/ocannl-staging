@@ -161,7 +161,28 @@ let claimf fmt = Printf.ksprintf (fun label b -> claim label b) fmt
     a different claim from ["every tile …"], and a menu that silently shrank to one member should
     fail it. In {!p_all}, {!p_none} and {!p_empty} it bounds the COLLECTION, which is where those
     claims can go vacuous; in {!p_exists} it counts WITNESSES, for the reason given there. Below the
-    floor the line names the shortfall: [<claim> (only 1 of 4): false]. *)
+    floor the line names the shortfall: [<claim> (only 1 of 4): false]. The floor only RAISES: a
+    [?min] below 1 is an [Invalid_argument] wherever a combinator taking one is evaluated, because
+    [~min:0] reads as "emptiness passes" and no floor can grant that -- a vacuous quantifier is
+    refused by design (gh-ocannl-729). A claim whose passing case is emptiness says so with
+    {!p_empty}, whose [~over] names the population that must exist, or -- where nothing in scope
+    must be non-empty -- with {!p} over the unguarded quantifier and the reason said at the site,
+    which is what the ratchet's exemption list keys on. *)
+
+(* Every [?min] goes through here before it is compared with anything. A floor below one used to be
+   read as the default (and still refuse the empty collection) -- the opposite of what a caller
+   writing [~min:0] means -- so the claim's meaning silently differed from its spelling; refusing it
+   at the call names the forms that do mean "emptiness passes". *)
+let check_floor name min =
+  if min < 1 then
+    invalid_arg
+      (Printf.sprintf
+         "Verdict: claim %S passes ~min:%d, but a quantified claim's floor is at least 1: a \
+          vacuous quantifier is refused by design (gh-ocannl-729). A claim whose passing case is \
+          emptiness is Verdict.p_empty ~over:<the population that must exist> <the derived \
+          subset>, or, where nothing in scope must be non-empty, Verdict.p over the unguarded \
+          quantifier with the reason said at the site (and a verdict_ratchet exemption)"
+         (one_line name) min)
 
 (* A failure the claim itself could not express: the collection was too small for the quantifier to
    mean anything, so the line says so where a reader will find it rather than printing the bare
@@ -180,7 +201,8 @@ let short_fail name detail =
    collection that can be a whole tensor readback; the length is computed only to report a
    failure. *)
 let with_population ?(min = 1) name ~is_empty ~length holds =
-  if if min <= 1 then not (is_empty ()) else length () >= min then p name (holds ())
+  check_floor name min;
+  if if min = 1 then not (is_empty ()) else length () >= min then p name (holds ())
   else
     let length = length () in
     short_fail name (if length = 0 then "empty" else Printf.sprintf "only %d of %d" length min)
@@ -234,10 +256,11 @@ type all2_outcome = All2_short of string | All2_holds of { failed : int; first :
    Keeping the classification here also keeps [f] unevaluated when the pair is structurally too
    short to support its claim. Past the floor [f] visits every cell, so a failure can be counted;
    [first] is meaningful only where [failed > 0]. *)
-let all2_outcome ?(min = 1) got want ~f =
+let all2_outcome ?(min = 1) name got want ~f =
+  check_floor name min;
   let n_got = Array.length got and n_want = Array.length want in
   if n_got <> n_want then All2_short (Printf.sprintf "length %d vs %d" n_got n_want)
-  else if if min <= 1 then n_got > 0 else n_got >= min then (
+  else if if min = 1 then n_got > 0 else n_got >= min then (
     let failed = ref 0 and first = ref (-1) in
     Array.iteri got ~f:(fun i a ->
         if not (f a want.(i)) then (
@@ -256,7 +279,7 @@ let report_all2_failure name ~cells ~failed ~first =
     first
 
 let p_all2 ?min name got want ~f =
-  match all2_outcome ?min got want ~f with
+  match all2_outcome ?min name got want ~f with
   | All2_short detail -> short_fail name detail
   | All2_holds { failed = 0; _ } -> p name true
   | All2_holds { failed; first } ->
@@ -304,10 +327,11 @@ type close_outcome =
       worst_tol : float;
     }
 
-let close_outcome ?(min = 1) ~tol got want =
+let close_outcome ?(min = 1) name ~tol got want =
+  check_floor name min;
   let n_got = Array.length got and n_want = Array.length want in
   if n_got <> n_want then Close_short (Printf.sprintf "length %d vs %d" n_got n_want)
-  else if if min <= 1 then n_got > 0 else n_got >= min then (
+  else if if min = 1 then n_got > 0 else n_got >= min then (
     let differing = ref 0 and first = ref (-1) and worst = ref (-1) and magnitude = ref 0. in
     (* How far a failing cell is from its reference, for ranking: a NaN is a tier of its own above
        every distance, the infinite ones included, so a NaN cell is the worst whatever precedes
@@ -358,7 +382,7 @@ let report_close_failure ?what_ran name got want ~differing ~first ~worst ~magni
     worst_tol magnitude
 
 let p_close ?min ?what_ran name got want ~tol =
-  match close_outcome ?min ~tol got want with
+  match close_outcome ?min name ~tol got want with
   | Close_short detail -> short_fail name detail
   | Close_holds { differing = 0; _ } -> p name true
   | Close_holds { differing; first; worst; magnitude; worst_tol } ->
@@ -379,7 +403,7 @@ let pf_close ?min ?what_ran fmt =
     still names its worst cell. A single readback goes through {!p_close}. Not a [Claims] member,
     being no claim. *)
 let within ?min ?what_ran name got want ~tol =
-  match close_outcome ?min ~tol got want with
+  match close_outcome ?min name ~tol got want with
   | Close_holds { differing = 0; _ } -> true
   | Close_holds { differing; first; worst; magnitude; worst_tol } ->
       report_close_failure ?what_ran name got want ~differing ~first ~worst ~magnitude ~worst_tol;
@@ -428,11 +452,12 @@ let p_empty ?min name ~over xs = quantified ?min name over (fun () -> List.is_em
     cannot be read as the population shortfall its siblings print. At the default floor of one the
     line is the bare [<claim>: false] {!p} would print: there is no shortfall to name. *)
 let p_exists ?(min = 1) name xs ~f =
+  check_floor name min;
   if List.is_empty xs then short_fail name "empty"
   else
     let witnesses = List.count xs ~f in
     if witnesses >= min then p name true
-    else if min <= 1 then p name false
+    else if min = 1 then p name false
     else short_fail name (Printf.sprintf "only %d of %d match" witnesses min)
 
 (** [p_pairwise_distinct name xs ~equal ~to_string] claims that [xs] contains at least two elements
@@ -647,8 +672,10 @@ let gated ?aggregation ?detail ~when_ ~on label b =
     Where the gate is closed, neither [xs] nor [f] is read. A leg whose population exists only where
     it ran (the seeds a GPU proposes, the files a host could create) can therefore pass the empty
     list it is left with off-gate, computed unconditionally; the non-emptiness floor applies exactly
-    where the claim is evaluated. A leg whose population cannot be computed off-gate at all (a
-    device readback) goes through a leg, as {!gated} says of its boolean. *)
+    where the claim is evaluated -- and so does the refusal of a [?min] below 1, since a floor
+    computed from that same population ([~min:(List.length xs)]) is zero exactly where the gate is
+    closed. A leg whose population cannot be computed off-gate at all (a device readback) goes
+    through a leg, as {!gated} says of its boolean. *)
 let gated_all ?aggregation ?min ~when_ ~on label xs ~f =
   gate ?aggregation ~when_ ~on label (fun () -> p_all ?min label xs ~f)
 
@@ -685,7 +712,7 @@ let pass_fail ?detail label b =
     [(got [])] diagnostic. On an elementwise mismatch [?detail] behaves exactly as in {!pass_fail}.
 *)
 let pass_fail_all2 ?min ?detail label got want ~f =
-  match all2_outcome ?min got want ~f with
+  match all2_outcome ?min label got want ~f with
   | All2_holds { failed = 0; _ } -> pass_fail ?detail label true
   | All2_holds { failed; first } ->
       pass_fail ?detail label false;
@@ -702,7 +729,7 @@ let pass_fail_all2 ?min ?detail label got want ~f =
     structural refusal is the [<label>: FAIL (<reason>)] row {!pass_fail_all2} prints, and a value
     failure the bare [<label>: FAIL] row, with {!p_close}'s worst-cell line beside it on stderr. *)
 let pass_fail_close ?min ?what_ran label got want ~tol =
-  match close_outcome ?min ~tol got want with
+  match close_outcome ?min label ~tol got want with
   | Close_short reason -> pass_fail ~detail:(fun () -> reason) label false
   | Close_holds { differing = 0; _ } -> pass_fail label true
   | Close_holds { differing; first; worst; magnitude; worst_tol } ->
