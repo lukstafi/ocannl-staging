@@ -555,8 +555,9 @@ let merge_lineage =
 
 (* gh-ocannl-1551: routine A places [v] as routine-local scratch AFTER storing its computation: [v]
    is written cell by cell, each component stored, and A's own loop-varying read cannot instantiate
-   a fixed-cell component ([13:call-site-index-mismatch]), which commits [v] [Never_virtual] there;
-   backend finalization resolves it to [Local], so routine A is linked.
+   a fixed-cell component ([13:call-site-index-mismatch]: no single component covers [v], so the
+   fixed position's guard has no proved fallback, gh-ocannl-1735), which commits [v] [Never_virtual]
+   there; backend finalization resolves it to [Local], so routine A is linked.
 
    gh-ocannl-1620: with [~stored:false], routine A writes [v] under a guard instead, a computation
    the virtualizer refuses to store ([142:guarded-computation]): the same [Local] scratch with no
@@ -602,8 +603,9 @@ let local_lineage =
   }
 
 (* gh-ocannl-1551: routine A defers a fixed-cell producer [v[0] := ell[0] + 100], which cannot be
-   instantiated at a loop-varying read ([13:call-site-index-mismatch]); the deferring routine
-   dropped its setter, so no materialized read can serve it either. *)
+   instantiated at a loop-varying read ([13:call-site-index-mismatch]: nothing else writes [v], so
+   the fixed position's guard has no proved fallback, gh-ocannl-1735); the deferring routine dropped
+   its setter, so no materialized read can serve it either. *)
 let uninlinable_lineage =
   let lineage ~label ~tag =
     let ell = mk (tag ^ "ell") and v = mk (tag ^ "v") in

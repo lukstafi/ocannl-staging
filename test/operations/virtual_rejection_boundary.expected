@@ -28,24 +28,51 @@ escaping_embed_index: the two placements agree: true
 noninjective_multiaffine: rejected at store time as 51:affine-not-injective: true
 noninjective_multiaffine: executed values are the reference: true
 noninjective_multiaffine: the two placements agree: true
-fixed_component_symbolic_read: rejected at consumption time as 13:call-site-index-mismatch: true
+fixed_component_symbolic_read: inlined: true
 fixed_component_symbolic_read: executed values are the reference: true
 fixed_component_symbolic_read: the two placements agree: true
+fixed_component_offset: inlined: true
+fixed_component_offset: executed values are the reference: true
+fixed_component_offset: the two placements agree: true
+fixed_component_affine_read: inlined: true
+fixed_component_affine_read: executed values are the reference: true
+fixed_component_affine_read: the two placements agree: true
+fixed_component_first: inlined: true
+fixed_component_first: executed values are the reference: true
+fixed_component_first: the two placements agree: true
+fixed_component_accumulating: inlined: true
+fixed_component_accumulating: executed values are the reference: true
+fixed_component_accumulating: the two placements agree: true
+fixed_component_zero_init: inlined: true
+fixed_component_zero_init: executed values are the reference: true
+fixed_component_zero_init: the two placements agree: true
+fixed_component_uninitialized: rejected by the coverage rule as 36:read-before-write: true
+fixed_component_uninitialized: executed values are the reference: true
+fixed_component_uninitialized: the two placements agree: true
+fixed_component_fixed_read: rejected at consumption time as 13:call-site-index-mismatch: true
+fixed_component_fixed_read: executed values are the reference: true
+fixed_component_fixed_read: the two placements agree: true
+fixed_component_partial_cover: rejected at consumption time as 13:call-site-index-mismatch: true
+fixed_component_partial_cover: executed values are the reference: true
+fixed_component_partial_cover: the two placements agree: true
+declared_virtual_zeroed: inlined: true
+declared_virtual_zeroed: executed values are the reference: true
+declared_virtual_uninitialized: the fixed component refuses rather than reading a zero: true
 block_components: inlined: true
 block_components: executed values are the reference: true
 block_components: the two placements agree: true
-unit_axis_fixed_producer: the candidate is committed virtual before any read site: true
+unit_axis_fixed_producer: the candidate is committed virtual as a scalar constexpr: true
 unit_axis_fixed_producer: inlined: true
 unit_axis_fixed_producer: executed values are the reference: true
 unit_axis_fixed_producer: the two placements agree: true
 unit_axis_computed_producer: inlined: true
 unit_axis_computed_producer: executed values are the reference: true
 unit_axis_computed_producer: the two placements agree: true
-unit_axis_loop_producer: the candidate is committed virtual before any read site: true
+unit_axis_loop_producer: the candidate is committed virtual as a scalar constexpr: true
 unit_axis_loop_producer: inlined: true
 unit_axis_loop_producer: executed values are the reference: true
 unit_axis_loop_producer: the two placements agree: true
-unit_axis_flattened: rejected at consumption time as 13:call-site-index-mismatch: true
+unit_axis_flattened: inlined: true
 unit_axis_flattened: executed values are the reference: true
 unit_axis_flattened: the two placements agree: true
 hoisted_local: rejected at store time as 19:declare-local: true
@@ -54,4 +81,20 @@ hoisted_local: the two placements agree: true
 scan_recurrence: rejected at store time as 148:scan-recurrence: true
 scan_recurrence: executed values are the reference: true
 scan_recurrence: the two placements agree: true
+constexpr_cap_exempt: the candidate is committed virtual as a scalar constexpr: true
+constexpr_cap_exempt: inlined: true
+constexpr_cap_exempt: executed values are the reference: true
+constexpr_cap_exempt: the two placements agree: true
+constexpr_flattened_read: the candidate is a scalar constexpr: true
+constexpr_flattened_read: rejected at consumption time as 13:call-site-index-mismatch: true
+constexpr_flattened_read: executed values are the reference: true
+constexpr_flattened_read: the two placements agree: true
+constexpr_guarded_setter_flag0: the candidate is a scalar constexpr: true
+constexpr_guarded_setter_flag0: rejected at store time as 142:guarded-computation: true
+constexpr_guarded_setter_flag0: executed values are the reference: true
+constexpr_guarded_setter_flag0: the two placements agree: true
+constexpr_guarded_setter_flag1: the candidate is a scalar constexpr: true
+constexpr_guarded_setter_flag1: rejected at store time as 142:guarded-computation: true
+constexpr_guarded_setter_flag1: executed values are the reference: true
+constexpr_guarded_setter_flag1: the two placements agree: true
 every phase-table entry is exercised by a row: true

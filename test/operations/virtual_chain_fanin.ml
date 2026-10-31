@@ -1105,9 +1105,10 @@ let phase5 () =
   p "dead-taint: consuming is legal, the live component's values splice"
     (same got15 [ Array.map ell17_vals ~f:(fun x -> x +. 100.) ]);
   (* Review round 11, P2: when an INHERITED computation cannot be inlined at the consumer's read
-     site (a fixed-cell producer read across a loop trips Non_virtual 13), the local-producer
-     fallback — a materialized Get — is unavailable: the deferring routine already dropped the
-     setters, so no routine writes the buffer. The consumer fails actionably instead. *)
+     site (a lone fixed-cell producer read across a loop trips Non_virtual 13: its fixed position's
+     guard has no proved fallback), the local-producer fallback — a materialized Get — is
+     unavailable: the deferring routine already dropped the setters, so no routine writes the
+     buffer. The consumer fails actionably instead. *)
   let ell18 = mk "ell18" in
   materialize ell18;
   let v17 = mk "v17" and out21 = mk "flout" in

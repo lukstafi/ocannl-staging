@@ -200,14 +200,28 @@ files.
   `x[0] += a[s]` is rejected because the sibling read escapes (`Non_virtual 9`), and an accumulator
   read more than `virtualize_max_visits` times is capped (`1:visit-cap`) — a flippable policy
   prior, decided in `decide_placements` before any legality question is asked.
-- **A committed-virtual node has no consumption-time fallback** (gh-ocannl-1690):
-  `40:scalar-constexpr` commits a constant scalar `Virtual` in `decide_placements`, before any read
-  site is asked, so a `Non_virtual` from `instantiate_computations` against it cannot decline to
-  materialization — `Tn.Placements.update` raises "already virtual". Every in-bounds spelling of
-  its cell must be servable: on an extent-1 axis a producer `Fixed_idx 0` read at a symbolic index
-  (a one-iteration loop) is the same cell, which `same_unit_cell` accepts with no guard. A new
-  consumption-time refusal must not reach such a node; pinned by the `unit_axis_*` rows of
-  `test/operations/virtual_rejection_boundary.ml`, with executed parity.
+- **A committed-virtual node has no fallback, so nothing commits one ahead of the walk**
+  (gh-ocannl-1690, gh-ocannl-1735): a `Non_virtual` against a node already `Virtual` cannot decline
+  to materialization — `Tn.Placements.update` raises "already virtual", at store time and at
+  consumption time alike. `decide_placements` therefore only PREFERS a constant scalar virtual: it
+  records it in `specialize_proc`'s `tentative_constexpr`, which the caps and the fan-in guard
+  treat as decided (the exemption is the point of the rule) while the coverage rule still applies,
+  and `specialize_proc` commits the survivors `40:scalar-constexpr` right after `virtual_llc`,
+  ahead of the walked-placements snapshot and cleanup. A new early commitment needs the same
+  split. Pinned by the `constexpr_*` rows of `test/operations/virtual_rejection_boundary.ml` (a
+  guarded setter refused as 142, a flattened read refused as 13, the cap exemption), with
+  executed parity.
+- **A fixed-index producer position is guarded only over a proved fallback** (gh-ocannl-1735). On an
+  extent-1 coordinate a producer `Fixed_idx 0` read at a symbolic index is the same cell
+  (`same_unit_cell`, no guard). On a wider one `instantiate_computations` guards `k == index`, and
+  where the guard is false the replay's shared local carries on, which is the materialized value
+  only if that local is defined: `fixed_guardable` requires a `Zero_out` of the node or another
+  component that `Affine.covers_box` proves covers it (`covered_by_other`). Without the proof the
+  site still refuses as 13 — declared-virtual nodes skip the coverage rule, and a guard would read a
+  zero no write put there. Unions of partial covers (cell-by-cell writers) prove nothing, which is
+  why the 13 vehicles of `scope_over_materialized`, `stored_template_elision` and
+  `capture_pass_side_effects` still refuse; Fixed-vs-Fixed and `Sub_axis` mismatches are 13
+  outright. Rows: `fixed_component_*` in `virtual_rejection_boundary.ml`.
 - **Where a virtualization candidate is refused is readable off its placement PROVENANCE, and four
   phases write into the same table** (gh-ocannl-658, pinned row by row in
   `test/operations/virtual_rejection_boundary.ml`): `decide_placements` applies the heuristic caps

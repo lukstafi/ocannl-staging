@@ -926,12 +926,22 @@ let%expect_test "outer_sum simulating axis concatenation" =
   [%expect
     {|
     HERE: test/einsum/einsum_trivia.ml:925:21
-    [1]: =>_ti shape 0:4,1:3  <unobservable: Local>
+    ┌───────────────────────────┐
+    │[1]: =>_ti shape 0:4,1:3   │
+    │┌──────┬──────────────────┐│
+    ││      │axis 1            ││
+    │├──────┼──────────────────┤│
+    ││axis 0│ 0.00  0.00  0.00 ││
+    ││      │ 1.00  0.00  0.00 ││
+    ││      │ 2.00  0.00  0.00 ││
+    ││      │ 3.00  0.00  0.00 ││
+    │└──────┴──────────────────┘│
+    └───────────────────────────┘
     |}];
   Train.printf ~here:[%here] ~with_code:false ~with_grad:false ctx tk;
   [%expect
     {|
-    HERE: test/einsum/einsum_trivia.ml:931:21
+    HERE: test/einsum/einsum_trivia.ml:941:21
     ┌───────────────────────────┐
     │[7]: =>_tk shape 0:6,1:3   │
     │┌──────┬──────────────────┐│
@@ -961,7 +971,7 @@ let%expect_test "einsum with a leftmost input axis preserved as output axis" =
   Train.printf ~here:[%here] ~with_code:false ~with_grad:false ctx c;
   [%expect
     {|
-    HERE: test/einsum/einsum_trivia.ml:961:21
+    HERE: test/einsum/einsum_trivia.ml:971:21
     ┌─────────────────────────────────────────────────────────────────┐
     │[2]: *._c shape 0:3|1:4,2:2                                      │
     │┌──────┬──────────────────┬──────────────────┬──────────────────┐│
@@ -987,7 +997,7 @@ let%expect_test "einsum permuting two leftmost input axes as output axes" =
   Train.printf ~here:[%here] ~with_code:false ~with_grad:false ctx c;
   [%expect
     {|
-    HERE: test/einsum/einsum_trivia.ml:987:21
+    HERE: test/einsum/einsum_trivia.ml:997:21
     ┌───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
     │[2]: *._c shape 2:4->0:3,1:2                                                                                           │
     │┌──────┬────────────────────────────────────┬────────────────────────────────────┬────────────────────────────────────┐│

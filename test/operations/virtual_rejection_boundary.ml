@@ -67,12 +67,12 @@ open Verdict.Claims
 let mk = node_factory ~first_id:2700 ~dims:[| 4 |] ()
 let n = 4
 
-type phase = Cap | Store | Consumption
+type phase = Cap | Coverage | Store | Consumption
 
 let equal_phase a b =
   match (a, b) with
-  | Cap, Cap | Store, Store | Consumption, Consumption -> true
-  | (Cap | Store | Consumption), _ -> false
+  | Cap, Cap | Coverage, Coverage | Store, Store | Consumption, Consumption -> true
+  | (Cap | Coverage | Store | Consumption), _ -> false
 
 type verdict = Rejected of phase * Ir.Tnode.provenance | Accepted
 
@@ -91,7 +91,10 @@ type verdict = Rejected of phase * Ir.Tnode.provenance | Accepted
    The Cap arm is not in the table: [Low_level] owns the cap set and answers for it exhaustively
    ([is_cap_provenance]), so a fourth cap is classified here without an edit -- and cannot be
    classified as anything else. Since gh-ocannl-609 each tag also carries its own reason, so what is
-   left to pin is the PHASE that minted it. *)
+   left to pin is the PHASE that minted it. Nor is the Coverage arm: [36:read-before-write] is a
+   constructor, not a [Site], and [decide_placements] alone commits it -- a node whose reads the
+   routine's own earlier writes do not cover owns a buffer with its entry values, so no candidate
+   question is asked of it at all. *)
 let phase_table =
   [
     ("4:lhs-idcs-differ", Store);
@@ -110,6 +113,7 @@ let phase_of_code tag =
   if Ir.Low_level.is_cap_provenance tag then Some Cap
   else
     match tag with
+    | Ir.Tnode.Read_before_write -> Some Coverage
     | Ir.Tnode.Site site -> List.Assoc.find phase_table ~equal:String.equal site
     | _ -> None
 
@@ -118,6 +122,7 @@ let exercised = Hash_set.create (module String)
 
 let phase_name = function
   | Cap -> "by a heuristic cap"
+  | Coverage -> "by the coverage rule"
   | Store -> "at store time"
   | Consumption -> "at consumption time"
 
@@ -331,12 +336,12 @@ let row_noninjective () =
     ~expected:[| 1.; 11.; 21.; 22.; 23. |]
     ~verdict:(Rejected (Store, Ir.Tnode.Site "51:affine-not-injective"))
 
-(* === Consumption-time rejection === *)
+(* === Fixed-index producer components (gh-ocannl-1735) === *)
 
-(* Two setters at different index maps as SEPARATE statements store fine, as two components — the
-   index-map comparison is per invocation. The verdict waits for a read site: the fixed-index
-   component cannot be served at a symbolic one, and there is no partial answer, so the whole node
-   materializes. *)
+(* Two setters at different index maps as SEPARATE statements store fine, as two components -- the
+   index-map comparison is per invocation -- and the verdict waits for a read site. The fixed-index
+   component is served at the symbolic read by an equality guard ([0 == t]): its fallback is the
+   covering component's value, which this routine's covering loop proves defined at every cell. *)
 let row_fixed_component () =
   let x = mk "fcmp_x" and out = mk "fcmp_out" in
   materialize out;
@@ -347,7 +352,163 @@ let row_fixed_component () =
       (seq (set x [| fixed 0 |] (c 9.)) (loop_n t n (set out [| iter t |] (get x [| iter t |]))))
   in
   row ~label:"fixed_component_symbolic_read" ~llc ~cand:x ~out ~seed:[]
-    ~expected:[| 9.; 2.; 3.; 4. |]
+    ~expected:[| 9.; 2.; 3.; 4. |] ~verdict:Accepted
+
+(* The guard compares the producer's coordinate, not 0: a component at [Fixed_idx 2] lands on cell
+   2, so a guard spelled against the first cell fails the oracle. *)
+let row_fixed_component_offset () =
+  let x = mk "fcof_x" and out = mk "fcof_out" in
+  materialize out;
+  let s = sym () and t = sym () in
+  let llc =
+    seq
+      (loop_n s n (set x [| iter s |] (tick s)))
+      (seq (set x [| fixed 2 |] (c 9.)) (loop_n t n (set out [| iter t |] (get x [| iter t |]))))
+  in
+  row ~label:"fixed_component_offset" ~llc ~cand:x ~out ~seed:[] ~expected:[| 1.; 2.; 9.; 4. |]
+    ~verdict:Accepted
+
+(* An affine reader: [out[t] = x[t + 1]] meets the fixed component at [t = 1]. *)
+let row_fixed_component_affine_read () =
+  let x = mk "fcaf_x" and out = mk ~dims:[| n - 1 |] "fcaf_out" in
+  materialize out;
+  let s = sym () and t = sym () in
+  let llc =
+    seq
+      (loop_n s n (set x [| iter s |] (tick s)))
+      (seq
+         (set x [| fixed 2 |] (c 9.))
+         (loop_n t (n - 1) (set out [| iter t |] (get x [| aff [ (1, t) ] 1 |]))))
+  in
+  row ~label:"fixed_component_affine_read" ~llc ~cand:x ~out ~seed:[] ~expected:[| 2.; 9.; 4. |]
+    ~verdict:Accepted
+
+(* The covering writer AFTER the fixed one overwrites every cell, the fixed one included, so the
+   fixed write is dead -- in both readings. Order among components does not matter to the coverage
+   proof, and this row executes the order the other rows do not. *)
+let row_fixed_component_first () =
+  let x = mk "fcfi_x" and out = mk "fcfi_out" in
+  materialize out;
+  let s = sym () and t = sym () in
+  let llc =
+    seq
+      (set x [| fixed 1 |] (c 9.))
+      (seq
+         (loop_n s n (set x [| iter s |] (tick s)))
+         (loop_n t n (set out [| iter t |] (get x [| iter t |]))))
+  in
+  row ~label:"fixed_component_first" ~llc ~cand:x ~out ~seed:[] ~expected:[| 1.; 2.; 3.; 4. |]
+    ~verdict:Accepted
+
+(* An update rather than a store: the fixed component reads the cell's earlier value, which is the
+   guard's own fallback local, so the guarded arm adds to the covering writer's value at cell 0. *)
+let row_fixed_component_accumulating () =
+  let x = mk "fcac_x" and out = mk "fcac_out" in
+  materialize out;
+  let s = sym () and t = sym () in
+  let llc =
+    seq
+      (loop_n s n (set x [| iter s |] (tick s)))
+      (seq
+         (set x [| fixed 0 |] (add (get x [| fixed 0 |]) (c 9.)))
+         (loop_n t n (set out [| iter t |] (get x [| iter t |]))))
+  in
+  row ~label:"fixed_component_accumulating" ~llc ~cand:x ~out ~seed:[]
+    ~expected:[| 10.; 2.; 3.; 4. |] ~verdict:Accepted
+
+(* No covering writer, but a [Zero_out]: every other cell is the zero the materialized buffer holds
+   too. The consumer adds [tick t], so the zero cells stay distinct from one another. *)
+let row_fixed_component_zero_init () =
+  let x = mk "fczi_x" and out = mk "fczi_out" in
+  materialize out;
+  let t = sym () in
+  let llc =
+    seq (zero x)
+      (seq
+         (set x [| fixed 2 |] (c 9.))
+         (loop_n t n (set out [| iter t |] (add (get x [| iter t |]) (tick t)))))
+  in
+  row ~label:"fixed_component_zero_init" ~llc ~cand:x ~out ~seed:[] ~expected:[| 1.; 2.; 12.; 4. |]
+    ~verdict:Accepted
+
+(* Neither: the producer writes cell 2 only, so every other cell the reader reaches holds the
+   buffer's ENTRY value. A guard falling back on an invented zero would print [0] there; the
+   coverage rule instead places the node as an input, and the seeded entries survive. *)
+let row_fixed_component_uninitialized () =
+  let x = mk "fcun_x" and out = mk "fcun_out" in
+  materialize out;
+  let t = sym () in
+  let llc =
+    seq (set x [| fixed 2 |] (c 9.)) (loop_n t n (set out [| iter t |] (get x [| iter t |])))
+  in
+  row ~label:"fixed_component_uninitialized" ~llc ~cand:x ~out
+    ~seed:[ (x, [| 101.; 102.; 103.; 104. |]) ]
+    ~expected:[| 101.; 102.; 9.; 104. |]
+    ~verdict:(Rejected (Coverage, Ir.Tnode.Read_before_write))
+
+(* The proof is what a DECLARED-virtual node leans on: it has no materialization to fall back on and
+   skips the coverage rule, so a guard over an uncovered cell would print a zero no write put there.
+   With a [Zero_out] the guard is sound and the node inlines; without one, the fixed component still
+   refuses -- loudly, as a declared-virtual node refuses any unservable read. *)
+let declared_virtual_fixed_component () =
+  let build label ~zeroed =
+    let x = mk (label ^ "_x") and out = mk (label ^ "_out") in
+    virtualize x;
+    materialize out;
+    let t = sym () in
+    let producer = set x [| fixed 2 |] (c 9.) in
+    let llc =
+      seq
+        (if zeroed then seq (zero x) producer else producer)
+        (loop_n t n (set out [| iter t |] (add (get x [| iter t |]) (tick t))))
+    in
+    (x, out, llc)
+  in
+  let x, out, llc = build "dvfc_zeroed" ~zeroed:true in
+  let o = optimize ~name:"dvfc_zeroed" llc in
+  p "declared_virtual_zeroed: inlined" (known_virtual o x && count_get o x = 0);
+  p "declared_virtual_zeroed: executed values are the reference"
+    (same
+       (execute ~name:"dvfc_zeroed" o ~seed:[ (out, blank n) ] ~read:[ out ])
+       [ [| 1.; 2.; 12.; 4. |] ]);
+  let _, _, llc = build "dvfc_uninit" ~zeroed:false in
+  p "declared_virtual_uninitialized: the fixed component refuses rather than reading a zero"
+    (match optimize ~name:"dvfc_uninit" llc with
+    | (_ : Ir.Low_level.optimized) -> false
+    | exception Utils.User_error msg ->
+        String.is_substring msg ~substring:"13:call-site-index-mismatch")
+
+(* === Consumption-time rejection === *)
+
+(* A fixed component read at a DIFFERENT fixed cell is a static mismatch, not a guard: the read site
+   cannot be served, and there is no partial answer, so the whole node materializes. *)
+let row_fixed_component_fixed_read () =
+  let x = mk "fcfr_x" and out = mk ~dims:[| 1 |] "fcfr_out" in
+  materialize out;
+  let s = sym () in
+  let llc =
+    seq
+      (loop_n s n (set x [| iter s |] (tick s)))
+      (seq (set x [| fixed 0 |] (c 9.)) (set out [| fixed 0 |] (get x [| fixed 2 |])))
+  in
+  row ~label:"fixed_component_fixed_read" ~llc ~cand:x ~out ~seed:[] ~expected:[| 3. |]
+    ~verdict:(Rejected (Consumption, Ir.Tnode.Site "13:call-site-index-mismatch"))
+
+(* The proof's conservative edge: three components that cover the node only TOGETHER -- a loop over
+   cells 0..2 and fixed writes at 3 -- prove nothing on their own, so the fixed component refuses
+   and the node materializes, the correct (if costlier) reading. Unions of partial covers are not
+   proved. *)
+let row_fixed_component_partial_cover () =
+  let x = mk "fcpc_x" and out = mk "fcpc_out" in
+  materialize out;
+  let s = sym () and t = sym () in
+  let llc =
+    seq
+      (loop_n s (n - 1) (set x [| iter s |] (tick s)))
+      (seq (set x [| fixed 3 |] (c 9.)) (loop_n t n (set out [| iter t |] (get x [| iter t |]))))
+  in
+  row ~label:"fixed_component_partial_cover" ~llc ~cand:x ~out ~seed:[]
+    ~expected:[| 1.; 2.; 3.; 9. |]
     ~verdict:(Rejected (Consumption, Ir.Tnode.Site "13:call-site-index-mismatch"))
 
 (* === Accepted === *)
@@ -373,9 +534,10 @@ let row_block_components () =
    guard and no refusal. The consumer reads the candidate both ways -- [x[u]] under [for u = 0 to 0]
    for cells [0..n-1], [x[0]] for cell [n] -- and adds [tick t], so every output cell names both the
    producer's value and the consumer iteration that read it. [~committed] rows are constant
-   producers, which [decide_placements] commits virtual AHEAD of any read site
-   ([40:scalar-constexpr]): before the fix the loop read's [13:call-site-index-mismatch] tried to
-   retract that commitment and raised in [Tnode.update_memory_mode] instead of compiling. *)
+   producers, committed virtual as [40:scalar-constexpr]: before gh-ocannl-1690 the loop read's
+   [13:call-site-index-mismatch] tried to retract that commitment and raised in
+   [Tnode.update_memory_mode] instead of compiling. Since gh-ocannl-1735 the commitment lands only
+   after every read site was asked, so a refusal declines instead ([row_constexpr_*] below). *)
 let unit_axis_row ~label ~x ~producer ~seed ~value ~committed =
   let out = mk ~dims:[| n + 1 |] (label ^ "_out") in
   materialize out;
@@ -388,7 +550,7 @@ let unit_axis_row ~label ~x ~producer ~seed ~value ~committed =
   in
   if committed then
     p
-      (label ^ ": the candidate is committed virtual before any read site")
+      (label ^ ": the candidate is committed virtual as a scalar constexpr")
       (Option.equal Ir.Tnode.equal_provenance
          (rejection_code (optimize ~name:(label ^ "_probe") llc) x)
          (Some (Ir.Tnode.Site "40:scalar-constexpr")));
@@ -428,9 +590,9 @@ let row_unit_axis_loop_producer () =
 (* The boundary of the unit-cell rule: what counts is the extent of the COORDINATE a component
    indexes, not its axis's dim. After a [Sub_axis] run the component is a flattened index over the
    run's whole extent product ([Affine.axis_extents]), so on dims [4; 1] the read [x[Sub_axis; t]]
-   addresses four cells and the [Fixed_idx 0] component's write is the first of them only. The
-   fixed-index component cannot be served at the symbolic read, exactly as in
-   [row_fixed_component]. *)
+   addresses four cells and the [Fixed_idx 0] component's write is the first of them only. Not a
+   unit cell, then, but a fixed component on a flattened coordinate: it is guarded ([0 == t] over
+   the flat index) exactly as in [row_fixed_component]. *)
 let row_unit_axis_flattened () =
   let x = mk ~dims:[| n; 1 |] "ua_flat_x" and out = mk "ua_flat_out" in
   materialize out;
@@ -443,7 +605,91 @@ let row_unit_axis_flattened () =
          (loop_n t n (set out [| iter t |] (get x [| Idx.Sub_axis; iter t |]))))
   in
   row ~label:"unit_axis_flattened" ~llc ~cand:x ~out ~seed:[] ~expected:[| 9.; 2.; 3.; 4. |]
+    ~verdict:Accepted
+
+(* === A refused scalar constexpr declines (gh-ocannl-1735) ===
+
+   A constant scalar is exempt from the heuristic caps, but its [40:scalar-constexpr] commitment now
+   waits for the walk to ask every store and read site. Before, it was committed in
+   [decide_placements], ahead of both, and a refusal at either phase raised "already virtual" in
+   [Tnode.update_memory_mode] instead of materializing the node. Each row first pins that the
+   candidate IS a scalar constexpr, so it cannot pass by never having been one. *)
+let is_scalar_constexpr (o : Ir.Low_level.optimized) tn =
+  (Hashtbl.find_exn o.Ir.Low_level.traced_store tn).Ir.Low_level.is_scalar_constexpr
+
+(* Store time: the setter sits under a runtime guard, refused as [142]. Zero-initialized, so both
+   flag values have a defined reading (0 or 7), and a replay of the setter without its guard would
+   print 7 at flag 0. *)
+let row_constexpr_guarded_setter ~flag_value =
+  let label = Printf.sprintf "constexpr_guarded_setter_flag%.0f" flag_value in
+  let flag = mk ~dims:[| 1 |] (label ^ "_flag")
+  and x = mk ~dims:[| 1 |] (label ^ "_x")
+  and out = mk (label ^ "_out") in
+  materialize flag;
+  materialize out;
+  let t = sym () in
+  let llc =
+    seq (zero x)
+      (seq
+         (if_ (get flag [| fixed 0 |]) (set x [| fixed 0 |] (c 7.)))
+         (loop_n t n (set out [| iter t |] (add (get x [| fixed 0 |]) (tick t)))))
+  in
+  p
+    (label ^ ": the candidate is a scalar constexpr")
+    (is_scalar_constexpr (optimize ~name:(label ^ "_probe") llc) x);
+  row ~label ~llc ~cand:x ~out
+    ~seed:[ (flag, [| flag_value |]) ]
+    ~expected:(Array.init n ~f:(fun i -> (7. *. flag_value) +. 1. +. Float.of_int i))
+    ~verdict:(Rejected (Store, Ir.Tnode.Site "142:guarded-computation"))
+
+(* Consumption time: the one cell of a [1; 1] scalar read through a flattened [Sub_axis] run -- the
+   same cell, but a [Fixed_idx] producer position has no value to compare with a run placeholder, so
+   the read site is refused as [13]. *)
+let row_constexpr_flattened_read () =
+  let label = "constexpr_flattened_read" in
+  let x = mk ~dims:[| 1; 1 |] (label ^ "_x") and out = mk (label ^ "_out") in
+  materialize out;
+  let t = sym () and u = sym () in
+  let llc =
+    seq
+      (set x [| fixed 0; fixed 0 |] (c 7.))
+      (loop_n t n
+         (loop ~upto:0 u (set out [| iter t |] (add (get x [| Idx.Sub_axis; iter u |]) (tick t)))))
+  in
+  p
+    (label ^ ": the candidate is a scalar constexpr")
+    (is_scalar_constexpr (optimize ~name:(label ^ "_probe") llc) x);
+  row ~label ~llc ~cand:x ~out ~seed:[]
+    ~expected:(Array.init n ~f:(fun i -> 8. +. Float.of_int i))
     ~verdict:(Rejected (Consumption, Ir.Tnode.Site "13:call-site-index-mismatch"))
+
+(* The exemption the deferral keeps: with simple computations no longer inlined unconditionally, a
+   constant read [n] times is past the visit cap -- which a scalar constexpr is exempt from, and
+   still is now that its commitment waits for the walk. *)
+let row_constexpr_cap_exempt () =
+  let label = "constexpr_cap_exempt" in
+  let x = mk ~dims:[| 1 |] (label ^ "_x") and out = mk (label ^ "_out") in
+  materialize out;
+  let t = sym () in
+  let llc =
+    seq
+      (set x [| fixed 0 |] (c 7.))
+      (loop_n t n (set out [| iter t |] (add (get x [| fixed 0 |]) (tick t))))
+  in
+  let settings = Ir.Low_level.virtualize_settings in
+  let saved = settings.Ir.Low_level.inline_simple_computations in
+  settings.Ir.Low_level.inline_simple_computations <- false;
+  Exn.protect
+    ~finally:(fun () -> settings.Ir.Low_level.inline_simple_computations <- saved)
+    ~f:(fun () ->
+      p
+        (label ^ ": the candidate is committed virtual as a scalar constexpr")
+        (Option.equal Ir.Tnode.equal_provenance
+           (rejection_code (optimize ~name:(label ^ "_probe") llc) x)
+           (Some (Ir.Tnode.Site "40:scalar-constexpr")));
+      row ~label ~llc ~cand:x ~out ~seed:[]
+        ~expected:(Array.init n ~f:(fun i -> 8. +. Float.of_int i))
+        ~verdict:Accepted)
 
 (* gh-ocannl-483 made this arm live: the algebraic rewrite tier runs on the raw lowered code BEFORE
    [Low_level.optimize], and [Online_softmax.hoist] declares its cached probability cell as a
@@ -510,6 +756,15 @@ let () =
   row_escaping_embed ();
   row_noninjective ();
   row_fixed_component ();
+  row_fixed_component_offset ();
+  row_fixed_component_affine_read ();
+  row_fixed_component_first ();
+  row_fixed_component_accumulating ();
+  row_fixed_component_zero_init ();
+  row_fixed_component_uninitialized ();
+  row_fixed_component_fixed_read ();
+  row_fixed_component_partial_cover ();
+  declared_virtual_fixed_component ();
   row_block_components ();
   row_unit_axis_fixed_producer ();
   row_unit_axis_computed_producer ();
@@ -517,6 +772,10 @@ let () =
   row_unit_axis_flattened ();
   row_hoisted_local ();
   row_scan_recurrence ();
+  row_constexpr_cap_exempt ();
+  row_constexpr_flattened_read ();
+  row_constexpr_guarded_setter ~flag_value:0.;
+  row_constexpr_guarded_setter ~flag_value:1.;
   p_all "every phase-table entry is exercised by a row" phase_table ~f:(fun (site, _) ->
       Hash_set.mem exercised site);
   Stdio.printf "%!"
