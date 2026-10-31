@@ -11951,7 +11951,8 @@
 ; plan's own segmentation. The menu and the swap are claimed structurally on a plan derived for
 ; "cuda" on synthetic limits (every backend); the scripted search's timing basis and its sweep on
 ; CUDA/HIP legs, skipped elsewhere. gh-ocannl-1697: the split singles re-derived inside the plan
-; (structurally everywhere, searched on CUDA/HIP).
+; (structurally everywhere, searched on CUDA/HIP) and the seeded singles' hopeless cut (CUDA/HIP,
+; on a scripted clock).
 
 (test
  ; cc-vector-width: independent -- on cc no search runs: the seeded plan is CUDA/HIP-only, gated on

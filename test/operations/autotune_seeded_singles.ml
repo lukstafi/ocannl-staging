@@ -24,12 +24,16 @@
    the sweep: the 9 ms single joins the running seeded composite, every single of a later key
    carries it as its staff, and the search crowns it. Elsewhere those claims are skipped.
 
-   gh-ocannl-1697 adds the split singles. Structurally, on every backend: a site's other choice
-   ({!Autotune.seeded_resplit}: another block count, unsplit, or split where the plan leaves it
-   whole) re-derives a plan other than the plan, deciding every segment code the plan decides as the
-   plan does, and the plan's own split re-derives the plan. On CUDA/HIP, two more scripted searches
-   -- the split singles timed as [F_resplit] before the segment singles and none around presets; a
-   faster one joining, after which every seeded single names the plan it re-derived. *)
+   gh-ocannl-1697 adds the split singles and the hopeless cut. Structurally, on every backend: a
+   site's other choice ({!Autotune.seeded_resplit}: another block count, unsplit, or split where the
+   plan leaves it whole) re-derives a plan other than the plan, deciding every segment code the plan
+   decides as the plan does, and the plan's own split re-derives the plan. On CUDA/HIP, two more
+   scripted searches -- the split singles timed as [F_resplit] before the segment singles and none
+   around presets; a faster one joining, after which every seeded single names the plan it
+   re-derived -- and two on a scripted clock: with the cut at its default (off), every seeded single
+   takes its whole window; with {!Autotune.seeded_hopeless_cut} on, a seeded single over
+   {!Autotune.seeded_hopeless_ratio} times the plan is cut after three samples and one under it
+   takes its whole window. *)
 
 open Base
 open Ocannl
@@ -404,7 +408,7 @@ let () =
       p_all "every later key's single carries the joined single as its staff" later
         ~f:(fun (label, _, _) -> Option.equal String.equal (snd (focus_and_staff label)) joined))
 
-(* === gh-ocannl-1697: the seeded split singles. === *)
+(* === gh-ocannl-1697: the seeded split singles, and the seeded singles' hopeless cut. === *)
 
 let is_resplit label = String.is_prefix label ~prefix:"F_resplit["
 let is_seeded_single label = is_resplit label || is_swap label
@@ -536,3 +540,93 @@ let () =
           Option.is_some (plan_named l) && not (Option.equal String.equal (plan_named l) plan)));
   claim "a segment single is attempted after the join" (fun label (_, record, _) ->
       p_exists label (after_join record) ~f:is_swap)
+
+(* The hopeless cut ([Autotune.seeded_hopeless_cut] on), on a scripted clock: every window physical,
+   so the cut is live. The plan reads 10 ms; the seeded singles alternate between 12 ms, over 1.05
+   times the plan (the running composite, and with the finals off the beam's head: the reference),
+   and 10.4 ms, under it; every other candidate reads 50 ms. Nothing beats the plan, so the
+   reference stays 10 ms. *)
+let () =
+  let cut_ms = 12. and near_ms = 10.4 in
+  (* Each attempt, newest first: its label, and once a batch is timed, its reading and batches. *)
+  let attempts = ref [] and cycled = ref 0 in
+  let clock ~depth ~ordinal:_ _wall =
+    match !attempts with
+    | (label, reads) :: rest ->
+        let ms =
+          match reads with
+          | Some (ms, _) -> ms
+          | None ->
+              if is_seeded label then 10.
+              else if is_seeded_single label then (
+                Int.incr cycled;
+                if !cycled % 2 = 1 then cut_ms else near_ms)
+              else 50.
+        in
+        attempts :=
+          (label, Some (ms, Option.value_map reads ~default:1 ~f:(fun (_, n) -> n + 1))) :: rest;
+        ms *. Float.of_int depth
+    | [] -> 10. *. Float.of_int depth
+  in
+  let search ~cut =
+    attempts := [];
+    cycled := 0;
+    let report = ref None in
+    let _ctx, _routine =
+      Autotune.Seam.with_value Autotune.seeded_hopeless_cut cut @@ fun () ->
+      Autotune.Seam.with_value Autotune.on_candidate_attempt (fun label ->
+          attempts := (label, None) :: !attempts)
+      @@ fun () ->
+      Autotune.Seam.with_value Autotune.on_batch_wall clock @@ fun () ->
+      Scripted_search.with_settings [ ("autotune_finals_margin", "0") ] @@ fun () ->
+      Autotune.tune ~search:true ~beam_width:2 ~rounds:0 ~repeats:1 ~seed_block_sizes:[]
+        ~timing:Autotune.Isolated ~cache_dir:"" ~log:false
+        ~report:(fun r -> report := Some r)
+        (Context.auto ()) comp Ir.Indexing.Empty
+    in
+    let windows =
+      List.rev !attempts
+      |> List.filter_map ~f:(fun (label, reads) ->
+          match reads with
+          | Some (ms, batches) when is_seeded_single label -> Some (label, ms, batches)
+          | Some _ | None -> None)
+    in
+    (Option.value_exn ~here:[%here] !report, windows)
+  in
+  (* The cut is off by default (gh-ocannl-1697: its ratio lost tuned step p50 on gpt2_mini/HIP): the
+     same clock with the seam at its default cuts nothing. *)
+  let uncut = if seeds_here then Some (search ~cut:false) else None in
+  claim uncut "with the seeded cut at its default, every seeded single takes its whole window"
+    (fun label (r, windows) ->
+      p_all label windows ~f:(fun (_, _, batches) ->
+          batches >= 16 && r.Autotune.seeded_hopeless = 0));
+  let searched = if seeds_here then Some (search ~cut:true) else None in
+  Option.iter searched ~f:(fun ((r : Autotune.report), windows) ->
+      List.iter windows ~f:(fun (label, ms, batches) ->
+          Stdio.eprintf "hopeless search (not part of the golden): %s reads %g ms, %d batches\n%!"
+            label ms batches);
+      Stdio.eprintf
+        "hopeless search (not part of the golden): %d seeded windows cut, %d cut in all, best %g ms\n\
+         %!"
+        r.seeded_hopeless r.timings_hopeless r.best_ms);
+  let claim = claim searched in
+  let reading ms windows = List.filter windows ~f:(fun (_, m, _) -> Float.equal m ms) in
+  claim "a seeded single over 1.05 times the plan is cut after three samples"
+    (fun label (_, windows) ->
+      p_all label (reading cut_ms windows) ~f:(fun (_, _, batches) ->
+          batches = Autotune.hopeless_min_samples));
+  claim "a split single is among the cut" (fun label (_, windows) ->
+      p_exists label (reading cut_ms windows) ~f:(fun (l, _, _) -> is_resplit l));
+  claim "a segment single is among the cut" (fun label (_, windows) ->
+      p_exists label (reading cut_ms windows) ~f:(fun (l, _, _) -> is_swap l));
+  claim "a seeded single under 1.05 times the plan takes its whole window"
+    (fun label (_, windows) ->
+      p_all label (reading near_ms windows) ~f:(fun (_, _, batches) -> batches >= 16));
+  claim "a segment single takes its whole window" (fun label (_, windows) ->
+      p_exists label (reading near_ms windows) ~f:(fun (l, _, _) -> is_swap l));
+  claim "the report counts the cut seeded windows, and the search crowns the plan"
+    (fun label (r, windows) ->
+      let cut = List.count windows ~f:(fun (_, _, batches) -> batches < 16) in
+      p label
+        (r.Autotune.seeded_hopeless = cut && r.timings_hopeless >= cut && is_seeded r.best_label
+       && Float.equal r.best_ms 10.))

@@ -58,7 +58,22 @@ let () =
     && Option.is_some (cut ~reference_ms:1. (samples 3 8.))
     && Option.is_some (cut ~at_least_ms:10. ~reference_ms:1. (samples 3 10.)));
   p_all "no finite positive reference, no cut" [ Float.infinity; 0.; -1.; Float.nan ]
-    ~f:(fun reference_ms -> Option.is_none (cut ~reference_ms (samples 16 1e6)))
+    ~f:(fun reference_ms -> Option.is_none (cut ~reference_ms (samples 16 1e6)));
+  (* gh-ocannl-1697: a seeded single's window, cut at its own ratio. *)
+  let seeded window =
+    Autotune.hopeless_window ~ratio:Autotune.seeded_hopeless_ratio ~reference_ms:10. window
+  in
+  p "a seeded single's ratio is 1.05" (Float.equal Autotune.seeded_hopeless_ratio 1.05);
+  p "at the seeded ratio, a steady window 1.06 times the reference is cut once it has three samples"
+    (Option.is_none (seeded (samples 2 10.6))
+    &&
+    match seeded (samples 3 10.6) with
+    | Some h -> Float.equal h.hopeless_ms 10.6 && h.hopeless_samples = 3
+    | None -> false);
+  p_all "at the seeded ratio, a window 1.04 times the reference is never cut" [ 3; 16; 64 ]
+    ~f:(fun n -> Option.is_none (seeded (samples n 10.4)));
+  p "the window the seeded ratio cuts is never cut at the default ratio"
+    (Option.is_none (cut ~reference_ms:10. (samples 16 10.6)))
 
 (* --- One timing call on a scripted clock. --- *)
 
