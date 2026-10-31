@@ -309,6 +309,26 @@ type finals_contender = {
   contender_finals_ms : float option;
 }
 
+(* gh-ocannl-1702: a ranked candidate whose schedule asks for a Grid loop and whose routine kept one
+   serial. See the interface. *)
+type grid_serial_candidate = {
+  grid_label : string;
+  grid_ms : float;
+  grid_record : Ir.C_syntax.grid_summary;
+}
+
+(* Structural, like [saved_is_tensorized] in [tune]: what the schedule asked, not what its label
+   promises. See the interface. *)
+let schedule_asks_grid (saved : SC.saved_schedule) =
+  List.exists saved ~f:(function
+    | SC.Split { outer = LL.Grid; _ }
+    | SC.Split { inner = LL.Grid; _ }
+    | SC.Retype { ty = LL.Grid; _ } ->
+        true
+    | _ -> false)
+
+let grid_rendered_serially (g : Ir.C_syntax.grid_summary) = g.pool && g.serial > 0
+
 type report = {
   outcome : outcome;
   candidates_timed : int;
@@ -420,6 +440,11 @@ type report = {
           that lost by 1% and one that lost by 40%. Structural, not label-keyed (see its set site),
           and on a [Cache_replay] report it is the storing search's measurement, like [best_ms] —
           the counters describe this call, the times describe the program. *)
+  best_grid : Ir.C_syntax.grid_summary option;
+      (** The crowned candidate's Grid census (gh-ocannl-1702). See the interface. *)
+  grid_serial_timed : grid_serial_candidate list;
+      (** Ranked Grid-asking candidates that rendered a Grid loop serially (gh-ocannl-1702). See the
+          interface. *)
   best_schedule : SC.saved_schedule;
   source_digest : string;
       (** The digest of the base lowering this call tuned (gh-ocannl-1022), [""] when it never
@@ -538,6 +563,8 @@ let no_search_report ~timing =
     best_mma_scalar_fallbacks = 0;
     mma_best_ms = Float.infinity;
     best_spread = None;
+    best_grid = None;
+    grid_serial_timed = [];
     best_schedule = [];
     (* No base lowering reached yet: [tune] fills this in once its base compile has captured one,
        and every report from then on carries it. *)
@@ -8702,6 +8729,11 @@ let tune_in_stream_scope ~timing_state ~defer ~substituted ?name ?search ?beam_w
                     best_tensorization = Some (mma_summary c).Ir.C_syntax.tensorization;
                     best_mma_statements = mma_statements c;
                     best_mma_scalar_fallbacks = mma_scalar_fallbacks c;
+                    (* The replay compile's own census: it is the routine this call returns. No
+                       candidate was ranked in this process, so the per-candidate list is empty,
+                       like every counter here. *)
+                    best_grid = Some c.routine.Context.grid;
+                    grid_serial_timed = [];
                     (* Nothing was timed in this process — [mma_timed = 0] like every other COUNTER
                        here, which describes this call. The TIMES describe the program, and are
                        replayed from the entry exactly as [best_ms] and [baseline_ms] above are:
@@ -9088,6 +9120,8 @@ let tune_in_stream_scope ~timing_state ~defer ~substituted ?name ?search ?beam_w
         let label_by_digest = Hashtbl.create (module String) in
         if baseline_timed then Hashtbl.set label_by_digest ~key:base_digest ~data:"baseline";
         let mma_best_ms = ref Float.infinity in
+        (* gh-ocannl-1702: the ranked candidates a Grid label would misdescribe, newest first. *)
+        let grid_serial_timed = ref [] in
         let winner_label best_c =
           Option.value_map best_c ~default:"" ~f:(fun c ->
               Option.value (Hashtbl.find label_by_digest c.digest_after) ~default:"")
@@ -9350,6 +9384,8 @@ let tune_in_stream_scope ~timing_state ~defer ~substituted ?name ?search ?beam_w
               Option.map best_c ~f:(fun c -> (mma_summary c).Ir.C_syntax.tensorization);
             best_mma_statements = Option.value_map best_c ~default:0 ~f:mma_statements;
             best_mma_scalar_fallbacks = Option.value_map best_c ~default:0 ~f:mma_scalar_fallbacks;
+            best_grid = Option.map best_c ~f:(fun c -> c.routine.Context.grid);
+            grid_serial_timed = List.rev !grid_serial_timed;
             mma_best_ms = !mma_best_ms;
             best_spread = winner_spread best_c;
             best_schedule = Option.value_map best_c ~default:[] ~f:(fun c -> flat_schedule c.form);
@@ -9822,6 +9858,22 @@ let tune_in_stream_scope ~timing_state ~defer ~substituted ?name ?search ?beam_w
                             "%s: NOTE not-requested, tensorized candidate emitted no Tile_mma \
                              statement"
                             (spec_label spec);
+                        (* The Grid census next to the timing (gh-ocannl-1702), for the reason the
+                           mma census is: a schedule that asks for a Grid loop the renderer kept
+                           serial timed a serial loop under a parallel label. Logged for every
+                           candidate that has a pool-backed Grid loop at all, flagged when the
+                           schedule asked and the renderer declined, and recorded in the report. *)
+                        let grid = c.routine.Context.grid in
+                        if grid_rendered_serially grid && schedule_asks_grid (flat_schedule c.form)
+                        then (
+                          grid_serial_timed :=
+                            { grid_label = spec_label spec; grid_ms = ms; grid_record = grid }
+                            :: !grid_serial_timed;
+                          logf "%s: NOTE grid-serial, the schedule asks for a Grid loop; %s"
+                            (spec_label spec)
+                            (Ir.C_syntax.grid_summary_string grid))
+                        else if grid.Ir.C_syntax.pool && not (List.is_empty grid.Ir.C_syntax.loops)
+                        then logf "%s: %s" (spec_label spec) (Ir.C_syntax.grid_summary_string grid);
                         Some (c, ms)
                     | Error (Outcome.Classified classified) -> (
                         record_decline declines classified;
@@ -11290,6 +11342,8 @@ let tune_in_stream_scope ~timing_state ~defer ~substituted ?name ?search ?beam_w
                 Option.map best_c ~f:(fun c -> (mma_summary c).Ir.C_syntax.tensorization);
               best_mma_statements = Option.value_map best_c ~default:0 ~f:mma_statements;
               best_mma_scalar_fallbacks = Option.value_map best_c ~default:0 ~f:mma_scalar_fallbacks;
+              best_grid = Option.map best_c ~f:(fun c -> c.routine.Context.grid);
+              grid_serial_timed = List.rev !grid_serial_timed;
               mma_best_ms = !mma_best_ms;
               best_spread = winner_spread best_c;
               best_schedule = Option.value_map best_c ~default:[] ~f:(fun c -> flat_schedule c.form);
@@ -11387,6 +11441,7 @@ let tune_in_stream_scope ~timing_state ~defer ~substituted ?name ?search ?beam_w
                 best_tensorization = None;
                 best_mma_statements = 0;
                 best_mma_scalar_fallbacks = 0;
+                best_grid = None;
                 best_schedule = [];
                 fissioned = false;
                 best_steps = [];

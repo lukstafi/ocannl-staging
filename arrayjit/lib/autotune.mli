@@ -1374,6 +1374,29 @@ val finals_crown : ('a * float list) list -> ('a * float) option
     earlier, beside that reading; [None] when some contender has no reading -- it cannot be compared
     in the shared round, so the search keeps its own head. *)
 
+type grid_serial_candidate = {
+  grid_label : string;  (** The label the candidate was timed and ranked under. *)
+  grid_ms : float;  (** Its admitted reading, the one the search ranked it by. *)
+  grid_record : Ir.C_syntax.grid_summary;
+      (** Its compiled routine's Grid census ({!Context.routine.grid}): which outermost [Grid] loops
+          rendered on the CPU pool, and the rule that kept each of the others serial. *)
+}
+(** A ranked candidate whose schedule asks for a [Grid] loop ({!schedule_asks_grid}) while its
+    routine rendered at least one outermost [Grid] loop serially on a pool-backed backend
+    ({!grid_rendered_serially}), gh-ocannl-1702. *)
+
+val schedule_asks_grid : Ir.Schedule_cache.saved_schedule -> bool
+(** Whether a candidate's schedule places a loop on the [Grid] axis: a [Split] with a [Grid] side or
+    a [Retype] to [Grid] (gh-ocannl-1702). Read off the schedule, not the label, for the reason
+    {!report.best_tensorized} is: a beam move can append such a placement to a plainly-labeled
+    incumbent, and every packed Grid sketch states its row-block loop this way. A [Grid] loop the
+    default pipeline placed is not one the schedule asked for. *)
+
+val grid_rendered_serially : Ir.C_syntax.grid_summary -> bool
+(** Whether a routine's Grid census records a serial outermost [Grid] loop on a pool-backed backend:
+    [pool] holds and [serial > 0] (gh-ocannl-1702). On a backend with no CPU pool a [Grid] loop is a
+    hardware grid and the census is empty, so this is [false] there. *)
+
 type report = {
   outcome : outcome;
       (** What this call did about searching. The counters below say how much work that state got
@@ -1896,6 +1919,25 @@ type report = {
           rank the decision surface one way on the cold run that measured the family and the other
           way on every warm-cache run after it. [infinity] when the storing search timed no
           tensorized candidate, and for entries written before the field existed. *)
+  best_grid : Ir.C_syntax.grid_summary option;
+      (** The crowned candidate's Grid census (gh-ocannl-1702), read off its compiled routine's
+          {!Context.routine.grid} as [best_tensorization] is off {!Context.routine.mma}: which of
+          its outermost [Grid] loops rendered on the CPU pool, and for each of the others the rule
+          that kept it serial (the per-chunk privatization cap [cc_grid_private_bytes_cap], the
+          launch floor [cc_grid_min_updates], or a sharing rule). [None] exactly when there is no
+          crowned candidate to consult. The pair to read is {!schedule_asks_grid} of [best_schedule]
+          (what the schedule asked) against {!grid_rendered_serially} of this (what the renderer
+          did): a crowned schedule asking for a [Grid] loop whose census records a serial one was
+          timed, at least in part, as a serial loop under a parallel label. On a cache hit it is the
+          replay compile's census, which describes the routine this call returns. *)
+  grid_serial_timed : grid_serial_candidate list;
+      (** Every candidate this search ranked whose schedule asks for a [Grid] loop while its routine
+          rendered one serially ({!grid_serial_candidate}), in timing order (gh-ocannl-1702). The
+          serial loop computes the same values, so a decline is invisible in the readings; this is
+          the per-candidate record, beside the [autotune_log] line every such candidate also gets (a
+          [NOTE grid-serial] carrying {!Ir.C_syntax.grid_summary_string}). A counter-like field: it
+          describes this call, so a cache replay carries [[]]. Candidates whose window was refused,
+          or that the budget or a hopeless reading cut, are not ranked and are not listed. *)
   best_schedule : Ir.Schedule_cache.saved_schedule;
       (** The winner's schedule; for a fissioned winner, the concatenation of the per-segment
           schedules (informational). Empty when nothing was timed. *)
