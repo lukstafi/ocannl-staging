@@ -975,11 +975,27 @@ jobs:
     if: github.event_name != 'workflow_dispatch' || !inputs.windows_only && inputs.ocaml_compiler == '5.5.x'
     name: Shell harnesses
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # The job's ~10 minutes plus the zsh pre-install's own cap (its fill: three
+    # capped attempts of 2 minutes, `apt-debs-cache`) and an index refresh.
+    timeout-minutes: 25
     steps:
     - uses: actions/checkout@v7
       with:
         ref: ${{ inputs.expected_sha }}
+    # scripts/test-setup-ocaml-env.sh's sourcing leg drives zsh, which the
+    # image does not ship; a skip there would be unlisted and red. The index
+    # refresh first: a stale image index 404s on superseded versions
+    # (gh-ocannl-698).
+    - name: Update apt package index
+      run: sudo apt-get update
+    - name: Pre-install zsh from a cache
+      uses: ./.github/actions/apt-debs-cache
+      with:
+        packages: zsh
+        key: zsh-debs-v1
+    # A no-op after a successful pre-install; otherwise the plain install.
+    - name: Install zsh
+      run: sudo apt-get install -y zsh
     - name: Test shell harnesses
       run: tools/test-harnesses.sh --ci-shell
 
