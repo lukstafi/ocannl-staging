@@ -1,0 +1,9 @@
+[emission-outlined] every requested vector width emitted a kernel: true
+[emission-outlined] every fp16 numerics setting emitted a kernel: true
+[emission-outlined] every whole-vector storage bridge the cc builtins define reaches a kernel: true
+[emission-outlined] every narrow-storage loop's kernel spells both directions of its conversion: true
+[emission-outlined] no two censused loops of a kernel share an anchor line: true
+[emission-outlined] every vector width censuses a register-tile geometry the sketch seeding proposes beside the default: true
+[emission-outlined] every vector width censuses a register-tile pass whose column tail ends in a partial vector: true
+[emission-outlined] every censused register tile rendered the geometry its row names: true
+[emission-outlined] every child's main kernel was rendered outlined: true

@@ -2432,7 +2432,13 @@ in the `tools/*.sh` scripts (gh-ocannl-1111) and in the string literals of the O
   the calls the main logic makes, and fail the run on a part no kernel calls (gh-ocannl-1678).
   Test-size kernels are never outlined at the default part weight, so check a reader under
   `OCANNL_CC_KERNEL_PART_WEIGHT=1 OCANNL_CC_COMPILE_UNIT_MIN_BYTES=0 OCANNL_CC_COMPILE_JOBS=4`;
-  `test/operations/cc_kernel_outline` pins the splice against a whole compile.
+  `test/operations/cc_kernel_outline` pins the splice against a whole compile. Two regular runs
+  force it (gh-ocannl-1708): `test_uniform_virtual_lane-outlined` (the plain golden, flags on its
+  rule) and the census's `emission-outlined` piece (its emit children are forced), each claiming
+  the outlining itself through `Generated.outlined_parts` -- over the run or the main kernels,
+  since a one-statement kernel stays whole at any weight. And `codegen_text_inventory` refuses a
+  `substr_index` on the banner (`Codegen_text_scan.reads_after_marker`), exempting by name only
+  `cc_kernel_outline`'s negative control.
 - **Before changing code generation, read the inventory**: `dune build
   @test/operations/runtest-codegen_text_inventory` prints, as its golden, every file in the tree
   that pins the TEXT of emitted code (gh-ocannl-712). Two populations, and no single search finds

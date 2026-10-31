@@ -19,6 +19,23 @@ module Generated = Test_utils.Generated
 
 let () = Generated.init ~backend_name
 
+(* gh-ocannl-1708: the [outlined] mode is this test run with every kernel forced outlined
+   ([cc_kernel_part_weight=1], [cc_compile_unit_min_bytes=0] on its rule), under the plain run's
+   golden: a structural reading that misses an outlined kernel's statements turns its positive
+   claims red there, where at the default part weight no test-size kernel is outlined. The mode
+   claims the outlining itself, so a threshold change leaving these kernels whole cannot turn the
+   variant into a second copy of the plain run -- over the run rather than per kernel, since the
+   smallest of them stay whole at any weight ({!Ir.Kernel_outline.groups}: a part needs company). *)
+let outlined =
+  match
+    List.filter
+      (List.tl_exn (Array.to_list Stdlib.Sys.argv))
+      ~f:(fun arg -> not (String.is_prefix arg ~prefix:"--"))
+  with
+  | [] -> false
+  | [ "outlined" ] -> true
+  | _ -> failwith "usage: test_uniform_virtual_lane.exe [outlined] [--ocannl_<key>=<value>...]"
+
 (* The consumer multiplies by 1: exact in every precision (including the fp8 float bridge), and
    reads each cell of [u] exactly once so [u] stays a virtualization candidate. Both runs create
    tensors in the same order after [unsafe_reinitialize], so the threefry keys (self ids) line
@@ -46,6 +63,9 @@ let bits_equal a b = Int64.equal (Int64.bits_of_float a) (Int64.bits_of_float b)
    An outlined kernel's statements are its parts' bodies (gh-ocannl-1678). *)
 let has sub s = String.is_substring (Generated.main_logic s) ~substring:sub
 
+(* Per kernel compiled, whether it was rendered outlined; filled in the [outlined] mode only. *)
+let kernels = ref []
+
 let check ~name ~prec ?input_dims output_dims =
   Verdict.case name @@ fun () ->
   let ref_vals, ref_src = run ~virtual_:false ~prec ?input_dims output_dims in
@@ -68,7 +88,15 @@ let check ~name ~prec ?input_dims output_dims =
   Verdict.claimf "%s: materialized run stores via the vectorized builtin" name ref_vec;
   Verdict.claimf "%s: materialized run emits no lane extract" name (not ref_lane);
   Verdict.claimf "%s: virtual run reads via the lane builtin" name vir_lane;
-  Verdict.claimf "%s: virtual run emits no vectorized store" name (not vir_vec)
+  Verdict.claimf "%s: virtual run emits no vectorized store" name (not vir_vec);
+  if outlined then
+    List.iter
+      [ ("materialized", ref_src); ("virtual", vir_src) ]
+      ~f:(fun (run, src) ->
+        let parts = List.length (Generated.outlined_parts src) in
+        Stdio.eprintf "%s: the %s kernel has %d outlined parts (not part of the golden)\n" name run
+          parts;
+        kernels := (parts > 0) :: !kernels)
 
 let () =
   check ~name:"single n=1 (lone partial block)" ~prec:Ir.Ops.single [ 1 ];
@@ -93,4 +121,11 @@ let () =
   check ~name:"uint64 n=3" ~prec:Ir.Ops.uint64 [ 3 ];
   check ~name:"double n=3" ~prec:Ir.Ops.double [ 3 ];
   (* fp8 is the stress case: 16 lanes per block. *)
-  check ~name:"fp8 n=17" ~prec:Ir.Ops.fp8 [ 17 ]
+  check ~name:"fp8 n=17" ~prec:Ir.Ops.fp8 [ 17 ];
+  if outlined then (
+    let whole = List.count !kernels ~f:not in
+    Stdio.eprintf "%d of %d kernels rendered whole (not part of the golden)\n" whole
+      (List.length !kernels);
+    (* Silent on a pass: the variant's golden is the plain run's. *)
+    Verdict.claim "most kernels of the forced run were rendered outlined"
+      (2 * whole < List.length !kernels))

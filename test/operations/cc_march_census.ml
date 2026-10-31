@@ -794,23 +794,29 @@ let census_registers ~width = if width = 32 then 16 else 32
 (* The environment a child emits under: this process's, with every setting the child must not
    inherit replaced. Removing them first matters -- [Unix.create_process_env] passes the array
    verbatim, and a duplicate key resolves to whichever copy the child's getenv finds first. *)
-let child_env ~width ~fp16 ~dir =
+let child_env ~outlined ~width ~fp16 ~dir =
   let forced =
-    [
-      ("OCANNL_BACKEND", "cc");
-      ("OCANNL_CC_VECTOR_BYTES", Int.to_string width);
-      ("OCANNL_CC_VECTOR_REGISTERS", Int.to_string (census_registers ~width));
-      ("OCANNL_CC_FP16_ARITHMETIC", "native");
-      ("OCANNL_FP16_ARITHMETIC", fp16);
-      (* The narrow-storage rows ARE the [narrow_compute_f32] path (gh-ocannl-517): with it off,
-         bf16 and fp8 compute at their storage precision, no [vec_bridge] arm is reached and the
-         register tiling can decline outright -- and every claim below would then hold over a
-         fixture that no longer exercises what it names. Pinned rather than declared on the stanza:
-         a value the children are given cannot be changed out from under them by the ambient
-         environment or by a config file an ancestor directory grows. *)
-      ("OCANNL_NARROW_COMPUTE_F32", "true");
-      ("CC_MARCH_CENSUS_EMIT", dir);
-    ]
+    (* The [emission-outlined] piece's children render every kernel OUTLINED (gh-ocannl-1708): at
+       the default part weight no census kernel is, so a reading of their statements that misses an
+       outlined kernel's parts would pass here and fail on a kernel large enough to outline. *)
+    (if outlined then
+       [ ("OCANNL_CC_KERNEL_PART_WEIGHT", "1"); ("OCANNL_CC_COMPILE_UNIT_MIN_BYTES", "0") ]
+     else [])
+    @ [
+        ("OCANNL_BACKEND", "cc");
+        ("OCANNL_CC_VECTOR_BYTES", Int.to_string width);
+        ("OCANNL_CC_VECTOR_REGISTERS", Int.to_string (census_registers ~width));
+        ("OCANNL_CC_FP16_ARITHMETIC", "native");
+        ("OCANNL_FP16_ARITHMETIC", fp16);
+        (* The narrow-storage rows ARE the [narrow_compute_f32] path (gh-ocannl-517): with it off,
+           bf16 and fp8 compute at their storage precision, no [vec_bridge] arm is reached and the
+           register tiling can decline outright -- and every claim below would then hold over a
+           fixture that no longer exercises what it names. Pinned rather than declared on the
+           stanza: a value the children are given cannot be changed out from under them by the
+           ambient environment or by a config file an ancestor directory grows. *)
+        ("OCANNL_NARROW_COMPUTE_F32", "true");
+        ("CC_MARCH_CENSUS_EMIT", dir);
+      ]
   in
   let overridden = List.map forced ~f:fst in
   let inherited =
@@ -822,14 +828,16 @@ let child_env ~width ~fp16 ~dir =
   in
   Array.of_list (inherited @ List.map forced ~f:(fun (k, v) -> k ^ "=" ^ v))
 
-let spawn_emit ~exe ~width ~fp16 ~dir =
+let spawn_emit ~outlined ~exe ~width ~fp16 ~dir =
   mkdir_p dir;
   (* The child's stdout is captured, not inherited: it must not reach the golden, and a failed child
      is worth reporting in full. *)
   let log = Stdlib.Filename.concat dir "emit.log" in
   let out = Unix.openfile log [ Unix.O_WRONLY; Unix.O_CREAT; Unix.O_TRUNC ] 0o644 in
   let pid =
-    Unix.create_process_env exe [| exe |] (child_env ~width ~fp16 ~dir) Unix.stdin out Unix.stderr
+    Unix.create_process_env exe [| exe |]
+      (child_env ~outlined ~width ~fp16 ~dir)
+      Unix.stdin out Unix.stderr
   in
   let _, status = Unix.waitpid [] pid in
   Unix.close out;
@@ -1622,12 +1630,12 @@ let kernel_label (e : emitted) =
   | Some geometry -> setting ^ "-" ^ geometry
   | None -> setting
 
-let emit_all ?(settings = fp16_settings) ~exe ~root ~widths () =
+let emit_all ?(settings = fp16_settings) ?(outlined = false) ~exe ~root ~widths () =
   List.cartesian_product widths settings
   |> List.concat_map ~f:(fun (width, (fp16_tag, fp16)) ->
       let describe = Printf.sprintf "width %d, fp16 %s" width fp16_tag in
       let dir = Stdlib.Filename.concat root (Printf.sprintf "w%d-%s" width fp16_tag) in
-      match spawn_emit ~exe ~width ~fp16 ~dir with
+      match spawn_emit ~outlined ~exe ~width ~fp16 ~dir with
       | Error out ->
           Verdict.fail (Printf.sprintf "%s: the emit child failed:\n%s" describe out);
           []
@@ -1735,16 +1743,28 @@ let emit_all ?(settings = fp16_settings) ~exe ~root ~widths () =
    [w64_host] at 368 s, against the about-5-minute ceiling a piece is held to; the 64-byte kernels
    are the expensive ones, and the native-fp16 child carries most of the kernels.
 
-   The list is derived, never kept: the children ({!widths} times {!fp16_settings}) times the
-   families' names. What the dune file runs is held to it by the emission piece. *)
-type piece = Emission | Columns of { width : int; fp16 : string * string; family : string }
+   And [emission-outlined] (gh-ocannl-1708): the emission piece's claims about what was emitted,
+   over children forced to render every kernel OUTLINED ({!child_env}). The claims read the kernels'
+   statements through {!Generated.main_logic_lines}; at the default part weight no census kernel is
+   outlined, so this piece is what would notice a reading that missed an outlined kernel's parts. It
+   claims the outlining too, so that a threshold change leaving the kernels whole cannot make it a
+   second run of the plain piece.
+
+   The list is derived, never kept: the two emission pieces, then the children ({!widths} times
+   {!fp16_settings}) times the families' names. What the dune file runs is held to it by the
+   emission piece. *)
+type piece =
+  | Emission
+  | Emission_outlined
+  | Columns of { width : int; fp16 : string * string; family : string }
 
 let piece_name = function
   | Emission -> "emission"
+  | Emission_outlined -> "emission-outlined"
   | Columns { width; fp16 = tag, _; family } -> Printf.sprintf "w%d_%s_%s" width tag family
 
 let pieces () =
-  Emission
+  Emission :: Emission_outlined
   :: List.concat_map (List.cartesian_product widths fp16_settings) ~f:(fun (width, fp16) ->
       List.map (toolchain_families ()) ~f:(fun (family, _) -> Columns { width; fp16; family }))
 
@@ -1759,12 +1779,10 @@ let dune_pieces dune_text =
       String.prefix rest
         (Option.value (String.lfindi rest ~f:(fun _ c -> ends c)) ~default:(String.length rest)))
 
-let emission ~exe ~root ~dune_file =
-  cache_format_probes ();
-  cache_policy_probes ();
-  cache_reuse_probe ~exe ~root;
-  let emitted = emit_all ~exe ~root ~widths () in
-  Verdict.p_all "every requested vector width emitted a kernel" widths ~f:(fun w ->
+(* The claims about what the children emitted, shared by the two emission pieces; [label] names a
+   claim with its piece where the plain one's names are already taken. *)
+let emitted_claims ~label (emitted : emitted list) =
+  Verdict.p_all (label "every requested vector width emitted a kernel") widths ~f:(fun w ->
       List.exists emitted ~f:(fun e -> e.width = w));
   (* The (fp16, f32) bridge pair and the native-fp16 builtin rows live in different children, so a
      child that silently emitted the other one's loop set would leave one of the two groups in no
@@ -1784,7 +1802,8 @@ let emission ~exe ~root ~dune_file =
         String.equal e.kernel routine
         && List.exists e.loops ~f:(fun l -> String.equal l.store half && String.equal l.comp p))
   in
-  Verdict.p_all "every fp16 numerics setting emitted a kernel"
+  Verdict.p_all
+    (label "every fp16 numerics setting emitted a kernel")
     [ ("native", half); ("wide", Ir.Ops.prec_string Ir.Ops.single) ]
     ~f:(fun (tag, p) ->
       let kernels = half_rows_computing_in p in
@@ -1819,7 +1838,7 @@ let emission ~exe ~root ~dune_file =
         then Some key
         else None)
   in
-  Verdict.p_all "every whole-vector storage bridge the cc builtins define reaches a kernel"
+  Verdict.p_all (label "every whole-vector storage bridge the cc builtins define reaches a kernel")
     vec_bridges ~f:(fun key ->
       List.exists emitted ~f:(fun e -> String.is_substring e.source ~substring:key));
   let narrow_rows =
@@ -1827,7 +1846,8 @@ let emission ~exe ~root ~dune_file =
         List.filter_map e.loops ~f:(fun l ->
             if String.equal l.store l.comp then None else Some (e, l)))
   in
-  Verdict.p_all "every narrow-storage loop's kernel spells both directions of its conversion"
+  Verdict.p_all
+    (label "every narrow-storage loop's kernel spells both directions of its conversion")
     narrow_rows ~f:(fun (e, l) ->
       (not (String.is_empty l.widen))
       && (not (String.is_empty l.narrow))
@@ -1843,7 +1863,8 @@ let emission ~exe ~root ~dune_file =
      [Tile_mma] rows, whose anchors are now two patterns each rather than one, and for the narrow
      reduction groups, whose tags are substrings of one another's ([f16] of [f16w]) whenever a
      future setting emits both from the same child. *)
-  Verdict.p_all "no two censused loops of a kernel share an anchor line"
+  Verdict.p_all
+    (label "no two censused loops of a kernel share an anchor line")
     (List.concat_map emitted ~f:(fun e ->
          List.map e.loops ~f:(fun l -> (e, l, loop_anchor_range e l))))
     ~f:(fun (e, l, mine) ->
@@ -1871,14 +1892,22 @@ let emission ~exe ~root ~dune_file =
         List.filter_map e.loops ~f:(fun l -> Option.map l.geometry ~f:(fun g -> (e, g))))
   in
   Verdict.p_all
-    "every vector width censuses a register-tile geometry the sketch seeding proposes beside the \
-     default"
-    widths ~f:(fun w -> List.exists geometry_loops ~f:(fun (e, g) -> e.width = w && g.seeded));
+    (label
+       "every vector width censuses a register-tile geometry the sketch seeding proposes beside \
+        the default") widths ~f:(fun w ->
+      List.exists geometry_loops ~f:(fun (e, g) -> e.width = w && g.seeded));
   Verdict.p_all
-    "every vector width censuses a register-tile pass whose column tail ends in a partial vector"
+    (label
+       "every vector width censuses a register-tile pass whose column tail ends in a partial vector")
     widths ~f:(fun w -> List.exists geometry_loops ~f:(fun (e, g) -> e.width = w && g.partial));
-  Verdict.p_all "every censused register tile rendered the geometry its row names" geometry_loops
-    ~f:(fun (e, g) -> String.is_substring e.source ~substring:(tile_header g.tile));
+  Verdict.p_all (label "every censused register tile rendered the geometry its row names")
+    geometry_loops ~f:(fun (e, g) -> String.is_substring e.source ~substring:(tile_header g.tile))
+
+let emission ~exe ~root ~dune_file =
+  cache_format_probes ();
+  cache_policy_probes ();
+  cache_reuse_probe ~exe ~root;
+  emitted_claims ~label:Fn.id (emit_all ~exe ~root ~widths ());
   (* {2 That the dune rules run the whole matrix}
 
      The pieces are derived from the column table and the width list ({!pieces}), so the matrix they
@@ -1898,6 +1927,20 @@ let emission ~exe ~root ~dune_file =
       (String.concat ~sep:"; " (sorted declared))
       (String.concat ~sep:"; " (sorted derived));
   Verdict.p "the dune rules run every census piece exactly once" partition_holds
+
+(* The cache probes and the dune-rules claim are the plain piece's: neither reads an emitted kernel,
+   so a second run of them here would census nothing new. *)
+let emission_outlined ~exe ~root =
+  let label claim = Printf.sprintf "[%s] %s" (piece_name Emission_outlined) claim in
+  let emitted = emit_all ~outlined:true ~exe ~root ~widths () in
+  emitted_claims ~label emitted;
+  (* Over each child's main kernel, the one carrying the reduction loops the claims read: a
+     register-tile geometry twin is one tiled loop, a single statement, and a kernel of one part
+     stays whole at any weight ({!Ir.Kernel_outline.groups}). *)
+  Verdict.p_all
+    (label "every child's main kernel was rendered outlined")
+    (List.filter emitted ~f:(fun e -> String.equal e.kernel routine))
+    ~f:(fun e -> not (List.is_empty (Generated.outlined_parts e.source)))
 
 let census ~exe ~root ~piece ~width ~fp16 ~columns =
   let in_piece claim = Printf.sprintf "[%s] %s" (piece_name piece) claim in
@@ -2511,6 +2554,8 @@ let () =
       let piece, run =
         match args with
         | [ _; "emission"; dune_file ] -> (Emission, fun ~root -> emission ~exe ~root ~dune_file)
+        | [ _; "emission-outlined" ] ->
+            (Emission_outlined, fun ~root -> emission_outlined ~exe ~root)
         | [ _; name ] -> (
             match List.find (pieces ()) ~f:(fun p -> String.equal (piece_name p) name) with
             | Some (Columns { width; fp16; family } as piece) ->
@@ -2518,7 +2563,7 @@ let () =
                   List.Assoc.find_exn (toolchain_families ()) family ~equal:String.equal
                 in
                 (piece, fun ~root -> census ~exe ~root ~piece ~width ~fp16 ~columns)
-            | Some Emission | None -> usage ())
+            | Some (Emission | Emission_outlined) | None -> usage ())
         | _ -> usage ()
       in
       (* Each piece in a directory of its own: the pieces run concurrently, in one dune action
