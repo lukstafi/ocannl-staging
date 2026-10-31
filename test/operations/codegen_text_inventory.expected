@@ -89,7 +89,6 @@ arrayjit/test/test_vectorized_codegen.expected [c] markers c-align-attr c-decl-b
 arrayjit/test/test_zero_out_codegen.expected [c] markers c-align-attr c-decl-banner c-for c-logic-banner c-prec-cast; re-run by @arrayjit/test/runtest-test_zero_out_codegen
 test/einsum/inline_permuted_view-c_fwd.ll.expected [ll] extension .ll.expected; markers ll-assign ll-end ll-loop; re-run by @test/einsum/runtest-inline_permuted_view-c_fwd
 test/einsum/test_cse-cse_d_fwd.ll.expected [ll] extension .ll.expected; markers ll-assign ll-end ll-loop; re-run by @test/einsum/runtest-test_cse-cse_d_fwd
-test/operations/byte_counter_conversion.expected [derived] beside test/operations/byte_counter_conversion.ml; re-run by @test/operations/runtest-byte_counter_conversion
 test/operations/cache_key_agreement.expected [derived] beside test/operations/cache_key_agreement.ml; re-run by @test/operations/runtest-cache_key_agreement
 test/operations/canonical_render.expected [ll] markers ll-assign; re-run by @test/operations/runtest-canonical_render
 test/operations/concat_loop_symbols.expected [derived] beside test/operations/concat_loop_symbols.ml; re-run by @test/operations/runtest-concat_loop_symbols
@@ -122,6 +121,7 @@ test/operations/top_down_prec.c.expected [c] extension .c.expected; markers c-de
 test/operations/top_down_prec.cu.expected [cuda] extension .cu.expected; markers c-decl-banner c-logic-banner cuda-kernel ll-end; re-run by @test/operations/runtest-top_down_prec-extension when %{read:../config/ocannl_backend_extension.txt} is cu
 test/operations/top_down_prec.hip.expected [hip] extension .hip.expected; markers c-decl-banner c-logic-banner cuda-kernel ll-end; re-run by @test/operations/runtest-top_down_prec-extension when %{read:../config/ocannl_backend_extension.txt} is hip
 test/operations/top_down_prec.metal.expected [metal] extension .metal.expected; markers c-decl-banner c-logic-banner ll-end metal-kernel; re-run by @test/operations/runtest-top_down_prec-extension when %{read:../config/ocannl_backend_extension.txt} is metal
+test/operations/uint4x32_counter_conversion.expected [derived] beside test/operations/uint4x32_counter_conversion.ml; re-run by @test/operations/runtest-uint4x32_counter_conversion
 test/operations/uint4x32_fixed_index_parity.expected [derived] beside test/operations/uint4x32_fixed_index_parity.ml; re-run by @test/operations/runtest-uint4x32_fixed_index_parity
 test/operations/zero_out_local_decl-unoptimized.ll.expected [ll] extension .ll.expected; markers ll-assign ll-end ll-loop; re-run by @test/operations/runtest-zero_out_local_decl-unoptimized
 test/operations/zero_out_local_decl.c.expected [c] extension .c.expected; markers c-align-attr c-decl-banner c-for c-logic-banner c-prec-cast c-restrict ll-end; re-run by @test/operations/runtest-zero_out_local_decl-extension when %{read:../config/ocannl_backend_extension.txt} is c
@@ -161,8 +161,6 @@ test/operations/branchless_select.ml [run by @test/operations/runtest-branchless
     "bs_pool_inlined"
     ... ^ "("
     ... ^ "_v["
-test/operations/byte_counter_conversion.ml [run by @test/operations/runtest-byte_counter_conversion]
-    "byte_to_uint4x32("
 test/operations/cache_key_agreement.ml [run by @test/operations/runtest-cache_key_agreement]
 test/operations/canonical_render.ml [renders generated text in memory; run by @test/operations/runtest-canonical_render; also pins text this scan cannot name: opaque aggregate component, mutation or unseen buffer write]
     "?"
@@ -586,6 +584,8 @@ test/operations/tile_mma_narrow.ml [run by @test/operations/runtest-tile_mma_nar
     "narrow storage bridged"
     "narrow storage bridged: d:bfloat16."
     "narrow storage bridged: d:half."
+test/operations/uint4x32_counter_conversion.ml [run by @test/operations/runtest-uint4x32_counter_conversion]
+    ... ^ "_to_uint4x32("
 test/operations/uint4x32_fixed_index_parity.ml [run by @test/operations/runtest-uint4x32_fixed_index_parity; also pins text this scan cannot name: opaque aggregate component]
     ... ^ "["
 test/operations/vec_signed_zero.ml [run by @test/operations/runtest-vec_signed_zero]
@@ -612,7 +612,6 @@ so, and the goldens' families say which backends a change has to be run on.
 @test/einsum/runtest-test_cse-cse_d_fwd
 @test/operations/runtest-accum_width
 @test/operations/runtest-branchless_select
-@test/operations/runtest-byte_counter_conversion
 @test/operations/runtest-cache_key_agreement
 @test/operations/runtest-canonical_render
 @test/operations/runtest-cc_kernel_outline
@@ -699,6 +698,7 @@ so, and the goldens' families say which backends a change has to be run on.
 @test/operations/runtest-tile_mma_narrow
 @test/operations/runtest-top_down_prec-extension
 @test/operations/runtest-top_down_prec-unoptimized
+@test/operations/runtest-uint4x32_counter_conversion
 @test/operations/runtest-uint4x32_fixed_index_parity
 @test/operations/runtest-vec_signed_zero
 @test/operations/runtest-workgroup_memory_accounting

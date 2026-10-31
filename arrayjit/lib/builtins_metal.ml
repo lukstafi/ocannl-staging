@@ -526,9 +526,12 @@ using namespace metal;|}, []);
     return uint4(uint32_t(as_type<uint16_t>(x)), 0, 0, 0);
 }|},
       [] );
+    (* Its bits, as [bfloat16_to_uint4x32] and the CUDA and HIP tables take theirs: a [half] node
+       passed to a [uint16_t] parameter is converted by VALUE (1.5 became counter 1), unlike the
+       host stub and every other backend (gh-ocannl-1704). *)
     ( "half_to_uint4x32",
-      {|uint4 half_to_uint4x32(uint16_t x) {
-    return uint4(uint32_t(x), 0, 0, 0);
+      {|uint4 half_to_uint4x32(half x) {
+    return uint4(uint32_t(as_type<uint16_t>(x)), 0, 0, 0);
 }|},
       [] );
     ( "fp8_to_uint4x32",

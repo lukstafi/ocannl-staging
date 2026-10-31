@@ -123,6 +123,20 @@ let concise_float = Ir.Ndarray.concise_float
     sidestepping decimal-tie rounding divergence entirely. *)
 let hex_float v = Printf.sprintf "%h" v
 
+(** [uint4x32_words cell] is the four 32-bit words of a [uint4x32] cell as {!Ir.Ndarray} stores it,
+    a [Complex.t] (gh-ocannl-1704): the real part's bits hold words 0 and 1, the imaginary part's
+    words 2 and 3, each pair little-endian -- the order the [Ir.Ops.<prec>_to_uint4x32] host stubs
+    return them in. *)
+let uint4x32_words (cell : Stdlib.Complex.t) =
+  let lo = Int64.bits_of_float cell.re and hi = Int64.bits_of_float cell.im in
+  let word bits k =
+    Int64.to_int_exn (Int64.bit_and (Int64.shift_right_logical bits (32 * k)) 0xFFFF_FFFFL)
+  in
+  [| word lo 0; word lo 1; word hi 0; word hi 1 |]
+
+(** [hex_words words] spells [uint4x32_words]'s result as four 8-digit hex words. *)
+let hex_words words = String.concat_array ~sep:" " (Array.map words ~f:(Printf.sprintf "%08x"))
+
 (** Prints [v] via [concise_float]. *)
 let print_float ?(prec = 6) v = printf "%s" (concise_float ~prec v)
 
