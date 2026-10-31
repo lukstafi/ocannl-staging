@@ -1,0 +1,58 @@
+the pipeline leaves at least four of the tree's five intermediates virtual: true
+each of them is read by recompute: true
+a single-node recompute compiles: true
+separate reads compile one recompute routine per virtual node: true
+to_host_all over the chain compiles one recompute routine: true
+the shared read equals the separate reads, bitwise: true
+and the separate reads of the virtual nodes agree with it, bitwise: true
+the shared read equals the materialized arm, bitwise: true
+the shared read leaves the parent's ledger as it was: true
+and frees the throwaway context's pools: true
+and gives the parent no buffer for any virtual node: true
+                                                          #15 +_out
+                                                           7.00     1.80e+1  3.50e+1
+                                                           5.80e+1  8.70e+1  1.22e+2
+                                                       #13 -_v5                                                                          │#14 1
+                                                        6.00     1.70e+1  3.40e+1                                                        │ 1.00
+                                                        5.70e+1  8.60e+1  1.21e+2                                                        │
+                                                  #12 *.                                                                       │[#6 +_v2]│
+                                                   1.00e+1  3.00e+1  6.20e+1                                                   │         │
+                                                   1.06e+2  1.62e+2  2.30e+2                                                   │         │
+                                              #10 +_v4                                                                  │#11 2 │         │
+                                               5.00     1.50e+1  3.10e+1                                                │ 2.00 │         │
+                                               5.30e+1  8.10e+1  1.15e+2                                                │      │         │
+                                         #9 -_v3                                                              │[#3 +_v1]│      │         │
+                                          2.00     9.00     2.20e+1                                           │         │      │         │
+                                          4.10e+1  6.60e+1  9.70e+1                                           │         │      │         │
+                          #6 +_v2                                               │  #8 *.                      │         │      │         │
+                           4.00     1.30e+1  2.80e+1                            │   2.00  4.00     6.00       │         │      │         │
+                           4.90e+1  7.60e+1  1.09e+2                            │   8.00  1.00e+1  1.20e+1    │         │      │         │
+                       #5 *.                                             │#4 1  │[#0 1,2,3,4,5..._pt_x]│#7 2  │         │      │         │
+                        3.00     1.20e+1  2.70e+1                        │ 1.00 │                      │ 2.00 │         │      │         │
+                        4.80e+1  7.50e+1  1.08e+2                        │      │                      │      │         │      │         │
+           #3 +_v1                                │[#0 1,2,3,4,5..._pt_x]│      │                      │      │         │      │         │
+            3.00     6.00     9.00                │                      │      │                      │      │         │      │         │
+            1.20e+1  1.50e+1  1.80e+1             │                      │      │                      │      │         │      │         │
+ #2 *.                     │[#0 1,2,3,4,5..._pt_x]│                      │      │                      │      │         │      │         │
+  2.00  4.00     6.00      │                      │                      │      │                      │      │         │      │         │
+  8.00  1.00e+1  1.20e+1   │                      │                      │      │                      │      │         │      │         │
+#0 1,2,3,4,5..._pt_x│#1 2  │                      │                      │      │                      │      │         │      │         │
+ 1.00  2.00  3.00   │ 2.00 │                      │                      │      │                      │      │         │      │         │
+ 4.00  5.00  6.00   │      │                      │                      │      │                      │      │         │      │         │
+printing the tree compiles one recompute routine: true
+after a write to x, the shared read sees v1 = 3 x of the new x: true
+the pipeline placed h Local and u, w virtual: true
+to_host_all refuses u with the refusal to_host gives it: true
+and refuses before compiling anything: true
+
+                                                     #42 +_out
+                                                      9.10e+1  3.10e+2
+                             #41 *. unknown                                             │            #40 +_w
+                             <unobservable: reads Local h>                              │             3.00  6.00
+                        #36 +_u unknown                                       │[#34 *_h]│    #39 *.          │[#37 1,2_ptl_y]
+                        <unobservable: reads Local h>                         │         │     2.00  4.00     │
+                         #34 *_h unknown                               │#35 3 │         │#37 1,2_ptl_y│#38 2 │
+                         <unobservable: Local>                         │ 3.00 │         │ 1.00  2.00  │ 2.00 │
+#33 1,1,1,1,1..._ptl_a       │#32 0.25,0.25,0.25,0.25,0.25..._ptl_x    │      │         │             │      │
+ 1.00  1.00  ...  1.00  1.00 │ 2.50e-1  2.50e-1  ...  2.50e-1  2.50e-1 │      │         │             │      │
+ 2.00  2.00  ...  2.00  2.00 │                                         │      │         │             │      │

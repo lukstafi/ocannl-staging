@@ -1742,54 +1742,76 @@ let retry_pending_recompute_releases () =
   List.iter pending ~f:(fun (child, parent, routine) ->
       try release_recompute ~parent child routine with _ -> ())
 
-let recompute_to_host ctx (tn : Tn.t) (nd : Nd.t) : Nd.t =
+(* gh-ocannl-1737: every node of [reads] is recomputed by ONE throwaway routine -- a [proxy_i =:
+   tn_i] copy per node, sequenced -- so reading a whole tree compiles once rather than once per
+   node. Each copy inlines its node's stored computation against the leaves as they are now, exactly
+   as a single-node read does; the copies only share the routine. *)
+let recompute_all_to_host ctx (reads : (Tn.t * Nd.t) list) : Nd.t list =
   retry_pending_recompute_releases ();
-  let proxy =
-    Tn.create ~namespace:recompute_namespace
-      (Tn.Specified (Lazy.force tn.Tn.storage_prec))
-      ~id:(recompute_id ()) ~label:("recompute" :: tn.Tn.label)
-      ~unpadded_dims:(lazy (Tn.dims_without_padding tn))
-      ~padding:tn.Tn.padding ()
+  let reads =
+    List.map reads ~f:(fun (tn, nd) ->
+        let proxy =
+          Tn.create ~namespace:recompute_namespace
+            (Tn.Specified (Lazy.force tn.Tn.storage_prec))
+            ~id:(recompute_id ()) ~label:("recompute" :: tn.Tn.label)
+            ~unpadded_dims:(lazy (Tn.dims_without_padding tn))
+            ~padding:tn.Tn.padding ()
+        in
+        Tn.update_memory_mode proxy Tn.On_device recompute_provenance;
+        (tn, proxy, nd))
   in
-  Tn.update_memory_mode proxy Tn.On_device recompute_provenance;
   let comp =
-    Asgns.comp ~embedded:(Set.singleton (module Tn) proxy) (identity_copy ~lhs:proxy ~rhs:tn)
+    Asgns.sequence
+      (List.map reads ~f:(fun (tn, proxy, _) ->
+           Asgns.comp ~embedded:(Set.singleton (module Tn) proxy) (identity_copy ~lhs:proxy ~rhs:tn)))
   in
-  let name = Printf.sprintf "recompute_%d" tn.Tn.uid in
+  let describe =
+    match reads with
+    | [ (tn, _, _) ] -> Tn.debug_name tn
+    | _ -> String.concat ~sep:", " (List.map reads ~f:(fun (tn, _, _) -> Tn.debug_name tn))
+  in
+  let name =
+    match reads with
+    | [ (tn, _, _) ] -> Printf.sprintf "recompute_%d" tn.Tn.uid
+    | (tn, _, _) :: _ -> Printf.sprintf "recompute_%d_and_%d_more" tn.Tn.uid (List.length reads - 1)
+    | [] -> invalid_arg "Context.recompute_all_to_host: nothing to read"
+  in
   let child, routine = compile ~name ctx comp Idx.Empty in
   let child = ref child in
   let read () =
     child := run !child routine;
-    let copied =
-      Backends.query !child.wrapped
-        {
-          q =
-            (fun (type d r e) ((module Backend) : (d, r, e) Backends.backend_module) c ->
-              Backend.await c.BI.device;
-              if Backend.to_host c proxy nd then (
-                Backend.await c.BI.device;
-                true)
-              else false);
-        }
-    in
-    if not copied then
-      failwith
-        (Printf.sprintf "Context.to_host: internal error: the recompute of %s left no buffer for it"
-           (Tn.debug_name tn));
-    (* The fringe of a padded node holds its committed padding value, whatever the scratch buffer's
-       fringe held: the interior is moved into a freshly allocated buffer, which [host_buffer] fills
-       with that value. *)
-    match Lazy.force tn.Tn.padding with
-    | None -> nd
-    | Some (padding, _) ->
-        let fresh = host_buffer tn in
-        Nd.set_flat_values ~padding fresh (Nd.retrieve_flat_values ~padding nd);
-        fresh
+    List.map reads ~f:(fun (tn, proxy, nd) ->
+        let copied =
+          Backends.query !child.wrapped
+            {
+              q =
+                (fun (type d r e) ((module Backend) : (d, r, e) Backends.backend_module) c ->
+                  Backend.await c.BI.device;
+                  if Backend.to_host c proxy nd then (
+                    Backend.await c.BI.device;
+                    true)
+                  else false);
+            }
+        in
+        if not copied then
+          failwith
+            (Printf.sprintf
+               "Context.to_host: internal error: the recompute of %s left no buffer for it"
+               (Tn.debug_name tn));
+        (* The fringe of a padded node holds its committed padding value, whatever the scratch
+           buffer's fringe held: the interior is moved into a freshly allocated buffer, which
+           [host_buffer] fills with that value. *)
+        match Lazy.force tn.Tn.padding with
+        | None -> nd
+        | Some (padding, _) ->
+            let fresh = host_buffer tn in
+            Nd.set_flat_values ~padding fresh (Nd.retrieve_flat_values ~padding nd);
+            fresh)
   in
   match read () with
-  | nd ->
+  | nds ->
       release_recompute ~parent:ctx !child routine;
-      nd
+      nds
   | exception exn ->
       let backtrace = Stdlib.Printexc.get_raw_backtrace () in
       (try release_recompute ~parent:ctx !child routine
@@ -1798,8 +1820,11 @@ let recompute_to_host ctx (tn : Tn.t) (nd : Nd.t) : Nd.t =
            "Context.to_host: releasing the recompute context of %s also failed (retried at the \
             next recompute): %s\n\
             %!"
-           (Tn.debug_name tn) (Exn.to_string release_exn));
+           describe (Exn.to_string release_exn));
       Stdlib.Printexc.raise_with_backtrace exn backtrace
+
+let recompute_to_host ctx (tn : Tn.t) (nd : Nd.t) : Nd.t =
+  match recompute_all_to_host ctx [ (tn, nd) ] with [ nd ] -> nd | _ -> assert false
 
 (** Transfers [tn]'s value into a fresh host [Ndarray] and returns it: its device buffer, its
     host-init data, or its recomputation ({!observability}); refuses with the reason otherwise. *)
@@ -1854,6 +1879,31 @@ let to_host ctx (tn : Tn.t) : Nd.t =
   | Unobservable_local _ | Unobservable_aliased _ | Unobservable_merge _ | Launch_bound _
   | Slice_view _ ->
       refuse (Option.value_exn ~here:[%here] (explain_observability ctx tn obs))
+
+(** {!to_host} over several nodes, all [Recomputable] ones through one shared throwaway routine
+    (gh-ocannl-1737). Every node is classified before anything is read or compiled: the first one
+    {!to_host} would refuse, in list order, raises its refusal. *)
+let to_host_all ctx (tns : Tn.t list) : Nd.t list =
+  check_live ~fn:"to_host_all" ctx;
+  List.iter tns ~f:check_node_valid;
+  check_not_poisoned ctx;
+  let distinct = List.dedup_and_sort tns ~compare:Tn.compare in
+  let classified = List.map distinct ~f:(fun tn -> (tn, observability ctx tn)) in
+  (* A refused node raises exactly as its own read would, before any other node is read. *)
+  List.iter tns ~f:(fun tn ->
+      match List.Assoc.find_exn classified ~equal:Tn.equal tn with
+      | Stored | Host_init | Recomputable -> ()
+      | _ -> ignore (to_host ctx tn : Nd.t));
+  let recomputed =
+    match List.filter_map classified ~f:(function tn, Recomputable -> Some tn | _, _ -> None) with
+    | [] -> []
+    | recomputable ->
+        List.zip_exn recomputable
+          (recompute_all_to_host ctx (List.map recomputable ~f:(fun tn -> (tn, host_buffer tn))))
+  in
+  let read = Hashtbl.create (module Tn) in
+  List.iter recomputed ~f:(fun (tn, nd) -> Hashtbl.set read ~key:tn ~data:nd);
+  List.map tns ~f:(fun tn -> Hashtbl.find_or_add read tn ~default:(fun () -> to_host ctx tn))
 
 (** Uploads the host buffer [nd] into [tn]'s device buffer, allocating it if needed, and returns a
     context in which [tn] is marked initialized (so a subsequent {!run} reading [tn] succeeds). *)

@@ -616,5 +616,10 @@ val print_tree :
   depth:int ->
   t ->
   unit
+(** [print_tree] renders the tensor's graph down to [depth]. With [?ctx], the values of every node
+    of the graph it walks (nodes past [depth] included) are read together through
+    {!Context.to_host_all}, so the virtual ones are recomputed by one throwaway routine
+    (gh-ocannl-1737); an unreadable node is shown as a placeholder naming why
+    ({!Context.observability_tag}). [print] reads the value and gradient it shows the same way. *)
 
 val debug_name : t -> string

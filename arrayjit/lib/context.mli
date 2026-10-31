@@ -641,12 +641,13 @@ val to_host : t -> Ir.Tnode.t -> Ir.Ndarray.t
       stored computation; it is run, the copy transferred, and its context released (with its ledger
       records), so the context's buffers, frontier and placements are as they were. A release that
       fails before freeing raises from the read, and the next recompute retries it. Every such read
-      compiles: no routine is cached. The value is recompute-at-read (gh-617): the stored
-      computation evaluated over its leaves as they are now, which differs from the value the
-      producing routine computed if a leaf was written since. The array has the node's layout; a
-      padded node's fringe holds its committed padding value. The recompute's compile and run keep
-      their own checks: a leaf no routine of the lineage wrote is refused by {!run}, and such a
-      failure propagates, as does any failure after a [Recomputable] answer.
+      compiles: no routine is cached ({!to_host_all} shares one routine across nodes). The value is
+      recompute-at-read (gh-617): the stored computation evaluated over its leaves as they are now,
+      which differs from the value the producing routine computed if a leaf was written since. The
+      array has the node's layout; a padded node's fringe holds its committed padding value. The
+      recompute's compile and run keep their own checks: a leaf no routine of the lineage wrote is
+      refused by {!run}, and such a failure propagates, as does any failure after a [Recomputable]
+      answer.
     - any other answer: {!Ir.Utils.User_error} with {!explain_observability}'s reason (a node whose
       buffer the liveness planner aliased; a [Local] node, including its placement provenance and
       whether raising a heuristic cap could keep it virtual instead; a node not present in the
@@ -656,6 +657,16 @@ val to_host : t -> Ir.Tnode.t -> Ir.Ndarray.t
     side) and the accessors built on them; and, before forcing anything of the node, a node the
     frontend discarded (a [Tensor.rewind_to_last_closure] stale handle; gh-ocannl-1301,
     gh-ocannl-1505), as do the same entry points. *)
+
+val to_host_all : t -> Ir.Tnode.t list -> Ir.Ndarray.t list
+(** {!to_host} of each node, in order, with every [Recomputable] one recomputed by a single
+    throwaway routine -- one copy per node, each inlining that node's stored computation over the
+    leaves as they are now -- so reading [n] virtual nodes compiles once, not [n] times
+    (gh-ocannl-1737; [Tensor.print_tree] reads a tree this way). The values, the layouts and the
+    context left behind are those of the separate reads. Every node is classified before anything is
+    read or compiled, and the first one (in list order) that {!to_host} would refuse raises that
+    refusal. A failure of the shared recompute propagates, as in {!to_host}. A node listed twice is
+    read once: both positions hold the same array. *)
 
 val from_host : t -> Ir.Tnode.t -> Ir.Ndarray.t -> t
 (** Uploads the host buffer into the node's device buffer (allocating it if needed) and returns a
