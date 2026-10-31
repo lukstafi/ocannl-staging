@@ -455,11 +455,13 @@ files.
 - **A stored template carries only the operands that evaluate** (gh-ocannl-625,
   `Low_level.elide_unevaluated_operands`, applied by `check_and_store_virtual` after its legality
   walk, so acceptance is unchanged): the arm of a `Where` whose condition is decided, and the
-  operand behind an `And` / `Or` / `Relu_gate` decided shut, become `Constant 0.` at the operand's
-  own precision. Every reader of `optimize_ctx.computations` — the merge-taint
-  (`computation_reads_merge`) and spliced-read (`record_spliced_reads`) scans at a later routine's
-  entry, the fan-in guard, footprint eligibility, flip pricing — then sees only reads that execute,
-  so such a read neither taints nor registers provenance. The issue proposed storing the
+  operand behind an `And` / `Or` / `Relu_gate` decided shut, become `elided_operand` (low_level.ml:
+  `Constant 0.` annotated at the constant's own `single`, descriptive in every slot, gh-ocannl-1739;
+  `virtual_llc`'s decided-`Where` arm and `live_view` write the same form). Every reader of
+  `optimize_ctx.computations` — the merge-taint (`computation_reads_merge`) and spliced-read
+  (`record_spliced_reads`) scans at a later routine's entry, the fan-in guard, footprint
+  eligibility, flip pricing — then sees only reads that execute, so such a read neither taints nor
+  registers provenance. The issue proposed storing the
   `simplify_llc` residual instead, which would carry interval decisions taken under the
   producer's loop extents and bounds candidates, and those need not hold at the replay site; the
   consumer's own simplify runs where the template replays, threefry operands included

@@ -1079,10 +1079,21 @@ val validate_operand_precisions : ?site:string -> t -> unit
     node, the annotation, the evaluation and the operand's own precision, and the remedy (to compute
     at the annotated precision, store to a node or local of that precision). Heterogeneous slots (a
     [Where] condition, a guard, a [Get_dynamic] index, a [Set_from_vec] argument, the heterogeneous
-    operators' operands) keep their annotation and are not checked against anything. Applied by
-    {!optimize} on the way in, so it covers the assignments lowering, the rewrite tier and
-    hand-built IR routed through {!optimize}, never the optimizer's own output; a [?prelowered]
-    routine that skips {!optimize} is not checked. *)
+    operators' operands) keep their annotation and are not checked against anything. Applied at two
+    points: by {!optimize} on the way in (covering the assignments lowering, the rewrite tier and
+    hand-built IR routed through {!optimize}), and in [C_syntax.compile_proc] on the way out
+    (gh-ocannl-1739: covering the optimizer's own output, schedule transforms and a [?prelowered]
+    routine that skipped {!optimize}). *)
+
+val describe_operand_precisions : t -> t
+(** gh-ocannl-1739: rewrites each homogeneous-slot annotation {!validate_operand_precisions} would
+    refuse to the slot's evaluation precision, operands before the operators over them (an
+    operator's own precision is read off its first operand's annotation); every other annotation is
+    left as it is. The renderer never reads such an annotation, so this changes no emitted value.
+    Sound only over code whose builder's annotations already passed the check, so that nothing it
+    rewrites is a request: the optimizer applies it to its output (its input passed the entry gate),
+    and [Schedule.apply] to a schedule's result when the program the schedule started from passes
+    the check -- a [?prelowered] routine carrying a request is left for the exit gate to refuse. *)
 
 val validate_parallel :
   ?warp_size:int ->

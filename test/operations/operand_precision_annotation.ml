@@ -8,7 +8,15 @@
    remedy. An annotation may still describe: the evaluation precision itself, or the operand's own
    precision -- what [Low_level.mk_binop] and the assignments lowering write, so a mixed-precision
    store built that way is accepted. Heterogeneous slots (a [Where] condition) keep their
-   annotation, unchecked. *)
+   annotation, unchecked.
+
+   gh-ocannl-1739: [C_syntax.compile_proc] runs the same check on the way out. A [?prelowered]
+   routine skips [optimize], so the exit gate is the only one it meets. The optimizer's own output
+   passes it because the optimizer re-describes the annotations its rewrites leave stale (a
+   collapsed scope of another precision, an elided arm) -- its input passed the entry gate, so none
+   of them is a builder's request; [Low_level.describe_operand_precisions] does it. [Schedule.apply]
+   applies it to a schedule's result when the program the schedule started from passes the check, so
+   a [?prelowered] request still reaches the gate through a schedule. *)
 open Base
 open Ocannl.Operation.DSL_modules
 module LL = Ir.Low_level
@@ -38,6 +46,84 @@ let optimize name body =
   | exception Invalid_argument msg -> (Error msg, Ir.Tnode.label_name store)
 
 let double t p ~get = LL.Binop (Ops.Add, (get t, p), (get t, p))
+
+(* [Ok ()] when code generation compiles the routine as written, [Error msg] when it refuses it. *)
+let link_outcome name o =
+  match Ll_test.link ~name o with
+  | (_ : Context.t * Context.routine) -> (Ok (), "")
+  | exception Invalid_argument msg -> (Error msg, "")
+
+(* A bfloat store of a bfloat sum whose operands are annotated [annotate], reaching code generation
+   through the [?prelowered] seam: the optimizer sees only the descriptive twin. *)
+let prelowered ?(scheduled = false) ?(value = fun ~x p -> LL.Binop (Ops.Add, (x, p), (x, p))) name
+    ~annotate =
+  let s = Ll_test.sym () in
+  let i = [| Ll_test.iter s |] in
+  let in_bf = bnode (name ^ "_in_bf") and out_bf = bnode (name ^ "_out_bf") in
+  List.iter [ in_bf; out_bf ] ~f:Ll_test.materialize;
+  let llc p = Ll_test.loop_n s n (Ll_test.set out_bf i (value ~x:(Ll_test.get in_bf i) p)) in
+  let o = Ll_test.optimize_scoped ~name ~raw:(llc bf) (llc annotate) in
+  let o =
+    if scheduled then Ir.Schedule.apply [ Ir.Schedule.Retype { axis = s; ty = LL.Serial } ] o else o
+  in
+  (fst (link_outcome name o), Ir.Tnode.label_name out_bf)
+
+(* A virtual bfloat node computed from a single input and read in a single sum, annotated with its
+   own precision there (what the lowering writes). Inlining makes the read a bfloat scope, and
+   simplification collapses the scope into the sum: the operand is now a single product still
+   annotated bfloat16, which describes neither the slot nor the product. *)
+let optimized_collapse name =
+  let s1 = Ll_test.sym () and s2 = Ll_test.sym () in
+  let i1 = [| Ll_test.iter s1 |] and i2 = [| Ll_test.iter s2 |] in
+  let in_f = fnode (name ^ "_in_f") and mid_bf = bnode (name ^ "_mid_bf") in
+  let out_f = fnode (name ^ "_out_f") in
+  List.iter [ in_f; out_f ] ~f:Ll_test.materialize;
+  Ll_test.virtualize mid_bf;
+  let llc =
+    LL.unflat_lines
+      [
+        Ll_test.loop_n s1 n
+          (Ll_test.set mid_bf i1
+             (LL.Binop (Ops.Mul, (Ll_test.get in_f i1, f32), (LL.Constant 2., f32))));
+        Ll_test.loop_n s2 n
+          (Ll_test.set out_f i2
+             (LL.Binop (Ops.Add, (Ll_test.get in_f i2, f32), (Ll_test.get mid_bf i2, bf))));
+      ]
+  in
+  (Ll_test.optimize ~materialized:[ in_f; out_f ] ~name llc, mid_bf)
+
+(* A single store of [x + (x + x) * x] whose product's first operand is annotated bfloat16: stale,
+   since that operand is a single sum. The product, annotated bfloat16 in turn, describes it as
+   written -- a product's own precision is its first operand's annotation -- and stops describing it
+   once that annotation is repaired. *)
+let stale_nested () =
+  let s = Ll_test.sym () in
+  let i = [| Ll_test.iter s |] in
+  let in_f = fnode "opx_nest_in_f" and out_f = fnode "opx_nest_out_f" in
+  let x = (Ll_test.get in_f i, f32) in
+  let sum = LL.Binop (Ops.Add, x, x) in
+  let product = LL.Binop (Ops.Mul, (sum, bf), x) in
+  Ll_test.loop_n s n (Ll_test.set out_f i (LL.Binop (Ops.Add, x, (product, bf))))
+
+(* A [?prelowered] single sum whose second operand is a bfloat scope over a single product,
+   annotated bfloat16: the scope's own precision, so descriptive as written. A schedule's trailing
+   simplify collapses the scope into the sum, leaving the product annotated bfloat16. *)
+let scheduled_collapse name =
+  let s = Ll_test.sym () in
+  let i = [| Ll_test.iter s |] in
+  let in_f = fnode (name ^ "_in_f") and mid_bf = bnode (name ^ "_mid_bf") in
+  let out_f = fnode (name ^ "_out_f") in
+  List.iter [ in_f; out_f ] ~f:Ll_test.materialize;
+  let x = (Ll_test.get in_f i, f32) in
+  let product = LL.Binop (Ops.Mul, x, x) in
+  let id = LL.get_scope mid_bf in
+  let scope =
+    LL.Local_scope
+      { id; body = LL.Set_local (id, product); orig_indices = i; mint = LL.Inlined_computation }
+  in
+  let sum operand = Ll_test.loop_n s n (Ll_test.set out_f i (LL.Binop (Ops.Add, x, operand))) in
+  let o = Ll_test.optimize_scoped ~name ~raw:(sum (product, f32)) (sum (scope, bf)) in
+  Ir.Schedule.apply [ Ir.Schedule.Retype { axis = s; ty = LL.Serial } ] o
 
 let refused label ~needles result =
   let outcome, dest = result in
@@ -84,4 +170,41 @@ let () =
       accepted "a Where condition keeps any annotation (a heterogeneous slot)"
         (optimize "opa_cond" (fun ~get ~in_bf ~in_f:_ ~out_bf ~out_f:_ ->
              ( out_bf,
-               LL.Ternop (Ops.Where, (get in_bf, half), (get in_bf, bf), (LL.Constant 0., bf)) ))))
+               LL.Ternop (Ops.Where, (get in_bf, half), (get in_bf, bf), (LL.Constant 0., bf)) ))));
+  Verdict.case "the exit gate (gh-ocannl-1739)" (fun () ->
+      refused
+        "a ?prelowered routine carrying the old leg's form is refused at codegen's exit gate, \
+         naming the destination, both precisions and the remedy"
+        ~needles:
+          [ "C_syntax.compile_proc"; "Operand 1 of Add"; "annotated single"; "here bfloat16" ]
+        (prelowered "opx_req" ~annotate:f32);
+      accepted "the same ?prelowered routine annotated bfloat16 compiles"
+        (prelowered "opx_ok" ~annotate:bf);
+      (* A constant's annotation, which simplification keeps (it re-annotates a load at its storage
+         precision, so a load's request would not survive a schedule's trailing simplify whatever
+         the schedule did). *)
+      let plus_one ~x p = LL.Binop (Ops.Add, (x, bf), (LL.Constant 1., p)) in
+      refused
+        "a request still reaches the exit gate through a schedule, which re-describes only a \
+         program that starts descriptive"
+        ~needles:[ "C_syntax.compile_proc"; "Operand 2 of Add"; "annotated half" ]
+        (prelowered ~scheduled:true ~value:plus_one "opx_req_sch" ~annotate:half);
+      accepted "its descriptive twin compiles through the same schedule"
+        (prelowered ~scheduled:true ~value:plus_one "opx_ok_sch" ~annotate:bf);
+      let o, mid = optimized_collapse "opx_col" in
+      p "the bfloat node read in the single sum is inlined, so the case reaches the scope collapse"
+        (Ll_test.known_virtual o mid);
+      p "the optimizer's output re-describes the collapsed scope's stale bfloat16 annotation"
+        (Option.is_none (LL.operand_precision_violation o.LL.llc));
+      accepted "the optimized routine compiles through the exit gate" (link_outcome "opx_col" o);
+      let o = scheduled_collapse "opx_sch" in
+      p
+        "a descriptive ?prelowered routine stays descriptive through a schedule whose simplify \
+         collapses a bfloat scope"
+        (Option.is_none (LL.operand_precision_violation o.LL.llc));
+      accepted "the scheduled routine compiles through the exit gate" (link_outcome "opx_sch" o);
+      p
+        "describing repairs a nested operand before its parent, whose operand's own precision the \
+         repair changes"
+        (Option.is_none
+           (LL.operand_precision_violation (LL.describe_operand_precisions (stale_nested ())))))

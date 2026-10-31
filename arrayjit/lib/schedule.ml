@@ -5361,6 +5361,13 @@ let apply_typed ?(static_indices = []) (sched : schedule) (opt : Low_level.optim
   if List.is_empty sched then opt
   else
     let app = start_application opt.Low_level.llc in
+    (* gh-ocannl-1739: transforms and the finalization below rewrite operands without keeping their
+       precision annotations descriptive ([Privatize]'s widened tile evaluates at [acc_prec]; a
+       re-run simplify collapses a scope of another precision into its reader). When the program the
+       schedule starts from passes the check, none of its annotations is a request, so the result is
+       re-described wholesale; otherwise ([?prelowered] code carrying one) it is left for codegen's
+       exit gate to refuse. *)
+    let describe = Option.is_none (Low_level.operand_precision_violation opt.Low_level.llc) in
     let opt =
       List.fold sched ~init:opt ~f:(fun opt op ->
           Stdlib.Domain.DLS.get transform_fault op;
@@ -5379,6 +5386,7 @@ let apply_typed ?(static_indices = []) (sched : schedule) (opt : Low_level.optim
       then Low_level.hoist_cross_statement_cse @@ Low_level.eliminate_common_subexpressions llc
       else llc
     in
+    let llc = if describe then Low_level.describe_operand_precisions llc else llc in
     confirm_privatized_tiles ~wide_tiles:!(app.wide_tiles) llc;
     { opt with llc }
 

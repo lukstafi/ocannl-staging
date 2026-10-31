@@ -5,3 +5,13 @@ the fixed leg -- the same addition stored to a single node -- is accepted: true
 operands annotated with their own precision (apply_op's form) under a wider store are accepted: true
 single loads annotated single under a bfloat store (own precision, narrowed) are accepted: true
 a Where condition keeps any annotation (a heterogeneous slot): true
+a ?prelowered routine carrying the old leg's form is refused at codegen's exit gate, naming the destination, both precisions and the remedy: true
+the same ?prelowered routine annotated bfloat16 compiles: true
+a request still reaches the exit gate through a schedule, which re-describes only a program that starts descriptive: true
+its descriptive twin compiles through the same schedule: true
+the bfloat node read in the single sum is inlined, so the case reaches the scope collapse: true
+the optimizer's output re-describes the collapsed scope's stale bfloat16 annotation: true
+the optimized routine compiles through the exit gate: true
+a descriptive ?prelowered routine stays descriptive through a schedule whose simplify collapses a bfloat scope: true
+the scheduled routine compiles through the exit gate: true
+describing repairs a nested operand before its parent, whose operand's own precision the repair changes: true

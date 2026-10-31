@@ -8596,6 +8596,10 @@ module C_syntax (B : C_syntax_config) = struct
        went through [optimize]. Covers every access, not only the kernel parameters below, which
        noticed a [Zero_out] of a view only where the view became a parameter (gh-ocannl-1475). *)
     Low_level.validate_no_slice_aliases ~site:"C_syntax.compile_proc" llc;
+    (* gh-ocannl-1739: the exit gate of the operand-precision invariant ([optimize_proc] holds the
+       entry one, gh-ocannl-1709), for the optimizer's own output, what a schedule transform
+       constructs, and a [?prelowered] routine that never went through [optimize]. *)
+    Low_level.validate_operand_precisions ~site:"C_syntax.compile_proc" llc;
     (* gh-ocannl-1238: with this backend's shuffle width, so the validator sees the barriers the
        warp-shuffle and lane all-reduce renderings insert, not only the IR's own. *)
     Low_level.validate_parallel_classified ~warp_size:B.warp_size
