@@ -2747,8 +2747,9 @@ let folded_slots =
   ]
 
 (** The members with no boolean of the claim's own to read: a message, a skip, a row boundary, an
-    emptiness census, a distinctness check, and the float-parity forms, whose [~tol] answers a
-    distance rather than a verdict. *)
+    emptiness census, a distinctness check, the float-parity forms, whose [~tol] answers a distance
+    rather than a verdict, and the leg claims, whose value is the claim their [make] function makes
+    -- an ordinary claim this reader reads where it is written. *)
 let folded_unread_members =
   [
     "fail";
@@ -2759,6 +2760,8 @@ let folded_unread_members =
     "p_close";
     "pf_close";
     "pass_fail_close";
+    "in_leg";
+    "in_legf";
   ]
 
 let folded_gate_census content =

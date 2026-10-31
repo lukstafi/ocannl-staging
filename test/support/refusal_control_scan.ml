@@ -153,6 +153,8 @@ let refusing_claims =
     "gated_all";
     "gated_alli";
     "gated_exists";
+    "in_leg";
+    "in_legf";
   ]
 
 (** [skipped] reports a skip, never a refusal; [case]'s label names a row, and what fails inside it

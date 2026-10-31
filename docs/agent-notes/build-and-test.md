@@ -1850,6 +1850,23 @@ in the `tools/*.sh` scripts (gh-ocannl-1111) and in the string literals of the O
 
 ## Verdict claims
 
+- A claim sequence only some backends (hosts, configurations) can evaluate is written ONCE, as a
+  leg (gh-ocannl-1703): `let leg = Verdict.leg ~when_ ~on ()`, then each claim as
+  `in_leg ~leg label (fun label -> p label …)` (`in_legf` for a computed label) in code that runs
+  on every backend, its evidence in `lazy` values only the `make` functions force. Where the leg is
+  closed each claim is `skipped` under the same label, in the order the same code reaches it; a
+  gate only the open side can compute is a `Verdict.sub_leg outer ~when_:(lazy …) ~on`. The two-
+  branch form it replaced -- the evaluating branch's claims, and `List.iter claims ~f:skipped` over
+  a hand-written list -- kept the golden's off-gate order in a second copy nothing tied to the
+  first: `grid_launch_floor` appended two claims to its list while the CPU branch made them
+  mid-sequence, and Metal, CUDA and HIP went red (gh-ocannl-1668); about thirty tests carried the
+  same risk, through literal lists, binding lists or `List.nth_exn` indexing, and were migrated.
+  `in_leg` holds its `make` to exactly one `<label>: <bool>` claim under its own label (no
+  `pass_fail`, no silent `claim`, no second claim) and fails the run otherwise, since the closed
+  side prints `<label>: true`; `verdict_quantified` pins both sides and each refusal. A single
+  claim with one gate stays `gated` (or a one-label `if … else skipped label`); code outside the
+  `make` functions runs off the gate too, so it computes only what is computable there. Known
+  limit: the gate reader (gh-ocannl-1289) does not read a leg's `~when_`.
 - A negative control confirms the run REACHED its last row, not only that `FAIL:` lines appeared
   (gh-ocannl-1067): the claims it printed, passed plus failed, number the golden's lines, or the
   rows run under `Verdict.case`. A raise ends a run at the case that raised, and the rows after it

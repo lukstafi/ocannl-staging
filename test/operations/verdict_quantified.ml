@@ -56,6 +56,23 @@ let got = [| 1.0; 2.0; 3.0 |]
 let want = [| 1.0; 2.0; 3.0 |]
 let distinct = [ 2; 4; 6 ]
 
+(* gh-ocannl-1703: one claim sequence, written once, run on both sides of a leg. Its evidence is a
+   [lazy] that announces itself on stderr when forced, so a closed side that computed it would show;
+   its labels exist nowhere else, which is what a renamed claim cannot drift from. *)
+let leg_body leg =
+  let evidence =
+    lazy
+      (Stdio.eprintf "leg evidence computed\n%!";
+       seeds)
+  in
+  in_leg ~leg "every leg seed is even" (fun label -> p_all label (Lazy.force evidence) ~f:even);
+  in_legf ~leg "%d leg seeds were drawn" 3 (fun label ->
+      p label (List.length (Lazy.force evidence) = 3));
+  in_leg ~leg "a gate inside a leg claim skips in the claim's own row" (fun label ->
+      gated ~when_:false ~on:"an inner capability" label false)
+
+let fixture_leg when_ = Verdict.leg ~when_ ~on:"a fixture backend" ()
+
 (* Every claim below is checked BYTE for byte, including its newline, so stdout has to be the bytes
    `Verdict` wrote rather than the bytes a platform decided they should become. OCaml's stdout is in
    TEXT mode on Windows, which rewrites each "\n" to "\r\n" on the way out; the three shape checks
@@ -192,6 +209,29 @@ let () =
       gated_alli ~when_:true ~on:"a fixture backend" "the gated claim" [] ~f:(fun i n -> n > i)
   | "gated_exists_empty" ->
       gated_exists ~when_:true ~on:"a fixture backend" "the gated claim" [] ~f:(fun n -> n > 4)
+  | "leg_open" -> leg_body (fixture_leg true)
+  | "leg_closed" -> leg_body (fixture_leg false)
+  | "leg_sub_closed" ->
+      leg_body
+        (Verdict.sub_leg (fixture_leg true)
+           ~when_:(lazy (List.is_empty seeds))
+           ~on:"a fixture capability")
+  | "leg_sub_outer_closed" ->
+      leg_body
+        (Verdict.sub_leg (fixture_leg false)
+           ~when_:(lazy (failwith "inner gate evaluated"))
+           ~on:"a fixture capability")
+  (* A leg claim whose evaluation is anything but the one [<label>: <bool>] claim under its own
+     label: each would print, open, a row the closed side does not. *)
+  | "leg_misnamed" ->
+      in_leg ~leg:(fixture_leg true) "the leg claim" (fun _ -> p "a restated leg claim" true)
+  | "leg_pass_fail" ->
+      in_leg ~leg:(fixture_leg true) "the leg claim" (fun label -> pass_fail label true)
+  | "leg_silent" -> in_leg ~leg:(fixture_leg true) "the leg claim" (fun label -> claim label true)
+  | "leg_twice" ->
+      in_leg ~leg:(fixture_leg true) "the leg claim" (fun label ->
+          p label true;
+          p label true)
   | "shape_p_all_false" -> Verdict.p_all "the claim" seeds ~f:odd
   | "shape_p_all2_false" -> Verdict.p_all2 "the claim" got [| 1.0; 9.0; 3.0 |] ~f:Float.equal
   (* === Must be refused: run as children by [refusals]. === *)
@@ -353,6 +393,50 @@ let () =
             (Printf.sprintf "%s refuses an empty population where its gate is open" form)
             ~line:"the gated claim (empty): false"
             (run_child (form ^ "_empty")));
+      (* gh-ocannl-1703: a leg's two sides print one sequence, because there is one sequence. *)
+      let leg_rows =
+        "every leg seed is even: true\n\
+         3 leg seeds were drawn: true\n\
+         a gate inside a leg claim skips in the claim's own row: true\n"
+      in
+      let leg_runs =
+        List.map [ "leg_open"; "leg_closed"; "leg_sub_closed"; "leg_sub_outer_closed" ]
+          ~f:(fun mode -> (mode, run_child mode))
+      in
+      p_all "every side of a leg prints the one claim sequence, in its order, and exits 0" leg_runs
+        ~f:(fun (_, (status, stdout, _)) ->
+          Poly.equal status (Unix.WEXITED 0) && String.equal stdout leg_rows);
+      let leg_stderr mode =
+        match List.Assoc.find leg_runs mode ~equal:String.equal with
+        | Some (_, _, stderr) -> stderr
+        | None -> ""
+      in
+      let skips_on on stderr =
+        List.count (String.split_lines stderr) ~f:(String.is_prefix ~prefix:("SKIPPED on " ^ on))
+      in
+      let open_stderr = leg_stderr "leg_open" in
+      p "an open leg computes its evidence once, and skips only the nested gate"
+        (List.count (String.split_lines open_stderr) ~f:(String.equal "leg evidence computed") = 1
+        && skips_on "an inner capability" open_stderr = 1
+        && skips_on "a fixture backend" open_stderr = 0);
+      p_all "a closed leg skips every claim on its gate without computing the evidence"
+        [
+          ("leg_closed", "a fixture backend");
+          ("leg_sub_closed", "a fixture capability");
+          ("leg_sub_outer_closed", "a fixture backend");
+        ]
+        ~f:(fun (mode, on) ->
+          let stderr = leg_stderr mode in
+          skips_on on stderr = 3
+          && (not (String.is_substring stderr ~substring:"leg evidence computed"))
+          && not (String.is_substring stderr ~substring:"inner gate evaluated"));
+      List.iter [ "leg_misnamed"; "leg_pass_fail"; "leg_silent"; "leg_twice" ] ~f:(fun mode ->
+          refused
+            (Printf.sprintf "%s: a leg claim must make exactly its own one-row claim" mode)
+            ~line:
+              "FAIL: leg claim \"the leg claim\": its evaluation must make exactly one claim under \
+               its own label"
+            (run_child mode));
       (* The conversion is golden-neutral exactly to the extent that this holds. *)
       let _, plain_true, _ = run_child "shape_p" in
       let _, all_true, _ = run_child "shape_p_all" in

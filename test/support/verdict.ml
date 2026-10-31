@@ -45,6 +45,11 @@ let passed_labels () = List.rev !passed_label_history
 
 let record_pass label = passed_label_history := label :: !passed_label_history
 
+(* The labels of the [<label>: <bool>] rows printed so far, most recent first -- {!p}'s rows and
+   {!short_fail}'s. What a leg claim's evaluation must have printed, so that its skip, which prints
+   that row's passing form, cannot print anything else (see {!in_leg}). *)
+let boolean_rows = ref []
+
 (** The names of the checks that failed so far, in order: a claim's label, or the first line of a
     {!fail} message. [Refusal_control_manifest.print_section] reads them to say why a marker did not
     print -- its claim among them, or nothing behind it run (gh-ocannl-1499). *)
@@ -105,6 +110,7 @@ let p name b =
      free at test scale. It cannot reorder anything: flushing empties a buffer, it does not move
      writes past one another. *)
   Stdio.printf "%s: %b\n%!" (one_line name) b;
+  boolean_rows := name :: !boolean_rows;
   claim name b
 
 (** [pf fmt … b] is {!p} with a COMPUTED label: the format and its arguments render the label, and
@@ -162,6 +168,7 @@ let claimf fmt = Printf.ksprintf (fun label b -> claim label b) fmt
    [false] a satisfied-looking claim shares. *)
 let short_fail name detail =
   record_failure name;
+  boolean_rows := name :: !boolean_rows;
   let line = Printf.sprintf "%s (%s): false" (one_line name) (one_line detail) in
   Stdio.printf "%s\n%!" line;
   Stdio.eprintf "FAIL: %s\n" line
@@ -618,8 +625,8 @@ let gate ?aggregation ~when_ ~on label evaluate =
 
     [b] is an ordinary [bool], evaluated by the caller whatever the gate says, so it must be
     computable off-gate — which is also what lets [verdict_ratchet]'s quantifier reader treat this
-    exactly as {!p}. A leg that cannot even compute its boolean without the gate keeps its own
-    branch and reports through {!p} on one side and {!skipped} on the other: the same dialect. A
+    exactly as {!p}. A claim that cannot even compute its boolean without the gate goes through a
+    leg ({!in_leg}), which evaluates it on one side and skips it on the other in the same dialect. A
     quantified claim goes through {!gated_all} and its siblings. *)
 let gated ?aggregation ?detail ~when_ ~on label b =
   gate ?aggregation ~when_ ~on label (fun () ->
@@ -641,7 +648,7 @@ let gated ?aggregation ?detail ~when_ ~on label b =
     it ran (the seeds a GPU proposes, the files a host could create) can therefore pass the empty
     list it is left with off-gate, computed unconditionally; the non-emptiness floor applies exactly
     where the claim is evaluated. A leg whose population cannot be computed off-gate at all (a
-    device readback) keeps its own branch, as {!gated} says of its boolean. *)
+    device readback) goes through a leg, as {!gated} says of its boolean. *)
 let gated_all ?aggregation ?min ~when_ ~on label xs ~f =
   gate ?aggregation ~when_ ~on label (fun () -> p_all ?min label xs ~f)
 
@@ -701,6 +708,80 @@ let pass_fail_close ?min ?what_ran label got want ~tol =
   | Close_holds { differing; first; worst; magnitude; worst_tol } ->
       pass_fail label false;
       report_close_failure ?what_ran label got want ~differing ~first ~worst ~magnitude ~worst_tol
+
+(** {1 Legs: one claim sequence on both sides of a gate (gh-ocannl-1703)}
+
+    A test whose evidence exists only on some backends -- a GPU compile, a CPU pool, a host's [fork]
+    -- used to be written as two branches: the evaluating one, making its claims with their labels,
+    and the other skipping a hand-written list of the same labels. Since the golden is
+    backend-uniform, that list IS the golden's order off the gate, and it is a second copy of the
+    first branch's labels that nothing ties to the first: [grid_launch_floor] had two claims
+    appended to its list's end while the evaluating branch made them mid-sequence, which reddened
+    Metal, CUDA and HIP on the integration loop (gh-ocannl-1668), and dozens of tests carried the
+    same drift risk.
+
+    A leg removes the second copy. The claims are written ONCE, as [in_leg ~leg label make], in the
+    code that runs on every backend: where the leg is open, [make label] evaluates the claim; where
+    it is closed, the claim is {!skipped} under the same [label], in the order the same code reaches
+    it. A renamed, reordered or inserted claim moves both sides at once, because there is only one
+    side. Evidence the closed side cannot compute goes in a [lazy] that only the [make] functions
+    force, so nothing gated runs off the gate: [let small = lazy (run ~n:32 ...) in] then
+    [in_leg ~leg "..." (fun label -> p label (holds (Lazy.force small)))].
+
+    [make] receives the label so that it cannot restate it, and its evaluation is held to exactly
+    that: one claim recorded, under [label], printed as a [<label>: <bool>] row -- through {!p}, a
+    quantified or parity combinator, {!gated} or a nested {!skipped}. Anything else is a failed
+    check naming the leg claim, since the closed side prints [<label>: true] and a [make] that
+    claimed under another label, printed PASS/FAIL ({!pass_fail}), printed nothing ({!claim}) or
+    made two claims would break the golden exactly where the leg is closed -- the machine least
+    likely to be promoting it. *)
+
+type leg_state = Leg_open | Leg_closed of { on : string; aggregation : skip_aggregation option }
+type leg = leg_state Lazy.t
+
+(** [leg ~when_ ~on ()] is a leg open where [when_] holds and closed elsewhere, skipping as
+    [SKIPPED on <on>]; [~on] and [?aggregation] mean what they mean for {!gated}. [when_] is a gate:
+    the backend, an advertised capability, the configuration -- never the values under test. *)
+let leg ?aggregation ~when_ ~on () : leg =
+  Lazy.from_val (if when_ then Leg_open else Leg_closed { on; aggregation })
+
+(** [sub_leg outer ~when_ ~on] is open where [outer] is open and [when_] then holds: for a gate the
+    evaluating side alone can compute (a capability its device reports, a geometry its compile
+    chose). [when_] is forced only where [outer] is open; where [outer] is closed, its claims skip
+    as [outer]'s do, and where [when_] is false, as [SKIPPED on <on>]. *)
+let sub_leg ?aggregation (outer : leg) ~when_ ~on : leg =
+  lazy
+    (match Lazy.force outer with
+    | Leg_closed _ as closed -> closed
+    | Leg_open -> if Lazy.force when_ then Leg_open else Leg_closed { on; aggregation })
+
+(* The entries of [now] that are not in [before], a suffix of it: the records a [make] added. *)
+let fresh now ~before = List.take now (List.length now - List.length before)
+
+(** [in_leg ~leg label make] is [make label] where [leg] is open, held to making exactly the one
+    [<label>: <bool>] claim, and [skipped label] where it is closed (see above). *)
+let in_leg ~leg label make =
+  match Lazy.force leg with
+  | Leg_closed { on; aggregation } -> skipped ?aggregation ~backend:on label
+  | Leg_open ->
+      let passes = !passed_label_history and failures = !failed_names and rows = !boolean_rows in
+      make label;
+      let recorded =
+        fresh !passed_label_history ~before:passes @ fresh !failed_names ~before:failures
+      in
+      let printed = fresh !boolean_rows ~before:rows in
+      let only_label = function [ name ] -> String.equal name label | _ -> false in
+      if not (only_label recorded && only_label printed) then
+        let names names = String.concat ~sep:", " (List.rev_map names ~f:(Printf.sprintf "%S")) in
+        fail
+          (Printf.sprintf
+             "leg claim %S: its evaluation must make exactly one claim under its own label, \
+              printed as a `<label>: <bool>` row (claims recorded: [%s]; rows printed: [%s])"
+             (one_line label) (names recorded) (names printed))
+
+(** [in_legf ~leg fmt … make] is {!in_leg} with a COMPUTED label, as {!pf} is to {!p}:
+    [in_legf ~leg "%s: values match" tag (fun label -> p_all2 label got want ~f)]. *)
+let in_legf ~leg fmt = Printf.ksprintf (fun label make -> in_leg ~leg label make) fmt
 
 (** [case label f] runs one case of a test -- a group of claims that share a setup -- and turns an
     exception escaping it into a failed claim,
@@ -798,6 +879,8 @@ module Claims = struct
   let pass_fail = pass_fail
   let pass_fail_all2 = pass_fail_all2
   let pass_fail_close = pass_fail_close
+  let in_leg = in_leg
+  let in_legf = in_legf
   let case = case
 end
 

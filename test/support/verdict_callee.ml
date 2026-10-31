@@ -86,6 +86,8 @@ let members =
     "pass_fail";
     "pass_fail_all2";
     "pass_fail_close";
+    "in_leg";
+    "in_legf";
     "case";
   ]
 
