@@ -14,16 +14,56 @@ type 'v t = {
 
 type stats = { n_groups : int; n_entries : int; n_bytes : int; n_evicted_groups : int }
 
+let locked c f =
+  Stdlib.Mutex.lock c.lock;
+  Exn.protect ~f ~finally:(fun () -> Stdlib.Mutex.unlock c.lock)
+
+(* Every cache this process created, as a closure that empties it and answers how to put back what
+   it held, for {!with_cold_caches}. Newest first. *)
+let registry : (unit -> unit -> unit) list ref = ref []
+let registry_lock = Stdlib.Mutex.create ()
+
+let suspend c () =
+  locked c (fun () ->
+      let entries = Hashtbl.copy c.entries
+      and groups = Queue.copy c.groups
+      and retained_bytes = c.retained_bytes in
+      Hashtbl.clear c.entries;
+      Queue.clear c.groups;
+      c.retained_bytes <- 0;
+      fun () ->
+        locked c (fun () ->
+            Hashtbl.clear c.entries;
+            Hashtbl.iteri entries ~f:(fun ~key ~data -> Hashtbl.set c.entries ~key ~data);
+            Queue.clear c.groups;
+            Queue.blit_transfer ~src:groups ~dst:c.groups ();
+            c.retained_bytes <- retained_bytes))
+
 let create ~capacity_bytes =
-  {
-    capacity_bytes;
-    entries = Hashtbl.create (module String);
-    groups = Queue.create ();
-    retained_bytes = 0;
-    next_id = 0;
-    evicted_groups = 0;
-    lock = Stdlib.Mutex.create ();
-  }
+  let c =
+    {
+      capacity_bytes;
+      entries = Hashtbl.create (module String);
+      groups = Queue.create ();
+      retained_bytes = 0;
+      next_id = 0;
+      evicted_groups = 0;
+      lock = Stdlib.Mutex.create ();
+    }
+  in
+  Stdlib.Mutex.protect registry_lock (fun () -> registry := suspend c :: !registry);
+  c
+
+let with_cold_caches f =
+  let registered () = Stdlib.Mutex.protect registry_lock (fun () -> !registry) in
+  let before = registered () in
+  let restores = List.map before ~f:(fun suspend -> suspend ()) in
+  Exn.protect ~f ~finally:(fun () ->
+      (* A cache created inside the scope held nothing before it: emptying it restores it. *)
+      let now = registered () in
+      let created_inside = List.take now (List.length now - List.length before) in
+      List.iter created_inside ~f:(fun suspend -> ignore (suspend () : unit -> unit));
+      List.iter restores ~f:(fun restore -> restore ()))
 
 let key ~parts =
   let b = Buffer.create 1024 in
@@ -32,10 +72,6 @@ let key ~parts =
       Buffer.add_char b ':';
       Buffer.add_string b p);
   Stdlib.Digest.to_hex (Stdlib.Digest.string (Buffer.contents b))
-
-let locked c f =
-  Stdlib.Mutex.lock c.lock;
-  Exn.protect ~f ~finally:(fun () -> Stdlib.Mutex.unlock c.lock)
 
 let enabled c = c.capacity_bytes () > 0
 

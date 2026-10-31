@@ -2847,8 +2847,12 @@ files.
   compile counts in full, a cold one included. Reuse, not `kernels_compiled < kernels`: equal keys
   within ONE batch compile once, so a cold compile already compiles fewer kernels than it renders.
   Without the cache (or with it at 0 MiB) nothing reuses and the rule is the plain max. A test
-  that needs a cold baseline cannot clear the process-wide cache: it searches a chain no earlier
-  compile of the process rendered (`autotune_budget_overrun`'s `~rows`). The stop is strict (`elapsed + reserve >
+  whose claims depend on which compiles reuse a kernel scopes the process-wide cache instead of
+  searching a chain no earlier compile rendered: `Kernel_code_cache.with_cold_caches` empties every
+  backend's cache and puts it back on exit (gh-ocannl-1700; `autotune_budget_overrun`'s `~cold`, with
+  a warm control). Even cold, the base compile is not a timing reserve's evidence by the time a
+  second candidate is timed: the untuned default's compile, made ahead of that timing, reuses the
+  fissioned candidates' kernels and restarts the projection. The stop is strict (`elapsed + reserve >
   b`) and the projection admits an exact fit, so a virtual clock that charges a whole attempt as it
   starts (the scripted harness's attempt clock, under which every compile spans zero) cuts exactly
   where it did. `test/operations/autotune_budget_overrun.ml` charges the base compile, candidate

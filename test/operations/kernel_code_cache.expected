@@ -80,3 +80,11 @@ a refused program propagates its failure: true
 after every compile was joined: true
 re-raised on the calling domain, for the refused program's kernels: true
 the programs that compiled are published, the refused one is not: true
+cold scope: every cache starts empty: true
+cold scope: a nested scope starts empty too: true
+cold scope: leaving a nested scope puts back the enclosing scope's entries: true
+cold scope: on exit, each cache answers what it held on entry: true
+cold scope: what the scope published is discarded: true
+cold scope: a cache created inside ends empty: true
+cold scope: an exception propagates out of the scope: true
+cold scope: and the entries are put back all the same: true

@@ -399,3 +399,62 @@ let () =
     && Option.is_some (K.find c "e5")
     && Option.is_none (K.find c "e2")
     && Option.is_none (K.find c "e3"))
+
+(* gh-ocannl-1700: [with_cold_caches] empties every cache for its scope and puts back what each held
+   on entry, on return and on exception, discarding what the scope published; a cache created inside
+   ends empty; scopes nest. *)
+let () =
+  let c : string K.t = K.create ~capacity_bytes:(fun () -> 1000) in
+  let d : int K.t = K.create ~capacity_bytes:(fun () -> 1000) in
+  K.publish c ~entries:[ ("shared1", "outer program"); ("shared2", "outer program") ] ~bytes:10;
+  K.publish d ~entries:[ ("other", 7) ] ~bytes:20;
+  let inside = ref None in
+  let seen_inside =
+    K.with_cold_caches (fun () ->
+        let cold =
+          Option.is_none (K.find c "shared1")
+          && Option.is_none (K.find d "other")
+          && (K.stats c).n_entries = 0 && (K.stats d).n_bytes = 0
+        in
+        K.publish c
+          ~entries:[ ("shared1", "scoped program"); ("scoped", "scoped program") ]
+          ~bytes:5;
+        let fresh : string K.t = K.create ~capacity_bytes:(fun () -> 1000) in
+        K.publish fresh ~entries:[ ("fresh", "scoped program") ] ~bytes:1;
+        inside := Some fresh;
+        let nested_cold =
+          K.with_cold_caches (fun () ->
+              K.publish c ~entries:[ ("nested", "nested program") ] ~bytes:1;
+              Option.is_none (K.find c "scoped") && Option.is_none (K.find fresh "fresh"))
+        in
+        let after_nested =
+          Option.exists (K.find c "scoped") ~f:(String.equal "scoped program")
+          && Option.is_none (K.find c "nested")
+          && Option.is_some (K.find fresh "fresh")
+        in
+        (cold, nested_cold, after_nested))
+  in
+  let cold, nested_cold, after_nested = seen_inside in
+  p "cold scope: every cache starts empty" cold;
+  p "cold scope: a nested scope starts empty too" nested_cold;
+  p "cold scope: leaving a nested scope puts back the enclosing scope's entries" after_nested;
+  p "cold scope: on exit, each cache answers what it held on entry"
+    (Option.exists (K.find c "shared1") ~f:(String.equal "outer program")
+    && Option.exists (K.find c "shared2") ~f:(String.equal "outer program")
+    && Option.exists (K.find d "other") ~f:(Int.equal 7)
+    && (K.stats c).n_bytes = 10 && (K.stats c).n_groups = 1);
+  p "cold scope: what the scope published is discarded" (Option.is_none (K.find c "scoped"));
+  p "cold scope: a cache created inside ends empty"
+    (Option.exists !inside ~f:(fun fresh -> (K.stats fresh).n_entries = 0));
+  let raised =
+    match
+      K.with_cold_caches (fun () ->
+          K.publish c ~entries:[ ("raised", "failed program") ] ~bytes:1;
+          failwith "compile failed")
+    with
+    | () -> false
+    | exception Failure msg -> String.equal msg "compile failed"
+  in
+  p "cold scope: an exception propagates out of the scope" raised;
+  p "cold scope: and the entries are put back all the same"
+    (Option.is_some (K.find c "shared1") && Option.is_none (K.find c "raised"))

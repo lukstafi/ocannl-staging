@@ -43,6 +43,15 @@ type stats = { n_groups : int; n_entries : int; n_bytes : int; n_evicted_groups 
 
 val stats : 'v t -> stats
 
+val with_cold_caches : (unit -> 'a) -> 'a
+(** Exposed for tests (gh-ocannl-1700): runs [f] with every cache this process has created -- every
+    backend's -- emptied, so a compile inside reuses nothing an earlier compile published, then puts
+    back on return or exception what each one held on entry, discarding what [f] published (a cache
+    created inside ends empty). A value handed out inside stays valid, as after an eviction. Scopes
+    nest. Not for a compile running concurrently on another domain: that one may publish into a
+    cache while it is being restored. A test that needs a cold cache uses this rather than compiling
+    something no earlier compile of the process rendered. *)
+
 (** {2 Concurrent programs (gh-ocannl-1603)}
 
     A cold compile -- a search's first candidate, every kernel a miss -- compiles the whole batch as
