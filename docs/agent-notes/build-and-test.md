@@ -2866,6 +2866,21 @@ in the `tools/*.sh` scripts (gh-ocannl-1111) and in the string literals of the O
     moved modules' names, 27 referenced of 682. The contract: LINK-ONLY is a heuristic ranking,
     and `--referenced-only` a deliberate trade (faster, with a possible miss) for iterating
     mid-change, never for the pre-push run, which takes the full default list.
+  - `--why ALIAS` (repeatable; `--why all` for every listed alias) explains a rank on stderr, in
+    `affected: why @ALIAS:` lines, stdout untouched (gh-ocannl-1711): a verdict (REFERENCED,
+    BLIND, LINK-ONLY, NOT LISTED), then each reason with the changed path behind it -- a dune file
+    over its directory, an own rule reading the path, a needed alias, and per reached owner the
+    library chain to the stanza the path reached plus the token that made it referenced, traced
+    back through helper definitions to the owner's own source (`` `H` at t8/hlp.ml (definition
+    `names_core`) <- `names_core` at t8/t_hnamed.ml (its own source) ``), a re-export with the
+    module making it, or why its code is not all known. It reads the tiers' own facts (one
+    `owner_names` serves both the ranking and the explanation), so it cannot disagree with the
+    list. Reach for it before instrumenting the script: gh-ocannl-1651's causes took four
+    instrumented copies to find. On a three-definition `tnode.ml` edit (720 aliases, 37
+    referenced) it shows the shape of the residue: of the 21 owners referenced by code, 12 hold
+    code not all known (a generated test module, a `(select)`), 6 name a changed definition with
+    the module (4 as `Tn` beside a re-exporter such as `Context` or `Tensor`, 2 as `Tnode`), 4 of
+    them through a `test/support` helper definition.
   - A module of a library this build does not compile (`cuda_backend.ml` on a Mac) stays UNMAPPED,
     exit 3, but an OFF-BUILD line on stderr counts what a build compiling it reaches -- read from
     the dune files' `libraries` (a `(select)` condition included), since dune describes none of
