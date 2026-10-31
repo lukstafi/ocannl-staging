@@ -1,0 +1,240 @@
+(* gh-ocannl-1745: the session's backprop-root map does not own its graphs. A differentiable graph
+   whose forward code left the forward-root map (a forward-only evaluation) stays a backprop root --
+   a loss built over it later trains through it (gh-ocannl-1724's leg B) -- but only while the
+   caller can still name it: once dropped, the GC reclaims it, the closure checkpoint and explicit
+   checkpoints included. The forward-root map stays strong: a graph dropped unevaluated is pinned,
+   because [consume_forward_code]'s conflicting-roots check must not depend on GC timing.
+
+   Witnesses: each dropped graph is built in an [@inline never] function that returns a [Weak]
+   observer on the root record and only what the case keeps. A "reclaimed" claim retries the
+   collection ([Gc.full_major] twice and [Gc.compact]) up to three times; a "kept" claim requires
+   the record to survive three such rounds, so neither rests on a single collection. Leaves are
+   deterministic [term_init] constants, so no seed state is involved. *)
+open Base
+open Ocannl
+open Nn_blocks.DSL_modules
+open Verdict.Claims
+module IDX = Train.IDX
+module Asgns = Ir.Assignments
+
+let grad_of t = (Option.value_exn ~here:[%here] t.Tensor.diff).Tensor.grad
+let has msg substring = String.is_substring msg ~substring
+let exact name got want = p_close name got want ~tol:(fun _ -> 0.)
+
+let leaf name =
+  Tensor.term_init [| 1.; 2.; 3. |] ~label:[ name ] ~output_dims:[ 3 ] ~grad_spec:Require_grad ()
+
+let not_handed_out (t : Tensor.t) =
+  match t.consumption.bprop with Not_handed_out -> true | Taken -> false
+
+let witness (t : Tensor.t) =
+  let w = Stdlib.Weak.create 1 in
+  Stdlib.Weak.set w 0 (Some t);
+  w
+
+let settle () =
+  Stdlib.Gc.full_major ();
+  Stdlib.Gc.full_major ();
+  Stdlib.Gc.compact ()
+
+(* [Weak.check] reads the observer without taking a reference to the record. *)
+let reclaimed w =
+  let rec go rounds =
+    settle ();
+    (not (Stdlib.Weak.check w 0)) || (rounds > 1 && go (rounds - 1))
+  in
+  go 3
+
+let kept w =
+  let rec go rounds =
+    settle ();
+    Stdlib.Weak.check w 0 && (rounds <= 1 || go (rounds - 1))
+  in
+  go 3
+
+(* The text of the [User_error] [f] raises; a failed claim when it raises none. *)
+let refusal name f =
+  match f () with
+  | _ ->
+      fail (name ^ ": was accepted");
+      ""
+  | exception Utils.User_error msg ->
+      Stdio.eprintf "%s: %s (not part of the golden)\n%!" name msg;
+      msg
+
+let unpropagated msg tn =
+  let name = Ir.Tnode.label_name tn in
+  (has msg "no routine of its lineage carries" && has msg ("propagating from " ^ name))
+  || has msg ("no routine in this lineage propagates from " ^ name)
+
+(* [t = w *. w] over a fresh [Require_grad] leaf, its forward run once. *)
+let[@inline never] evaluated prefix =
+  let w = leaf (prefix ^ "_w") in
+  let%op t = w *. w in
+  Train.set_materialized (grad_of w);
+  let ctx = Train.forward_once (Context.auto ()) t in
+  (w, t, ctx)
+
+let[@inline never] forward_once_dropped () =
+  let _w, t, ctx = evaluated "dg_fo" in
+  p "forward_once: before the drop, t is a backprop root and no longer a forward root"
+    (Tensor.is_bprop_root t && not (Tensor.is_fwd_root t));
+  (ctx, witness t)
+
+let[@inline never] reusable_forward_dropped () =
+  let w = leaf "dg_rf_w" in
+  let%op t = w *. w in
+  let ctx, routine = Train.to_routine (Context.auto ()) IDX.empty (Train.forward t) in
+  let ctx = Context.run ctx routine in
+  p "Train.forward: before the drop, t is a backprop root and no longer a forward root"
+    (Tensor.is_bprop_root t && not (Tensor.is_fwd_root t));
+  ignore (Stdlib.Sys.opaque_identity ctx : Context.t);
+  witness t
+
+(* The checkpoint is taken after the closure, while [t] is a backprop root, and outlives [t]. *)
+let[@inline never] checkpointed_dropped () =
+  let _w, t, _ctx = evaluated "dg_ck" in
+  let ck = Tensor.checkpoint ~label:"dg_ck" () in
+  p "checkpoint: t is a backprop root when the checkpoint is taken" (Tensor.is_bprop_root t);
+  (ck, witness t)
+
+(* Only an ownership-preserving copy of [t] is returned: a record that shares [t]'s consumption cell
+   but is not [t]. The registered record is then reachable only through the root map's entry, so a
+   map anchored on the record rather than on the cell would lose the root here. *)
+let[@inline never] copy_kept () =
+  let w, t, ctx = evaluated "dg_cp" in
+  let copy = { t with Tensor.children = t.Tensor.children } in
+  p "copy: the copy is a distinct record" (not (phys_equal copy t));
+  (w, copy, ctx)
+
+(* A shared trunk [h] (as in lineage_fragments): [l1] embeds [h]'s backprop, so [l2] requires
+   [(h.grad, Bprop)]. [h] is computed and its gradient zeroed first; the losses are built after that
+   closure, and [l1] is evaluated forward-only (its compile is the next closure) and dropped. *)
+let[@inline never] trunk_owner_dropped () =
+  let w = TDSL.param ~values:[| 1.; 2.; 3. |] "dg_tr_w" ~output_dims:[ 3 ] () in
+  let%op h = w *. w in
+  let h_fwd = Train.forward h in
+  let h_zero =
+    let z = (Option.value_exn ~here:[%here] h.diff).zero_grads in
+    { z with asgns = Asgns.Block_comment ("dg_tr_h_zero", z.asgns) }
+  in
+  let ctx = Train.init_params (Context.auto ()) IDX.empty h in
+  let ctx, r = Train.to_routine ctx IDX.empty h_fwd in
+  let ctx = Context.run ctx r in
+  let ctx, r = Train.to_routine ctx IDX.empty h_zero in
+  let ctx = Context.run ctx r in
+  let%op l1 = h *. 2. in
+  let%op l2 = h *. 3. in
+  let ctx = Train.forward_once ~skip_init:true ctx l1 in
+  p "trunk: before the drop, l1 is a backprop root and no longer a forward root"
+    (Tensor.is_bprop_root l1 && not (Tensor.is_fwd_root l1));
+  (grad_of h, l2, ctx, witness l1)
+
+(* The consumer [u] embeds the child [c]'s forward and backprop; [u] is evaluated and dropped, [c]
+   is kept. *)
+let[@inline never] consumer_dropped () =
+  let w = leaf "dg_cn_w" in
+  let%op c = w *. w in
+  let%op u = c *. 2. in
+  let ctx = Train.forward_once (Context.auto ()) u in
+  ignore (Stdlib.Sys.opaque_identity ctx : Context.t);
+  (c, witness u)
+
+(* [t] is built, the parameters' initialization closes its shapes while it is still an unconsumed
+   forward root, and only then is its forward run and [t] dropped: the last closure's checkpoint
+   captured it as a forward root, and a rewind to that closure would restore it unless handed out,
+   so the checkpoint holds it -- until the next closure replaces the checkpoint. *)
+let[@inline never] closed_before_evaluation () =
+  let w = TDSL.param ~values:[| 1.; 2.; 3. |] "dg_cl_w" ~output_dims:[ 3 ] () in
+  let%op t = w *. 2. in
+  let ctx = Train.init_params (Context.auto ()) IDX.empty t in
+  let ctx = Train.forward_once ~skip_init:true ctx t in
+  ignore (Stdlib.Sys.opaque_identity ctx : Context.t);
+  witness t
+
+let[@inline never] next_closure () =
+  let x = leaf "dg_nc_x" in
+  let%op y = x *. 2. in
+  ignore (Train.forward_once (Context.auto ()) y : Context.t)
+
+let[@inline never] unevaluated_dropped () =
+  let w = leaf "dg_ue_w" in
+  let%op t = w *. w in
+  p "unevaluated: t is a forward and a backprop root"
+    (Tensor.is_fwd_root t && Tensor.is_bprop_root t);
+  witness t
+
+let () =
+  case "a graph dropped after forward_once is reclaimed" (fun () ->
+      let ctx, w = forward_once_dropped () in
+      p "forward_once: the dropped graph is reclaimed" (reclaimed w);
+      ignore (Stdlib.Sys.opaque_identity ctx : Context.t));
+  case "a graph dropped after a reusable forward routine is reclaimed" (fun () ->
+      let w = reusable_forward_dropped () in
+      p "Train.forward: the dropped graph is reclaimed" (reclaimed w));
+  case "an explicit checkpoint does not keep a dropped graph" (fun () ->
+      let ck, w = checkpointed_dropped () in
+      p "checkpoint: the dropped graph is reclaimed while the checkpoint is held" (reclaimed w);
+      ignore (Stdlib.Sys.opaque_identity ck : Tensor.checkpoint));
+  case "leg B under GC pressure" (fun () ->
+      let w, t, ctx = evaluated "dg_b" in
+      settle ();
+      p "leg B: the held t is still a backprop root after collections" (Tensor.is_bprop_root t);
+      let%op loss = t *. 3. in
+      let ctx = Train.update_once ctx loss in
+      exact "leg B: w.grad = 6 w" (Context.get_values ctx (grad_of w)) [| 6.; 12.; 18. |]);
+  case "an ownership-preserving copy keeps the root" (fun () ->
+      let w, copy, ctx = copy_kept () in
+      settle ();
+      p "copy: the copy is still a backprop root after collections" (Tensor.is_bprop_root copy);
+      let%op loss = copy *. 3. in
+      let ctx = Train.update_once ctx loss in
+      exact "copy: w.grad = 6 w through the copy"
+        (Context.get_values ctx (grad_of w))
+        [| 6.; 12.; 18. |]);
+  case "the lineage check survives its owner's reclamation" (fun () ->
+      let h_grad, l2, ctx, l1 = trunk_owner_dropped () in
+      p "trunk: the dropped owner l1 is reclaimed" (reclaimed l1);
+      let msg = refusal "trunk" (fun () -> Train.update_once ~skip_init:true ctx l2) in
+      p "trunk: l2 is refused at run naming h's backprop fragment"
+        (unpropagated msg h_grad && has msg "accumulates into gradients"));
+  case "a held root survives scoped restoration and rewind" (fun () ->
+      let _w, t, _ctx = evaluated "dg_rs" in
+      Tensor.with_unchanged_roots ~f:(fun () ->
+          ignore (Tensor.consume_backprop_code t : Asgns.comp);
+          settle ());
+      p "restore: with_unchanged_roots puts the held root back"
+        (Tensor.is_bprop_root t && not_handed_out t);
+      let ck = Tensor.checkpoint ~label:"dg_rs" () in
+      let%op u = t *. 2. in
+      ignore (Stdlib.Sys.opaque_identity u : Tensor.t);
+      p "rewind: the consumer embedded t's backprop" (not (Tensor.is_bprop_root t));
+      settle ();
+      Tensor.rewind ck;
+      p "rewind: the held root is a root again, its marker reset"
+        (Tensor.is_bprop_root t && not_handed_out t);
+      let ck = Tensor.checkpoint ~label:"dg_rs_out" () in
+      ignore (Tensor.consume_backprop_code t : Asgns.comp);
+      settle ();
+      Tensor.rewind ck;
+      p "rewind: an external handout stays excluded" (not (Tensor.is_bprop_root t)));
+  case "a reclaimed consumer gives no ownership back" (fun () ->
+      let c, u = consumer_dropped () in
+      p "consumer: the dropped consumer is reclaimed" (reclaimed u);
+      p "consumer: its embedded child is neither root"
+        ((not (Tensor.is_fwd_root c)) && not (Tensor.is_bprop_root c));
+      let refused =
+        match Tensor.consume_forward_code c with
+        | _ -> false
+        | exception Tensor.Session_error (msg, _) -> has msg "is not a forward root"
+      in
+      p "consumer: consuming the child's forward code is still refused" refused);
+  case "the last closure's checkpoint holds a forward root it captured until the next closure"
+    (fun () ->
+      let w = closed_before_evaluation () in
+      p "closure: held by the last closure's checkpoint" (kept w);
+      next_closure ();
+      p "closure: reclaimed once the next closure replaces the checkpoint" (reclaimed w));
+  case "a graph dropped unevaluated stays a forward root" (fun () ->
+      let w = unevaluated_dropped () in
+      p "unevaluated: the dropped graph is kept by the forward-root map" (kept w))

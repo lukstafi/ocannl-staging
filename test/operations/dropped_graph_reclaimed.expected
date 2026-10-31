@@ -1,0 +1,25 @@
+forward_once: before the drop, t is a backprop root and no longer a forward root: true
+forward_once: the dropped graph is reclaimed: true
+Train.forward: before the drop, t is a backprop root and no longer a forward root: true
+Train.forward: the dropped graph is reclaimed: true
+checkpoint: t is a backprop root when the checkpoint is taken: true
+checkpoint: the dropped graph is reclaimed while the checkpoint is held: true
+leg B: the held t is still a backprop root after collections: true
+leg B: w.grad = 6 w: true
+copy: the copy is a distinct record: true
+copy: the copy is still a backprop root after collections: true
+copy: w.grad = 6 w through the copy: true
+trunk: before the drop, l1 is a backprop root and no longer a forward root: true
+trunk: the dropped owner l1 is reclaimed: true
+trunk: l2 is refused at run naming h's backprop fragment: true
+restore: with_unchanged_roots puts the held root back: true
+rewind: the consumer embedded t's backprop: true
+rewind: the held root is a root again, its marker reset: true
+rewind: an external handout stays excluded: true
+consumer: the dropped consumer is reclaimed: true
+consumer: its embedded child is neither root: true
+consumer: consuming the child's forward code is still refused: true
+closure: held by the last closure's checkpoint: true
+closure: reclaimed once the next closure replaces the checkpoint: true
+unevaluated: t is a forward and a backprop root: true
+unevaluated: the dropped graph is kept by the forward-root map: true

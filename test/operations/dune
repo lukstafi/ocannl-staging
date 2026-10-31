@@ -10429,6 +10429,23 @@
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
+; gh-ocannl-1745: the backprop-root map does not own its graphs. A differentiable graph dropped
+; after a forward-only evaluation is reclaimed (closure and explicit checkpoints included), a held
+; one or an ownership-preserving copy stays a root, and the lineage's requirement check survives the
+; owner's reclamation. Weak-pointer witnesses over repeated collections; executed values.
+
+(test
+ (name dropped_graph_reclaimed)
+ (package neural_nets_lib)
+ (locks ocannl_training_test)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules dropped_graph_reclaimed)
+ (libraries base ocannl stdio arrayjit.verdict)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
 ; gh-ocannl-1744: two routines of a lineage accumulating into one shared gradient (an input, a
 ; parameter, a trunk) without a common zeroing are refused at compile, naming both; the supported
 ; spellings (one routine over the sum, a common reset compiled first) run with exact values.

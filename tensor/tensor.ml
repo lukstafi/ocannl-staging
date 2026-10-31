@@ -107,14 +107,67 @@ end
 
 let sexp_of_comparator_witness _ = Sexp.Atom "comparator_witness"
 
+(* gh-ocannl-1745: a backprop-root entry does not own its tensor. The entry is an ephemeron keyed by
+   the tensor's [consumption] cell -- the code-ownership identity every ownership-preserving record
+   copy shares -- with the registered tensor as its data, plus a weak pointer to the key so the
+   session can read the entry without holding it. The entry lives exactly while some such copy is
+   reachable from outside the root maps; once the caller drops the graph, the GC reclaims it and the
+   entry reads as absent. Entries are immutable once made: the persistent maps holding them are
+   shared with checkpoints. *)
+module Weak_root : sig
+  type entry
+  type map = entry Map.M(Int).t
+
+  val make : t -> entry
+  val get : entry -> t option
+
+  val mem : map -> int -> bool
+  (** Present and live. *)
+
+  val live : map -> t list
+
+  val prune : map -> map
+  (** Drops the dead entries; physically the same map when there are none. *)
+end = struct
+  type entry = { anchor : consumption Stdlib.Weak.t; root : (consumption, t) Stdlib.Ephemeron.K1.t }
+  type map = entry Map.M(Int).t
+
+  let make t =
+    let anchor = Stdlib.Weak.create 1 in
+    Stdlib.Weak.set anchor 0 (Some t.consumption);
+    { anchor; root = Stdlib.Ephemeron.K1.make t.consumption t }
+
+  let get { anchor; root } =
+    match Stdlib.Weak.get anchor 0 with
+    | None -> None
+    | Some key -> Stdlib.Ephemeron.K1.query root key
+
+  let find m id = Option.bind (Map.find m id) ~f:get
+  let mem m id = Option.is_some (find m id)
+  let live m = List.filter_map (Map.data m) ~f:get
+
+  let prune m =
+    if Map.for_all m ~f:(fun e -> Option.is_some (get e)) then m
+    else Map.filter m ~f:(fun e -> Option.is_some (get e))
+end
+
 (* The session's graph state. Its writes are held to the mutation-serial obligation field by field
-   (gh-ocannl-1573): the root maps count as session mutations, the id counter does not. *)
+   (gh-ocannl-1573): the root maps count as session mutations, the id counter does not.
+
+   Forward roots are held strongly; backprop roots weakly ({!Weak_root}, gh-ocannl-1745). A root
+   still in [forward_roots] keeps its own backprop entry alive (same record, same cell), so only a
+   graph whose forward code left the forward map -- handed out ([Train.forward],
+   [Train.forward_once]), embedded by a non-differentiable consumer, or [%cd]-taken -- can be
+   reclaimed once the caller drops it. The forward map stays strong because [consume_forward_code]'s
+   conflicting-roots check is the only guard against compiling a reader of a node whose forward code
+   an unconsumed root owns (a lineage carries no forward [requires]): a weak forward map would make
+   that refusal depend on GC timing, and its absence is silent. *)
 type session_state = {
   mutable next_id : int;
       [@mutation_serial.exempt
         "a fresh-id counter: ids are never reused, so a rewind need not restore it"]
   mutable forward_roots : t Map.M(Int).t;
-  mutable backprop_roots : t Map.M(Int).t;
+  mutable backprop_roots : Weak_root.map;
 }
 
 let session_state =
@@ -130,7 +183,7 @@ let remove_fwd_root t =
   Row.note_mutation ();
   session_state.forward_roots <- Map.remove session_state.forward_roots t.value.id
 
-let is_bprop_root t = Map.mem session_state.backprop_roots t.value.id
+let is_bprop_root t = Weak_root.mem session_state.backprop_roots t.value.id
 
 let remove_bprop_root t =
   Row.note_mutation ();
@@ -200,7 +253,7 @@ let note_external_handout ~fwd t =
    relationship). *)
 type globals = {
   g_forward_roots : t Map.M(Int).t;
-  g_backprop_roots : t Map.M(Int).t;
+  g_backprop_roots : Weak_root.map;
   g_random_seed : t option;
   g_random_seeds_created : t list;
   g_open_nodes : Tn.t list;
@@ -235,6 +288,10 @@ let last_closure = ref (take_checkpoint ~closure:true ~label:"")
   "the last closure's checkpoint: a closure records it, and no rewind restores an older one"]
 
 let record_checkpoint () =
+  (* The dead backprop-root entries of graphs the caller dropped (gh-ocannl-1745) are pruned at the
+     closure, before it is captured: a forward-only evaluation loop closes on every compile. Pruning
+     drops only entries no one can name, so it changes no root's status. *)
+  session_state.backprop_roots <- Weak_root.prune session_state.backprop_roots;
   open_nodes := [];
   handouts.fwd_out <- Set.empty (module Int);
   handouts.bprop_out <- Set.empty (module Int);
@@ -282,7 +339,7 @@ let with_unchanged_roots ~f =
     (* A root's code can only have been taken inside [f] if it was a root at entry, and a root is by
        construction not yet taken: restoring the maps restores the markers. *)
     Map.iter fwd_roots ~f:(fun t -> t.consumption.fwd <- Not_handed_out);
-    Map.iter bprop_roots ~f:(fun t -> t.consumption.bprop <- Not_handed_out)
+    List.iter (Weak_root.live bprop_roots) ~f:(fun t -> t.consumption.bprop <- Not_handed_out)
       [@@mutation_serial.boundary
         "a scoped restore: puts back the roots saved at entry, on return and on a raise alike"]
   in
@@ -857,7 +914,7 @@ let%track7_sexp op ~(label : string list) ?(ternary_op = Shape.Pointwise_tern)
     (* Apply delayed top-down precision updates to parameter gradient subtensors *)
     List.iter top_down_ts ~f:(fun ti ->
         Option.iter ti.diff ~f:(fun d -> update_infer_prec ti d.grad g.Tn.storage_prec));
-    let is_bck_root ti = Map.mem session_state.backprop_roots ti.value.id in
+    let is_bck_root = is_bprop_root in
     let zero_grads =
       let zero_g ti =
         Option.value_map ti.diff ~default:Asgns.empty_comp ~f:(fun diff -> diff.zero_grads)
@@ -979,7 +1036,8 @@ let%track7_sexp op ~(label : string list) ?(ternary_op = Shape.Pointwise_tern)
     let diff = Some { grad = g; zero_grads; backprop } in
     let t = { t with diff } in
     session_state.forward_roots <- Map.add_exn session_state.forward_roots ~key:id ~data:t;
-    session_state.backprop_roots <- Map.add_exn session_state.backprop_roots ~key:id ~data:t;
+    session_state.backprop_roots <-
+      Map.add_exn session_state.backprop_roots ~key:id ~data:(Weak_root.make t);
     t
 
 type param_op_fun =
@@ -1193,7 +1251,8 @@ let force_param_diff t =
   in
   let t = { t with diff = Some diff } in
   Row.note_mutation ();
-  session_state.backprop_roots <- Map.set session_state.backprop_roots ~key:t.value.id ~data:t;
+  session_state.backprop_roots <-
+    Map.set session_state.backprop_roots ~key:t.value.id ~data:(Weak_root.make t);
   t
 
 let strip_param_diff t =
@@ -1355,8 +1414,12 @@ let consume_backprop_code t =
     (* Check if any non-embedded grad descendants of t are embedded in other roots *)
     let all_read = fst @@ Asgns.collect_nodes_guess_output diff.backprop.asgns in
     let non_embedded_grad_descendants = Set.diff all_read diff.backprop.embedded_nodes in
+    (* Live roots only (gh-ocannl-1745): a root the caller dropped can never be consumed, so it is
+       not the fix a refusal would ask for; a dependence on its propagation is refused by the
+       lineage's uid-keyed [requires] check at [Context.run]. *)
     let other_roots =
-      Map.data session_state.backprop_roots |> List.filter ~f:(fun r -> r.value.id <> t.value.id)
+      Weak_root.live session_state.backprop_roots
+      |> List.filter ~f:(fun r -> r.value.id <> t.value.id)
     in
     let conflicting_roots =
       List.filter other_roots ~f:(fun root ->
@@ -1459,16 +1522,19 @@ let restore_checkpoint ?omit ~provenance ck =
        is ever taken, so these are all the markers the window could have set. External handouts are
        not taken back. *)
     let fwd = Map.filter_keys g_forward_roots ~f:(fun id -> not (Set.mem handouts.fwd_out id)) in
+    (* The surviving backprop roots (gh-ocannl-1745): a root the GC reclaimed since the checkpoint
+       had no holder, so no one can name it again. *)
     let bprop =
-      Map.filter g_backprop_roots ~f:(fun t ->
-          match t.diff with
-          | Some d -> not (Set.mem handouts.bprop_out d.grad.Tn.uid)
-          | None -> true)
+      Map.filter g_backprop_roots ~f:(fun e ->
+          match Weak_root.get e with
+          | None -> false
+          | Some { diff = Some d; _ } -> not (Set.mem handouts.bprop_out d.grad.Tn.uid)
+          | Some { diff = None; _ } -> true)
     in
     session_state.forward_roots <- fwd;
     session_state.backprop_roots <- bprop;
     Map.iter fwd ~f:(fun t -> t.consumption.fwd <- Not_handed_out);
-    Map.iter bprop ~f:(fun t -> t.consumption.bprop <- Not_handed_out));
+    List.iter (Weak_root.live bprop) ~f:(fun t -> t.consumption.bprop <- Not_handed_out));
   (* The seed singleton as it was at the checkpoint: one created since is dropped, one replaced
      since ([set_random_seed]) comes back. *)
   if not (skip "seed") then (
