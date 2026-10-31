@@ -86,7 +86,14 @@ let () =
     performance ~f:(fun (key, value) ->
       Option.equal String.equal (List.Assoc.find approximate key ~equal:String.equal) (Some value));
   Verdict.p "the approximate profile sets keys the performance profile does not"
-    (List.length approximate > List.length performance)
+    (List.length approximate > List.length performance);
+  (* gh-ocannl-1710: CUDA's fast math stays the default everywhere but [reproducible], which turns
+     it off; [performance] and [approximate] leave it to its default rather than restating it. *)
+  Verdict.p_all ~min:3 "only the reproducible profile states cuda_fast_math, and it states false"
+    Utils.profile_payloads ~f:(fun (name, _) ->
+      Option.equal String.equal
+        (List.Assoc.find (parsed name) "cuda_fast_math" ~equal:String.equal)
+        (Option.some_if (String.equal name "reproducible") "false"))
 
 (* gh-ocannl-604: a truncated bootstrap source list uses the same walk and provenance formatter.
    These cases distinguish explicit false from absence, and profile selection normalizes each source

@@ -1,0 +1,6 @@
+CUDA math policy (cuda_fast_math): precise
+C backends: every leg keeps bfloat16 subnormals, bitwise IEEE: true
+Metal: storage, copies and widening keep bfloat16 subnormals bitwise; narrowing and arithmetic flush them to the signed zero, exact on normals: true
+CUDA under --use_fast_math: storage, copies, widening, narrowing and bfloat arithmetic keep bfloat16 subnormals bitwise; f32 arithmetic flushes subnormal operands and results to the signed zero, exact on normals: true
+CUDA with cuda_fast_math off (--ftz=false): every leg keeps bfloat16 subnormals, bitwise IEEE: true
+HIP: every leg keeps bfloat16 subnormals, bitwise IEEE: true

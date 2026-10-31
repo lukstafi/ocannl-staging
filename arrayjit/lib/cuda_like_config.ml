@@ -1,5 +1,11 @@
 open Base
 
+(** CUDA's math policy (gh-ocannl-1710): whether nvrtc compiles with [--use_fast_math]
+    ([Compiler_options.nvrtc_math_options]) and f32 [Tanh_approx] renders the [__tanhf] intrinsic.
+    On by default; [profile=reproducible] turns it off. The one reader of the key, so the compile,
+    the rendering and the CUDA schedule-cache regime cannot disagree. *)
+let cuda_fast_math () = Utils.get_global_flag ~default:true ~arg_name:"cuda_fast_math"
+
 module Cuda = struct
   let name = "CUDA"
   let error_prefix = "Cuda_backend"
@@ -7,10 +13,14 @@ module Cuda = struct
   let fp8_typ = "__nv_fp8_e5m2"
   let bf16_arithmetic_intrinsics = true
   let bf16_relu = ("__hmax_nan(__ushort_as_bfloat16((unsigned short)0x0000U), ", ")")
-  let tanh_approx = "__tanhf"
 
-  (* [--use_fast_math] lowers these to [__sinf]/[__cosf], which keep NaN for +-inf and NaN; their
-     absolute-error contract and the large-argument loss are accepted (gh-ocannl-1336). *)
+  (* [tanh.approx.f32], a hardware approximation, under fast math only: with [cuda_fast_math] off
+     the f32 tanh is the library's, as it is on cc, HIP and Metal ([precise::tanh]). *)
+  let tanh_approx () = if cuda_fast_math () then "__tanhf" else "tanhf"
+
+  (* Under [--use_fast_math] nvrtc lowers these to [__sinf]/[__cosf], which keep NaN for +-inf and
+     NaN; their absolute-error contract and the large-argument loss are accepted (gh-ocannl-1336).
+     With [cuda_fast_math] off they are the precise library functions (gh-ocannl-1710). *)
   let sin_f32 = "sinf"
   let cos_f32 = "cosf"
   let sqrt_f32 = "sqrtf"
@@ -32,7 +42,7 @@ module Hip = struct
   let fp8_typ = "__hip_fp8_e5m2"
   let bf16_arithmetic_intrinsics = false
   let bf16_relu = ("__float2bfloat16(fmaxf(0.0f, __bfloat162float(", ")))")
-  let tanh_approx = "tanhf"
+  let tanh_approx () = "tanhf"
 
   (* [Builtins_hip]'s NaN-preserving wrappers: under [-ffast-math], ROCm's [sinf]/[cosf] return a
      finite value for +-inf (gh-ocannl-1336). *)
@@ -75,7 +85,7 @@ module Make (Dialect : sig
   val extra_blacklist : string list
   val bf16_arithmetic_intrinsics : bool
   val bf16_relu : string * string
-  val tanh_approx : string
+  val tanh_approx : unit -> string
 
   (* The f32 (and, widened, bfloat16) [sin]/[cos] functions. *)
   val sin_f32 : string
@@ -643,7 +653,7 @@ struct
           (Dialect.error_prefix
          ^ ".unop_syntax: Tanh_approx not supported for byte/integer precisions")
     | Tanh_approx, Half_prec _ -> func "htanh_approx"
-    | Tanh_approx, Single_prec _ -> func Dialect.tanh_approx
+    | Tanh_approx, Single_prec _ -> func (Dialect.tanh_approx ())
     | Tanh_approx, Bfloat16_prec _ -> bf16_func "tanhf"
     | Tanh_approx, _ -> func "tanh"
     (* [bf16 == 0.0] is ambiguous for the same reason as [1 / bf16] above. *)

@@ -26,14 +26,22 @@ val nvrtc_reassociation_opt_in : string
     never to emit it: the CUDA half of the reduction-order policy is a MEMBERSHIP claim, not an
     ordering one. *)
 
+val nvrtc_math_options : fast_math:bool -> string list
+(** nvrtc's math switches under the [cuda_fast_math] key (gh-ocannl-1710): [--use_fast_math] when
+    on; when off, no umbrella (so no fast-intrinsic substitution of the f32 library functions) and
+    [--ftz=false --prec-div=true --prec-sqrt=true --fmad=false], every switch explicit. Used by both
+    the compiler and the CUDA schedule-cache regime. *)
+
 val nvrtc :
   cuda_include_options:string list ->
   arch_options:string list ->
+  fast_math:bool ->
   with_device_debug:bool ->
   string list
-(** The nvrtc (CUDA) option vector. What this guarantees is the absence of
-    {!nvrtc_reassociation_opt_in}: [--use_fast_math] is a fixed expansion of four switches, none of
-    which concerns reassociation (measured for gh-ocannl-784; see the implementation). *)
+(** The nvrtc (CUDA) option vector: includes, arch, {!nvrtc_math_options}, debug. What this
+    guarantees under either policy is the absence of {!nvrtc_reassociation_opt_in}:
+    [--use_fast_math] is a fixed expansion of four switches plus a library-function substitution,
+    none of which concerns reassociation (measured for gh-ocannl-784; see the implementation). *)
 
 (** Which Metal math-policy API the host macOS offers: the modern split properties (macOS 15+), or
     the deprecated [fastMathEnabled] fallback (macOS 14). *)

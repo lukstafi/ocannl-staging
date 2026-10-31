@@ -40,8 +40,18 @@ let () =
     (String.equal (render (Cuda.binop_syntax Ops.bfloat16 Ops.Add a b)) "__hadd(a, b)");
   p "HIP bfloat16 addition keeps its native operator"
     (String.equal (render (Hip.binop_syntax Ops.bfloat16 Ops.Add a b)) "(a + b)");
-  p "CUDA approximate tanh keeps its intrinsic"
-    (String.equal (render (Cuda.unop_syntax Ops.single Ops.Tanh_approx a)) "__tanhf(a)");
+  (* gh-ocannl-1710: the intrinsic under CUDA's fast math only. The key is stated per value (an
+     ambient statement of it outranks the file level, so the expectation follows the reader). *)
+  p_all "CUDA approximate tanh is its intrinsic under fast math, and the library's without it"
+    [ "true"; "false" ] ~f:(fun value ->
+      let previous = Hashtbl.find Utils.config_file_args "cuda_fast_math" in
+      Hashtbl.set Utils.config_file_args ~key:"cuda_fast_math" ~data:value;
+      let got = render (Cuda.unop_syntax Ops.single Ops.Tanh_approx a) in
+      let want = if Ir.Cuda_like_config.cuda_fast_math () then "__tanhf(a)" else "tanhf(a)" in
+      (match previous with
+      | None -> Hashtbl.remove Utils.config_file_args "cuda_fast_math"
+      | Some data -> Hashtbl.set Utils.config_file_args ~key:"cuda_fast_math" ~data);
+      String.equal got want);
   p "HIP approximate tanh keeps its library function"
     (String.equal (render (Hip.unop_syntax Ops.single Ops.Tanh_approx a)) "tanhf(a)");
   (* gh-ocannl-1336: HIP's fast-math [sinf]/[cosf] map +-inf to a finite value, so f32 and bfloat16

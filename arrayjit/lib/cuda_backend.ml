@@ -283,6 +283,7 @@ end = struct
        GPU-free test (arrayjit/test/test_cuda_compile_options.ml) instead of only by whichever box
        happens to have a device. Its header carries the measured reassociation boundary. *)
     Compiler_options.nvrtc ~cuda_include_options:(cuda_include_options ()) ~arch_options:arch_opts
+      ~fast_math:(Cuda_like_config.cuda_fast_math ())
       ~with_device_debug:(Utils.with_runtime_debug ())
 
   let write_source_artifact ~name cu_src =
@@ -1858,7 +1859,15 @@ end = struct
          && not (Utils.debug_log_from_routines ())
        then "graph-capture"
        else "no-graph-capture")
-      ^ if Utils.with_runtime_debug () then "/device-debug" else "/no-device-debug"
+      ^ (if Utils.with_runtime_debug () then "/device-debug" else "/no-device-debug")
+      (* gh-ocannl-1710: the math policy, derived from the same switches the compile passes. Only
+         the precise regime adds a component, so every key crowned under fast math -- the default,
+         [performance], [approximate] -- stays valid, and a fast-math crown does not replay under
+         [profile=reproducible]. *)
+      ^
+      let fast_math = Cuda_like_config.cuda_fast_math () in
+      if fast_math then ""
+      else "/nvrtc-math:" ^ Compiler_options.render (Compiler_options.nvrtc_math_options ~fast_math)
     in
     fun () -> { (Lazy.force limits) with Backend_intf.codegen_tag = Some (codegen_tag ()) }
 

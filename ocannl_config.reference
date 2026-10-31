@@ -1396,6 +1396,19 @@
 # search candidate's usual few changed kernels -- stays one program.
 #cuda_compile_program_min_kernels=16
 
+# Whether the CUDA backend compiles with nvrtc's `--use_fast_math` (gh-ocannl-1710). On (the
+# default, and under the `performance` and `approximate` profiles): f32 subnormal operands and
+# results flush to zero (`--ftz=true`), division and square root are approximate, a*b+c may be
+# contracted, and the f32 library functions are replaced by their fast intrinsics (`sinf` by
+# `__sinf`, `expf` by `__expf`, and `logf`, `exp2f`, `log2f`, `powf` likewise), with the f32 tanh
+# rendered as the `__tanhf` intrinsic. Off (what the `reproducible` profile sets): no umbrella, and
+# exactly `--ftz=false --prec-div=true --prec-sqrt=true --fmad=false` -- nvrtc's IEEE values, with
+# contraction off as `cc_backend_fp_contract=off` is for cc -- and the f32 tanh is the library's
+# `tanhf`. That is not strict arithmetic in every respect: explicit intrinsics the codegen asks for
+# (`fmaf`, the half-precision `h*` functions) stay what they are. The precise regime is part of the
+# CUDA schedule cache's identity. An explicit setting outranks the profile, as for every key.
+#cuda_fast_math=true
+
 # Megabytes of compiled cc kernel libraries kept for reuse within a process (gh-ocannl-1525), the
 # cc counterpart of hip_kernel_cache_mib: a batch of kernels compiles only the kernels no earlier
 # compile in this process produced, as one library, and reuses the rest. A kernel is reused when its
@@ -2069,7 +2082,8 @@
 # --- BEGIN PROFILE PAYLOAD reproducible ---
 # # Deterministic, and identical across machines wherever reasonable. Cross-BACKEND
 # # reproducibility is explicitly out of scope: this profile does not try to make the cc
-# # and the cuda backends agree bit for bit.
+# # and the cuda backends agree bit for bit. Where a pin below brings two backends closer
+# # (CUDA keeping f32 subnormals, as cc and HIP do), that is a by-product, not the promise.
 #
 # # The largest cross-machine determinism leak: schedule identity pins numerics (loop order,
 # # split reductions, tensorization), so two machines crowning two schedules compute two
@@ -2105,6 +2119,13 @@
 # fp_reassociate=false
 # fp_finite_math=false
 # cc_backend_fast_math=false
+# # CUDA's counterpart of the two cc pins above (gh-ocannl-1710): no --use_fast_math, whose f32
+# # library functions become hardware approximations specified only by an error bound, and
+# # whose --fmad=true leaves a*b+c contraction to each target's JIT. nvrtc instead gets
+# # --ftz=false --prec-div=true --prec-sqrt=true --fmad=false, and the f32 tanh is the
+# # library's. Unlike the cc pins this is not CUDA's default, so under this profile CUDA
+# # computes different (more precise) math than under the default one.
+# cuda_fast_math=false
 # # Explicit SIMD rendering reassociates strict-FP reductions into per-lane accumulator chains,
 # # so the summation order would follow the probed vector width. 0 keeps the serial order.
 # cc_vector_bytes=0
@@ -2112,7 +2133,8 @@
 # # The numerics gates at their exact defaults, so that a profile switch never silently changes
 # # what math is being done (they are the orthogonal axis; see the issue). fp16_arithmetic=auto
 # # resolves deterministically per backend (gh-ocannl-680), so pinning the default keeps the
-# # principle: this profile changes no math, and same-machine runs stay reproducible.
+# # principle: apart from CUDA's fast math above, this profile changes no math, and same-machine
+# # runs stay reproducible.
 # # bf16_arithmetic=auto likewise (gh-ocannl-838).
 # tf32_matmuls=false
 # fp16_arithmetic=auto

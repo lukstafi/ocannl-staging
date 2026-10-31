@@ -128,6 +128,7 @@ let known_config_keys =
       "cuda_kernel_cache_mib";
       "cuda_compile_programs";
       "cuda_compile_program_min_kernels";
+      "cuda_fast_math";
       "cc_kernel_cache_mib";
       "cc_kernel_part_weight";
       "cc_compile_jobs";
@@ -382,6 +383,11 @@ let config_key_classification : (config_key_class * string * string list) list =
         "output_debug_files_in_build_directory";
         "prefer_backend_uniformity";
       ] );
+    ( Keyed "codegen",
+      "a CUDA compile knob (gh-ocannl-1710): it picks nvrtc's math switches and the f32 tanh \
+       spelling when a kernel is rendered and compiled, after the lowered code the digest names; \
+       the CUDA tag carries the precise regime as a component derived from those switches",
+      [ "cuda_fast_math" ] );
     ( Keyed "codegen",
       "it changes the emitted code or the mechanics a search measures in, without being a property \
        of the lowered code: an aliasing candidate's kernel parameter drops its [restrict] \
@@ -1476,7 +1482,8 @@ let profile_ineligible_keys =
 let reproducible_profile_payload =
   {|# Deterministic, and identical across machines wherever reasonable. Cross-BACKEND
 # reproducibility is explicitly out of scope: this profile does not try to make the cc
-# and the cuda backends agree bit for bit.
+# and the cuda backends agree bit for bit. Where a pin below brings two backends closer
+# (CUDA keeping f32 subnormals, as cc and HIP do), that is a by-product, not the promise.
 
 # The largest cross-machine determinism leak: schedule identity pins numerics (loop order,
 # split reductions, tensorization), so two machines crowning two schedules compute two
@@ -1512,6 +1519,13 @@ fp_contract=false
 fp_reassociate=false
 fp_finite_math=false
 cc_backend_fast_math=false
+# CUDA's counterpart of the two cc pins above (gh-ocannl-1710): no --use_fast_math, whose f32
+# library functions become hardware approximations specified only by an error bound, and
+# whose --fmad=true leaves a*b+c contraction to each target's JIT. nvrtc instead gets
+# --ftz=false --prec-div=true --prec-sqrt=true --fmad=false, and the f32 tanh is the
+# library's. Unlike the cc pins this is not CUDA's default, so under this profile CUDA
+# computes different (more precise) math than under the default one.
+cuda_fast_math=false
 # Explicit SIMD rendering reassociates strict-FP reductions into per-lane accumulator chains,
 # so the summation order would follow the probed vector width. 0 keeps the serial order.
 cc_vector_bytes=0
@@ -1519,7 +1533,8 @@ cc_vector_bytes=0
 # The numerics gates at their exact defaults, so that a profile switch never silently changes
 # what math is being done (they are the orthogonal axis; see the issue). fp16_arithmetic=auto
 # resolves deterministically per backend (gh-ocannl-680), so pinning the default keeps the
-# principle: this profile changes no math, and same-machine runs stay reproducible.
+# principle: apart from CUDA's fast math above, this profile changes no math, and same-machine
+# runs stay reproducible.
 # bf16_arithmetic=auto likewise (gh-ocannl-838).
 tf32_matmuls=false
 fp16_arithmetic=auto

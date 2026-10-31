@@ -60,9 +60,11 @@ let nvrtc_reassociation_opt_in = "--fassociative-math"
 (* nvrtc (CUDA). The left-to-right override discipline [clang_fast_math_options] documents does NOT
    apply here, because nvrtc has no umbrella-plus-overrides shape to defend against:
    [--use_fast_math] is a fixed expansion of four independent switches ([--ftz=true --prec-div=false
-   --prec-sqrt=false --fmad=true]) and none of them concerns reassociation. The order is still
-   pinned -- it is the state a compile is reproducible against -- but what this function actually
-   guarantees is the absence of [nvrtc_reassociation_opt_in].
+   --prec-sqrt=false --fmad=true]) plus a substitution of the f32 library functions by their fast
+   intrinsics ([sinf] by [__sinf], [expf] by [__expf], [logf], [exp2f], [log2f], [powf], ...), and
+   none of it concerns reassociation. The order is still pinned -- it is the state a compile is
+   reproducible against -- but what this function actually guarantees is the absence of
+   [nvrtc_reassociation_opt_in].
 
    Measured on the project's CUDA box for gh-ocannl-784 (nvrtc 13.3, driver 13030, GeForce RTX 5070
    Ti, sm_120) by compiling a 128-term float reduction through nvrtc and EXECUTING it: under
@@ -81,8 +83,21 @@ let nvrtc_reassociation_opt_in = "--fassociative-math"
    never contain. A [reduction_forms] red on CUDA after a toolkit upgrade should re-run that probe
    before anything else: it is tools/nvrtc_reassoc_probe.c, which links nvrtc and the CUDA driver
    directly and carries its own build line. *)
-let nvrtc ~cuda_include_options ~arch_options ~with_device_debug =
-  cuda_include_options @ arch_options @ [ "--use_fast_math" ]
+(* gh-ocannl-1710: the math switches, by the [cuda_fast_math] key. On (the default, [performance]
+   and [approximate]), the umbrella. Off (what [profile=reproducible] sets), no umbrella, so no
+   library-function substitution, and all four of its switches spelled out at nvrtc's IEEE values --
+   with contraction off as well, the CUDA counterpart of the [reproducible] payload's
+   [cc_backend_fp_contract=off]: with [--fmad=true] nvrtc emits PTX [mul]/[add] without a rounding
+   modifier, which the PTX ISA lets the target's JIT fuse into an [fma], so contraction would be a
+   per-architecture decision. Every switch is explicit, so a toolkit's default cannot move one. The
+   off state is "nvrtc's IEEE defaults, contraction off", not strict arithmetic in every respect:
+   explicit intrinsics the codegen asks for ([fmaf], the half [h*] functions) stay what they are. *)
+let nvrtc_math_options ~fast_math =
+  if fast_math then [ "--use_fast_math" ]
+  else [ "--ftz=false"; "--prec-div=true"; "--prec-sqrt=true"; "--fmad=false" ]
+
+let nvrtc ~cuda_include_options ~arch_options ~fast_math ~with_device_debug =
+  cuda_include_options @ arch_options @ nvrtc_math_options ~fast_math
   @ if with_device_debug then [ "--device-debug" ] else []
 
 (* Metal's MTLCompileOptions is a mutable Objective-C object rather than a string vector. Keep its
