@@ -1,0 +1,7 @@
+the look-alike shares the subject's namespace, label, precision and shape, not its identity: true
+every case names the node: its builds over the subject and the look-alike differ: true
+substituting the look-alike for the subject gives the build over the look-alike: true
+substituting a node the case does not hold changes nothing: true
+over all the cases in one program, the substitution gives the program over the look-alike: true
+the substituted program's accesses and scopes include the look-alike: true
+the substituted program's accesses and scopes never name the subject: true

@@ -503,6 +503,18 @@
    "micrograd_demo_logging-%{read:../config/ocannl_backend.txt}-0-0.log.expected"
    "backend-0-0.log.actual")))
 
+; Ll_test.substitute (post-wave task post-1-task-13): one node replaced by another in every
+; position the IR has for one, the helper behind the end-to-end forged-node controls of
+; schedule_epilogue_fusion and online_softmax_block_mma. Structural only.
+
+(test
+ ; ocannl-backend: none -- compares hand-built IR structurally and never creates a context.
+ (name ll_test_substitute)
+ (package neural_nets_lib)
+ (deps ocannl_config)
+ (modules ll_test_substitute)
+ (libraries base arrayjit.ir arrayjit.verdict ll_test))
+
 (test
  ; ocannl-backend: none -- renders IR documents through the pretty-printer and never creates a
  ; context, so no configured backend can change what it prints.

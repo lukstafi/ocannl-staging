@@ -2300,6 +2300,17 @@ in the `tools/*.sh` scripts (gh-ocannl-1111) and in the string literals of the O
   `bin/schedule_bench.ml` and `bin/narrow_gebp_bench.ml` still do (benchmark binaries link no
   test library). It stops at anything other than `For_loop`/`If`, so a new constructor ends a chain
   rather than needing a case here.
+- A recognizer that must know a node by IDENTITY gets its negative control end to end, through
+  `Ll_test.substitute ~from ~to_` (every position a node has: accesses, `Tile_mma` operands, scope
+  ids) and `Ll_test.look_alike ~id tn` (a fresh node with `tn`'s namespace, label, precision and
+  shape). `substitute_optimized` plants the look-alike in a lowered or scheduled program, carrying
+  its traced-store entry and placement over and leaving the identity sets naming the real node, so
+  the forged program differs by identity alone; the transform that consults the recognizer must then
+  decline. Probing the classifier on the look-alike tests only the predicate. Pair it with the
+  positive arm (the look-alike enrolled, or the substitution reversed back to the captured
+  program): `schedule_epilogue_fusion` and `online_softmax_block_mma` are the two shapes, and both
+  went red under their pre-fix label rules. `substitute` is the second exhaustive map over the IR
+  beside the walk, with no wildcard, so a new constructor fails to compile there too.
 - The dynamic-indexing pair has builders of its own: `Ll_test.gather` (`Get_dynamic`),
   `Ll_test.scatter` (`Set_dynamic`) and `Ll_test.scatter_add`, the read-modify-write shape
   `rewrite_one_hot_reductions` actually mints. Reach for them rather than spelling the record:
