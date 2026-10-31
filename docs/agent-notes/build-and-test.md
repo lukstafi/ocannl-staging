@@ -5021,13 +5021,22 @@ box.
   not: it keeps an initializer's operator label (`*._w1`). A debug name read before any code name
   is minted IS `label_name` (gh-ocannl-1686: `Tnode.get_debug_name` and the heuristic minting share
   one label-to-name function), so only minting moves it. `debug_name_scan` (gh-ocannl-1606,
-  in `@test/operations/scans`) holds every `.ml` under `test/` and `arrayjit/test/` to this: a debug
-  name may be printed or raised, be a `Verdict` claim's label, or be the `~substring` needle of a
-  check that some rendered text names the node, directly or through `^`, `sprintf`, `String.concat`
-  or a `List.map ~f:` of it. Anything else is refused -- an equality, a find, an association key, a
+  in `@test/operations/scans`) holds every `.ml` under `test/`, `arrayjit/test/`, `lib/` and
+  `tensor/` to this: a debug name may be printed or raised (a `Session_error` message included), be
+  a `Verdict` claim's label, or be the `~substring` needle of a check that some rendered text names
+  the node, directly or through `^`, `sprintf`, `String.concat`, a `[%string]` interpolation or a
+  `List.map ~f:` of it. Anything else is refused -- an equality, a find, an association key, a
   bound or returned name -- with the closed list in its reader's header. A comparison with text a
   renderer of the same process produced under the display name (a census row) marks the
   application `[@rendered_name "<reason>"]`.
+- In the library the same scan keeps a debug name out of every name that outlives the moment it is
+  composed: a tensor label (`Parallel.shard_along`'s shards), a block comment of generated code,
+  which also seeds routine names (`Train.forward`, `init_params`, the `%cd` `~~(...)` comment), an
+  ndarray's `~debug` description, a shape-constraint origin or a taint provenance all take
+  `Tnode.label_name`. A message composed when it is shown keeps `debug_name`, which then names the
+  node as the code emitted so far does; one the scan cannot follow to its sink (a refusal a
+  function returns, a local `logf`) is marked `[@message_only "<reason>"]`, on the application or
+  on its `[%string]` (post-wave task post-1-task-6).
 
 - Insert a new stanza in `test/operations/dune` beside its topical neighbours, never at the end of
   the file. The file is grouped by subsystem rather than alphabetized, and the end is where every

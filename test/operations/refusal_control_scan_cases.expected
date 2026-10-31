@@ -533,11 +533,14 @@ open_node_scan.ml: [scanner-refusal:aad2a5fc0b2e347174ab90714113a6f6] tensor.ml 
 debug_name_scan.ml has exactly the explicitly assigned refusal controls: true
 debug_name_scan.ml: [scanner-refusal:fe40918919ee07d96a2c92a926ae0b28] does not parse (direct failure) is catalogued beside debug_name_scan.expected, debug_name_scan_control.expected, debug_name_scan_refusal_control.expected: true
 debug_name_scan.ml: [scanner-refusal:035b75b8ce8b0d0f0b1b390267c227e7] debug-name reader raised (direct failure) is catalogued beside debug_name_scan.expected, debug_name_scan_control.expected, debug_name_scan_refusal_control.expected: true
-debug_name_scan.ml: [scanner-refusal:caf654cecf3e614544e6740b12c0ca6a] tree matches nothing (direct failure) is catalogued beside debug_name_scan.expected, debug_name_scan_control.expected, debug_name_scan_refusal_control.expected: true
+debug_name_scan.ml: [scanner-refusal:9168a34c28bab17307d7535ed07d097f] tree matches nothing (direct failure) is catalogued beside debug_name_scan.expected, debug_name_scan_control.expected, debug_name_scan_refusal_control.expected: true
 debug_name_scan.ml: [scanner-refusal:cdb9f02e250554d24674371724942ae4] test_tnode_namespaces' (claim) is catalogued beside debug_name_scan.expected, debug_name_scan_control.expected, debug_name_scan_refusal_control.expected: true
 debug_name_scan.ml: [scanner-refusal:693fe71b6aeb6d44bd88787308cf5017] cc_kernel_outline's (claim) is catalogued beside debug_name_scan.expected, debug_name_scan_control.expected, debug_name_scan_refusal_control.expected: true
 debug_name_scan.ml: [scanner-refusal:94cdb1a16d792be58f07d154224626df] scope_over_materialized's (claim) is catalogued beside debug_name_scan.expected, debug_name_scan_control.expected, debug_name_scan_refusal_control.expected: true
 debug_name_scan.ml: [scanner-refusal:f4f4d81c0884b6209eccd072274b494d] rewind_to_last_closure's (claim) is catalogued beside debug_name_scan.expected, debug_name_scan_control.expected, debug_name_scan_refusal_control.expected: true
+debug_name_scan.ml: [scanner-refusal:faf8bd39d9f3358220e041edafe252a2] Session_error (claim) is catalogued beside debug_name_scan.expected, debug_name_scan_control.expected, debug_name_scan_refusal_control.expected: true
+debug_name_scan.ml: [scanner-refusal:c622584e09b7ad9b23646841eb389ca9] @message_only (claim) is catalogued beside debug_name_scan.expected, debug_name_scan_control.expected, debug_name_scan_refusal_control.expected: true
+debug_name_scan.ml: [scanner-refusal:3c688ea5897f696f0882bff06b550c6e] debug_name (claim) is catalogued beside debug_name_scan.expected, debug_name_scan_control.expected, debug_name_scan_refusal_control.expected: true
 render_decline_inventory.ml has exactly the explicitly assigned refusal controls: true
 render_decline_inventory.ml: [scanner-refusal:d5f512590dad4114be7fccd7fcad252d] control (claim) is catalogued beside render_decline_inventory.expected: true
 render_decline_inventory.ml: [scanner-refusal:93267baf53efdf52a09d9a689b122ee2] render-time typed declines (claim) is catalogued beside render_decline_inventory.expected: true

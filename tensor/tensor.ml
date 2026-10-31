@@ -403,7 +403,7 @@ let%debug7_sexp rec init_params ?skip (t : t) : Asgns.comp =
   in
   let asgns =
     Asgns.Block_comment
-      ( "init params for " ^ Tn.debug_name t.value,
+      ( "init params for " ^ Tn.label_name t.value,
         List.fold_right params ~init:Asgns.Noop ~f:(fun param acc ->
             if Set.is_empty param.params then Asgns.Seq (param.forward.asgns, acc)
             else
@@ -447,7 +447,9 @@ exception Session_error of string * t option [@@deriving sexp]
 let session_error_printer = function
   | Session_error (msg, None) -> Some msg
   | Session_error (msg, Some m) ->
-      Some [%string "For #%{m.value.id#Int} %{Tn.debug_name m.value}: %{msg}"]
+      Some
+        ([%string "For #%{m.value.id#Int} %{Tn.debug_name m.value}: %{msg}"]
+        [@message_only "the exception printer's message"])
   | _ -> None
 
 let () = Stdlib.Printexc.register_printer session_error_printer
@@ -456,6 +458,7 @@ let discarded_message (tn : Tn.t) provenance =
   [%string
     "tensor node %{Tn.debug_name tn} was discarded by the rewind after %{provenance}; re-run its \
      definition"]
+  [@message_only "the refusal its callers raise at once"]
 
 (** Raises [Session_error] when [t] (its value or gradient node) was discarded by a rewind. Shared
     with the explicit checkpoints of gh-ocannl-903. *)
@@ -548,7 +551,7 @@ let raw_accum ~initialize_neutral ~accum ~(t : t) ~(lhs_is_grad : bool) ~shape_l
      construction is a taint boundary like [Tensor.op]'s (gh-ocannl-1301). *)
   let lhs = if lhs_is_grad then (Option.value_exn ~here:[%here] t.diff).grad else t.value in
   Shape.with_taint_on_failure ~describe:(fun exn ->
-      [%string "%cd assignment to %{Tn.debug_name lhs}: %{Shape.exn_summary exn}"])
+      [%string "%cd assignment to %{Tn.label_name lhs}: %{Shape.exn_summary exn}"])
   @@ fun () ->
   let update_step =
     register_update_step
@@ -607,7 +610,7 @@ let register_constant_host_init tn values =
       (let prec = Lazy.force tn.Tn.storage_prec in
        let dims = Lazy.force tn.Tn.dims in
        let padding = Tn.get_padding tn in
-       let debug = "Host init for " ^ Tn.debug_name tn in
+       let debug = "Host init for " ^ Tn.label_name tn in
        let nd = Nd.create_array ~debug prec ~dims ~padding in
        let pads = Option.map padding ~f:fst in
        (match values with
@@ -686,7 +689,8 @@ let%track7_sexp op ~(label : string list) ?(ternary_op = Shape.Pointwise_tern)
                 List.concat_map remaining ~f:(fun (other, _, other_defines) ->
                     Set.inter requires other_defines |> Set.to_list
                     |> List.map ~f:(fun tn ->
-                        [%string "%{Tn.debug_name tn} (in #%{other.value.id#Int})"]))
+                        ([%string "%{Tn.debug_name tn} (in #%{other.value.id#Int})"]
+                        [@message_only "the fragment-cycle diagnostic printed below"])))
               in
               Stdlib.Printf.eprintf "  fragment #%d %s waits for: %s\n%!" ti.value.id
                 (Tn.debug_name ti.value)
@@ -1417,7 +1421,8 @@ let consume_forward_code t =
       raise
       @@ Session_error
            ( not_a_root_reason ~handout:t.consumption.fwd ~what:"forward"
-               ~name:(Tn.debug_name t.value) t,
+               ~name:(Tn.debug_name t.value [@message_only "the refusal raised here"])
+               t,
              Some t );
     (* Check if any non-embedded descendants of t are embedded in other roots *)
     let all_read = fst @@ Asgns.collect_nodes_guess_output t.forward.asgns in
@@ -1457,7 +1462,9 @@ let consume_backprop_code t =
     if not @@ is_bprop_root t then
       raise
       @@ Session_error
-           ( not_a_root_reason ~handout:t.consumption.bprop ~what:"backprop" ~name:(debug_grad t) t,
+           ( not_a_root_reason ~handout:t.consumption.bprop ~what:"backprop"
+               ~name:(debug_grad t [@message_only "the refusal raised here"])
+               t,
              Some t );
     (* Check if any non-embedded grad descendants of t are embedded in other roots *)
     let all_read = fst @@ Asgns.collect_nodes_guess_output diff.backprop.asgns in
@@ -1630,7 +1637,10 @@ let checkpoint_refusal ck =
   | None ->
       List.find_map ck.ck_nodes ~f:(fun s ->
           if Tn.open_snapshot_settled s then
-            let name = Tn.debug_name (Tn.open_snapshot_node s) in
+            let name =
+              (Tn.debug_name (Tn.open_snapshot_node s)
+               [@message_only "the refusal checkpoint raises at once"])
+            in
             Some
               [%string
                 "the precision of %{name}, open at the checkpoint, began settling after it; a \
@@ -1895,7 +1905,7 @@ module Scheme = struct
     let application_name args =
       match args with
       | [] -> "no arguments"
-      | _ -> String.concat ~sep:", " (List.map args ~f:(fun t -> Tn.debug_name t.value))
+      | _ -> String.concat ~sep:", " (List.map args ~f:(fun t -> Tn.label_name t.value))
 
     (* The check of one application: the scheme's constraints against the arguments, solved, and
        then put back -- the session afterwards is what the body alone makes. *)
@@ -2207,7 +2217,8 @@ let%debug_sexp log_debug_info ~from_log_level t =
     let%diagn_sexp log_child { subtensor = _subtensor; embedded = _embedded } =
       [%logN_block
         from_log_level
-          ((if _embedded then "Embedded " else "Non-embedded ") ^ Tn.debug_name _subtensor.value);
+          ((if _embedded then "Embedded " else "Non-embedded ")
+          ^ (Tn.debug_name _subtensor.value [@message_only "a debug-log block's title"]));
         Tn.log_debug_info ~from_log_level _subtensor.value]
     in
     [%logN_block

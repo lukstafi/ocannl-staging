@@ -1,23 +1,27 @@
 (* gh-ocannl-1606: a test reads a node's debug name only to show it, never to find the node -- the
-   debug name is a display name a renderer can change (gh-ocannl-1552). The reader, its closed list
-   of accepted forms and what it deliberately does not read are in test/support/debug_name_scan.ml's
-   header.
+   debug name is a display name a renderer can change (gh-ocannl-1552). The library under lib/ and
+   tensor/ is held to the same rule, which there also keeps a debug name out of the names it stores:
+   a tensor label, a block comment of generated code (post-wave task post-1-task-6, after
+   gh-ocannl-1686). The reader, its closed list of accepted forms and what it deliberately does not
+   read are in test/support/debug_name_scan.ml's header.
 
    Live: [debug_name_scan.exe <root> <generated>...] reads a dune sandbox holding the source tree
-   and scans every .ml under test/ and arrayjit/test/. Control: [debug_name_scan.exe --fixture
-   <root>] reads the same layout under a fixture tree, each file with a [.fixture] suffix so that no
-   build or other scan reads it as a source, and ends as a negative control: its golden is the
-   findings, and it must exit 1. Refusal control: [debug_name_scan.exe --refusal-control] routes
-   each of this file's own refusals through a synthetic input and claims exactly that refusal fired
-   (gh-ocannl-800). *)
+   and scans every .ml under test/, arrayjit/test/, lib/ and tensor/. Control: [debug_name_scan.exe
+   --fixture <root>] reads the same layout under a fixture tree, each file with a [.fixture] suffix
+   so that no build or other scan reads it as a source, and ends as a negative control: its golden
+   is the findings, and it must exit 1. Refusal control: [debug_name_scan.exe --refusal-control]
+   routes each of this file's own refusals through a synthetic input and claims exactly that refusal
+   fired (gh-ocannl-800). *)
 open Base
 open Stdio
 open Verdict.Claims
 module Scan = Test_utils.Debug_name_scan
 module Inventory = Test_utils.Source_inventory
 
+let corpus_roots = [ "test/"; "arrayjit/test/"; "lib/"; "tensor/" ]
+
 let in_corpus path =
-  (String.is_prefix path ~prefix:"test/" || String.is_prefix path ~prefix:"arrayjit/test/")
+  List.exists corpus_roots ~f:(fun prefix -> String.is_prefix path ~prefix)
   && String.is_suffix path ~suffix:".ml"
 
 (* One reading, its failures told apart (gh-ocannl-1292): a source that does not parse is the
@@ -43,7 +47,9 @@ let reading_or_refusal ~fail ~what read =
 let run ~fail sources =
   let corpus = List.filter sources ~f:(fun (path, _) -> in_corpus path) in
   if List.is_empty corpus then
-    fail "no test source is among the sources read -- the rule's source tree matches nothing";
+    fail
+      "no source under the scanned roots is among the sources read -- the rule's source tree \
+       matches nothing";
   let reports =
     List.filter_map corpus ~f:(fun (file, source) ->
         Option.map
@@ -93,10 +99,11 @@ let refusal_control () =
     (fun fail ->
       ignore
         (reading_or_refusal ~fail ~what:"good.ml" (fun () -> invalid_arg "planted") : unit option));
-  routed_case "a run without test sources reaches the empty-corpus refusal"
-    ~format:"no test source is among the sources read -- the rule's source tree matches nothing"
-    ~fragment:"no test source is among the sources read" (fun fail ->
-      ignore (run ~fail [ ("tensor/tensor.ml", "let x = 1") ] : _ list));
+  routed_case "a run without corpus sources reaches the empty-corpus refusal"
+    ~format:
+      "no source under the scanned roots is among the sources read -- the rule's source tree \
+       matches nothing" ~fragment:"no source under the scanned roots is among the sources read"
+    (fun fail -> ignore (run ~fail [ ("bin/moons_benchmark.ml", "let x = 1") ] : _ list));
   Test_utils.Refusal_control_manifest.print source
 
 let () =
@@ -134,5 +141,11 @@ let () =
         (accepts "test/operations/scope_over_materialized.ml" Scan.needle);
       p "the scan reads rewind_to_last_closure's [@rendered_name] marker"
         (accepts "test/operations/rewind_to_last_closure.ml" Scan.marked);
+      p "the scan reads the library: Tensor's Session_error messages"
+        (accepts "tensor/tensor.ml" Scan.printed);
+      p "the scan reads the library: Train's [@message_only] log lines"
+        (accepts "lib/train.ml" Scan.message_only);
+      p "the scan reads the library: Tensor's debug_name alias"
+        (accepts "tensor/tensor.ml" Scan.alias);
       Test_utils.Refusal_control_manifest.print "debug_name_scan.ml"
   | _ -> Stdlib.exit 2

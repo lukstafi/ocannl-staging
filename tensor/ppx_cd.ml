@@ -1434,9 +1434,9 @@ let translate ?ident_label (expr : expression) : result =
           expr :: List.map ~f:snd exprs
           |> List.map ~f:(function
             | { pexp_desc = Pexp_constant (Pconst_string _); _ } as s -> s
-            | [%expr [%e? t].value] -> [%expr Ir.Tnode.debug_name [%e t].value]
-            | [%expr [%e? t].grad] -> [%expr Ir.Tnode.debug_name [%e t].value ^ ".grad"]
-            | t -> [%expr Ir.Tnode.debug_name [%e t].value])
+            | [%expr [%e? t].value] -> [%expr Ir.Tnode.label_name [%e t].value]
+            | [%expr [%e? t].grad] -> [%expr Ir.Tnode.label_name [%e t].value ^ ".grad"]
+            | t -> [%expr Ir.Tnode.label_name [%e t].value])
         in
         let res2 = loop ~proj_in_scope expr2 in
         let block =

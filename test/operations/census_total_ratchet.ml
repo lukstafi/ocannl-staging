@@ -103,7 +103,7 @@ let allowed =
     };
     {
       golden = Golden "test/operations/debug_name_scan_control.expected";
-      pattern = {|^FAIL: test/operations/lookups\.ml:[0-9]+:|};
+      pattern = {|^FAIL: \(test/operations/lookups\|lib/parallel\|tensor/tensor\)\.ml:[0-9]+:|};
       reason =
         "the line of the committed fixture tree a refusal names, moving only with that fixture";
     };

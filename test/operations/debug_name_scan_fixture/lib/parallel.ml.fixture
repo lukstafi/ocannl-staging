@@ -1,0 +1,20 @@
+(* debug_name_scan_control's library fixture: the spellings post-wave task post-1-task-6 replaced.
+   Never compiled; the [.fixture] suffix keeps every build and other scan off it. *)
+module Tn = Ir.Tnode
+
+(* Refused: a shard's tensor label spelled from the debug name (lib/parallel.ml before the task).
+   Accepted: the same label from the label name, and the debug name in the refusal it raises. *)
+let shard_label tn k nd = TDSL.rebatch ~l:(Printf.sprintf "%s_shard%d" (Tn.debug_name tn) k) nd ()
+let shard_label' tn k nd = TDSL.rebatch ~l:(Printf.sprintf "%s_shard%d" (Tn.label_name tn) k) nd ()
+
+let no_host_data tn =
+  invalid_arg (Printf.sprintf "Parallel: tensor %s has no host-side data" (Tn.debug_name tn))
+
+(* Refused: a block comment that lands in generated code, spelled from the debug name
+   (lib/train.ml's [forward] before the task). *)
+let forward t fwd =
+  let label = Tn.debug_name t.Tensor.value in
+  { fwd with asgns = Asgns.Block_comment (label ^ " fwd", fwd.asgns) }
+
+(* Refused: an ndarray's stored debug description. *)
+let host_buffer tn = Nd.create_array ~debug:("parallel host buffer for " ^ Tn.debug_name tn)
