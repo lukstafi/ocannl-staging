@@ -25,6 +25,9 @@ exact_partials is sound: where it accepts a cell, every partial sum of every ass
 exact_partials accepts some of those cells, and refuses some, at every width: true
 exact_partials' bound is tight: it accepts 2^p grains and refuses 2^p + 1, whose sum is inexact at p bits: true
 exact_partials refuses mixed signs even where every partial sum is exact (gfx11's WMMA premise): true
+exact_partials ~any_sign:true is sound: where it accepts a cell of mixed signs, every partial sum of every association is exact at that width: true
+exact_partials ~any_sign:true accepts some cells of mixed signs at every width: true
+exact_partials ~any_sign:true accepts those mixed cells, and bounds the magnitudes: 2^p grains pass, 2^p + 1 do not: true
 exact_partials reads zeros as signless, and an empty or all-zero cell as exact: true
 exact_partials refuses a non-finite product: true
 exact_partials refuses a width outside 1 .. 52, and takes both ends: true
