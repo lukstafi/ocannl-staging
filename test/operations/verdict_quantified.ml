@@ -283,6 +283,34 @@ let () =
   | "pairwise_collision" ->
       p_pairwise_distinct "the source values are pairwise distinct" [ 7; 11; 7 ] ~equal:Int.equal
         ~to_string:Int.to_string
+  (* post-1-task-4: a floor below one is a programming error, refused at the call whatever the
+     collection holds -- non-empty ones included, where [~min:0] used to pass as [~min:1] does. *)
+  | "min0_all" -> Verdict.p_all ~min:0 "every seed is even" seeds ~f:even
+  | "min0_none" -> Verdict.p_none ~min:0 "no seed is odd" seeds ~f:odd
+  | "min0_alli" ->
+      Verdict.p_alli ~min:(-1) "every seed exceeds its index" seeds ~f:(fun i n -> n > i)
+  | "min0_empty" -> Verdict.p_empty ~min:0 "no seed is odd" ~over:seeds []
+  | "min0_exists" -> Verdict.p_exists ~min:0 "some seed is even" seeds ~f:even
+  | "min0_all2" -> Verdict.p_all2 ~min:0 "the readback matches" got want ~f:Float.equal
+  | "min0_pass_fail_all2" ->
+      Verdict.pass_fail_all2 ~min:0 "the readback matches" got want ~f:Float.equal
+  | "min0_close" -> p_close ~min:0 "the readback is close" got want ~tol:(fun _ -> 1.)
+  | "min0_within" ->
+      Verdict.p "the readback is close"
+        (Verdict.within ~min:0 "the readback" got want ~tol:(fun _ -> 1.))
+  | "min0_pass_fail_close" ->
+      pass_fail_close ~min:0 "the readback is close" got want ~tol:(fun _ -> 1.)
+  | "min0_gated_all_open" ->
+      gated_all ~min:0 ~when_:true ~on:"a fixture backend" "every seed is even" seeds ~f:even
+  | "min0_gated_alli_open" ->
+      gated_alli ~min:0 ~when_:true ~on:"a fixture backend" "every seed exceeds its index" seeds
+        ~f:(fun i n -> n > i)
+  | "min0_gated_exists_open" ->
+      gated_exists ~min:0 ~when_:true ~on:"a fixture backend" "some seed is even" seeds ~f:even
+  (* Where the gate is closed the claim is not evaluated, its floor included: a floor computed from
+     the gated population, [~min:(List.length xs)], is zero exactly there. *)
+  | "min0_gated_all_closed" ->
+      gated_all ~min:0 ~when_:false ~on:"a fixture backend" "the gated claim" [] ~f:even
   | "refusals" ->
       List.iter [ "all"; "none"; "alli" ] ~f:(fun quantifier ->
           List.iter [ true; false ] ~f:(fun holds ->
@@ -361,6 +389,45 @@ let () =
       refused "pairwise distinctness reports the first colliding pair directly"
         ~line:"the source values are pairwise distinct (collision: 7 = 7): false"
         (run_child "pairwise_collision");
+      (* post-1-task-4: `~min:0` reads as "emptiness passes" and used to mean `~min:1`. It is an
+         [Invalid_argument] now -- an uncaught exception, exit 2, before any claim line -- whose
+         message names the form that does mean emptiness passes and why the quantifier refuses. *)
+      List.iter
+        [
+          "min0_all";
+          "min0_none";
+          "min0_alli";
+          "min0_empty";
+          "min0_exists";
+          "min0_all2";
+          "min0_pass_fail_all2";
+          "min0_close";
+          "min0_within";
+          "min0_pass_fail_close";
+          "min0_gated_all_open";
+          "min0_gated_alli_open";
+          "min0_gated_exists_open";
+        ] ~f:(fun mode ->
+          let ((_, stdout, _) as child) = run_child mode in
+          let ok =
+            Fresh_process.matches ~stream:`Stderr ~exit:2
+              ~contains:
+                [
+                  "Invalid_argument";
+                  "but a quantified claim's floor is at least 1";
+                  "a vacuous quantifier is refused by design (gh-ocannl-729)";
+                  "A claim whose passing case is emptiness is Verdict.p_empty ~over:";
+                ]
+              child
+            && String.is_empty stdout
+          in
+          if not ok then Fresh_process.report ~label:mode child;
+          Verdict.claimf "%s refuses a floor below 1 at the call, naming the emptiness form" mode ok);
+      let closed_status, closed_stdout, closed_stderr = run_child "min0_gated_all_closed" in
+      Verdict.p "a closed gate skips a zero floor with the claim, printing gated's passing line"
+        (Poly.equal closed_status (Unix.WEXITED 0)
+        && String.equal closed_stdout "the gated claim: true\n"
+        && not (String.is_substring closed_stderr ~substring:"Invalid_argument"));
       refused "an evaluated gated claim that fails names its detail in p's dialect"
         ~line:"the gated claim (measured 3 vs bound 2): false" (run_child "gated_false");
       (* The trap gh-ocannl-997 removes: a skip must print what an evaluated pass prints, so the

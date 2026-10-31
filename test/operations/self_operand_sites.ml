@@ -236,12 +236,14 @@ let library_sites, corpus =
     List.partition_tf files ~f:(fun (_, content) -> String.is_prefix content ~prefix:"Caml1999M")
   in
   let sources = List.map sources ~f:(fun (f, content) -> (relative f, content)) in
-  (* Emptiness passes: a build whose globs match no AST has none to skip. *)
-  p_all "every binary AST the corpus globs matched is a preprocessed source the corpus parses"
-    ~min:0 asts ~f:(fun (f, _) ->
-      match String.chop_suffix (relative f) ~suffix:".pp.ml" with
-      | Some stem -> List.Assoc.mem sources (stem ^ ".ml") ~equal:String.equal
-      | None -> false);
+  (* Emptiness passes: a build whose globs match no AST has none to skip. So the claim is that no
+     AST lacks its source, over the corpus files, which must exist whatever the globs matched. *)
+  p_empty "every binary AST the corpus globs matched is a preprocessed source the corpus parses"
+    ~over:files
+    (List.filter asts ~f:(fun (f, _) ->
+         match String.chop_suffix (relative f) ~suffix:".pp.ml" with
+         | Some stem -> not (List.Assoc.mem sources (stem ^ ".ml") ~equal:String.equal)
+         | None -> true));
   ( List.concat_map sources ~f:(fun (file, content) -> Scan.sites ~file content)
     |> List.sort ~compare:compare_site,
     List.map sources ~f:fst )
