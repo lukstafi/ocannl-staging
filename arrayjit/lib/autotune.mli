@@ -781,6 +781,22 @@ val seeding_census :
 val seeding_census_prefix : string
 val seeding_census_lines : where:string -> seeding_census -> string list
 
+(** A GEMM role a GPU tensorized seed pads (gh-ocannl-1736): a row or column pad masks the
+    accumulator's fragment transfers, a reduction pad masks nothing ([Tensorize] discharges its
+    guard against the zero-fringe staged tiles). *)
+type pad_role = Pad_row | Pad_column | Pad_reduction
+
+type seed_pad = { pad_role : pad_role; pad_extent : int; pad_block : int }
+(** One padded role: the site's extent along it and the block it pads to. *)
+
+val pad_masks_accumulator : pad_role -> bool
+
+val seeding_seed_pads : family_seeding -> sketch_params -> seed_pad list option
+(** The roles a seed pads, judged on the site of the family that seeded it by the very predicates
+    the seeding charges the masked accumulator tile's workgroup memory by; the census's pad lines
+    print them. [None] for a seed they do not judge: a CPU or scalar seed, or a coalesced layout's.
+*)
+
 val log_seeding_enabled : unit -> bool
 (** Config [autotune_log_seeding], read once per process. *)
 

@@ -50,3 +50,9 @@ log_seeding writes exactly the rendered census: true
 the seeded default prints a census line for its plan: true
 the seeded default prints one census line per segment of its plan: true
 tune emits a whole-routine census line: true
+pad census: an m=48 site pads the row role alone: true
+pad census: its census names the row axis as the accumulator mask's cause: true
+pad census: an n=40 site pads the column role alone: true
+pad census: its census names the column axis as the accumulator mask's cause: true
+pad census: a k=40 site pads the reduction role alone: true
+pad census: a reduction-only pad is reported apart, never as an accumulator mask: true

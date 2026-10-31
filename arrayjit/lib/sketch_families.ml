@@ -856,6 +856,59 @@ type conv_site = {
 let conv_mma_scope (site : conv_site) =
   mma_scope_of_reduction_extents (List.map site.c_axes ~f:(fun cx -> cx.cx_nk))
 
+(* gh-ocannl-1736: the GEMM roles a GPU tensorized seed pads, and which of them pad-mask its
+   accumulator. [Tensorize] masks the accumulator's fragment transfers along a padded row or column
+   role; a reduction pad masks nothing ([Tensorize] discharges its guard against the zero-fringe
+   staged tiles). The SAME predicates charge the masked accumulator tile's workgroup memory at
+   seeding ([matmul_acc_masked], [conv_seed_pads] in the two families' memory judgments) and name
+   the axis in the seeding census, so the census says what the seeding decided. *)
+type pad_role = Pad_row | Pad_column | Pad_reduction
+type seed_pad = { pad_role : pad_role; pad_extent : int; pad_block : int }
+
+let pad_masks_accumulator = function Pad_row | Pad_column -> true | Pad_reduction -> false
+
+let seed_pads_mask_accumulator pads =
+  List.exists pads ~f:(fun sp -> pad_masks_accumulator sp.pad_role)
+
+let block_divides c n = c <= n && n % c = 0
+
+(* A staged matmul geometry's accumulator mask: a row block or column block not dividing its extent.
+   An unstaged one reads its operands in place, which no pad can absorb, so its seeding requires
+   divisibility outright. *)
+let matmul_acc_masked (site : matmul_site) ~bm ~bn =
+  not (block_divides bm site.m_ni && block_divides bn site.m_nj)
+
+let matmul_seed_pads (site : matmul_site) (p : sketch_params) : seed_pad list option =
+  if (not (p.sk_gpu && p.sk_mma)) || p.sk_conv || Option.is_some p.sk_coalesce then None
+  else if p.sk_bk = 0 then Some []
+  else
+    let pad pad_role pad_extent pad_block =
+      if block_divides pad_block pad_extent then [] else [ { pad_role; pad_extent; pad_block } ]
+    in
+    Some
+      (pad Pad_row site.m_ni p.sk_bm @ pad Pad_column site.m_nj p.sk_bn
+      @ pad Pad_reduction site.m_nk p.sk_bk)
+
+(* A conv tensorized GPU geometry's pads, as the conv family seeds them: [sk_bn] / [sk_bk] carry the
+   column and reduction pad multiples (0 = already a multiple), the row pads to [sk_tm] in a
+   whole-extent flavor and to a non-dividing row block [sk_bm] in a blocked one. *)
+let conv_pads (site : conv_site) (p : sketch_params) : seed_pad list =
+  (if p.sk_bm = 0 then
+     if p.sk_tm > 0 then [ { pad_role = Pad_row; pad_extent = site.c_nrow; pad_block = p.sk_tm } ]
+     else []
+   else if site.c_nrow % p.sk_bm <> 0 then
+     [ { pad_role = Pad_row; pad_extent = site.c_nrow; pad_block = p.sk_bm } ]
+   else [])
+  @ (if p.sk_bn > 0 then [ { pad_role = Pad_column; pad_extent = site.c_noc; pad_block = p.sk_bn } ]
+     else [])
+  @
+  if p.sk_bk > 0 then
+    [ { pad_role = Pad_reduction; pad_extent = site.c_nred; pad_block = p.sk_bk } ]
+  else []
+
+let conv_seed_pads (site : conv_site) (p : sketch_params) : seed_pad list option =
+  if p.sk_gpu && p.sk_mma && p.sk_conv then Some (conv_pads site p) else None
+
 let detect_conv_procedural (llc : LL.t) : conv_site option =
   let stmts = strip_stmts (LL.flat_lines [ llc ]) in
   let zeroed = List.filter_map stmts ~f:(function LL.Zero_out tn -> Some tn | _ -> None) in
@@ -3673,9 +3726,9 @@ let matmul_flavor_tree ?(coalesced : coalesce_layout option)
                      dividing and padding members is judged without it ([~masked_fragment:false]):
                      the charge is not monotone in [bm], so its corner would not bound the box. *)
                   let masked_fragment =
-                    if (not masked_fragment) || (divides bm site.m_ni && divides bn site.m_nj) then
-                      []
-                    else [ bm * bn * Ir.Ops.prec_in_bytes d_prec ]
+                    if masked_fragment && matmul_acc_masked site ~bm ~bn then
+                      [ bm * bn * Ir.Ops.prec_in_bytes d_prec ]
+                    else []
                   in
                   let charge ~mma_triples =
                     Sched.kernel_workgroup_bytes ~capabilities
@@ -4745,11 +4798,9 @@ let conv_family_tree ?(capabilities = Ir.Backend_intf.no_codegen_capabilities) ~
                     in
                     (* A geometry whose [Tensorize] masks the accumulator: a column pad, or a row
                        pad or row block that does not divide the row extent. *)
-                    let acc_masked p =
-                      p.sk_bn > 0 || if p.sk_bm = 0 then p.sk_tm > 0 else site.c_nrow % p.sk_bm <> 0
-                    in
+                    let acc_masked p = seed_pads_mask_accumulator (conv_pads site p) in
                     (* A geometry with any pad: the accumulator masks, or a reduction pad. *)
-                    let masked p = p.sk_bk > 0 || acc_masked p in
+                    let masked p = not (List.is_empty (conv_pads site p)) in
                     (* Depth twins ride the async arms' element floor (Codex P2 on PR #317, as in
                        the matmul sketch): staged tiles of sub-4-byte elements render the portable
                        synchronous form only. *)
@@ -5038,6 +5089,14 @@ let coalesced_seed_params ?capabilities ~is_gpu ~is_cpu ~(limits : Ir.Backend_in
   List.concat_map (coalesced_seeding ?capabilities ~is_gpu ~is_cpu ~limits opt) ~f:(fun v ->
       v.cv_seeds)
 
+(* gh-ocannl-1736: a seed's pads, judged on the site of the family that seeded it: [None] for a seed
+   the predicates do not judge (a CPU or scalar seed, a coalesced layout's). *)
+let seeding_seed_pads (family : family_seeding) (p : sketch_params) : seed_pad list option =
+  match family with
+  | Seeding_matmul { site; _ } -> matmul_seed_pads site p
+  | Seeding_conv { site; _ } -> conv_seed_pads site p
+  | Seeding_none -> None
+
 (** {2 The seeding census (gh-ocannl-1407)}
 
     Seeding refusals are decided before any candidate exists, so neither the decline report nor
@@ -5132,6 +5191,52 @@ let seeding_census_lines ~where (c : seeding_census) : string list =
           real_stmts
         :: refutation_lines tree
   in
+  (* gh-ocannl-1736: the axes that padded each seed, one line per distinct reason with its seed
+     count, from the very predicates the seeding charged the masked accumulator tile by
+     ({!seeding_seed_pads}). A row or column pad masks the accumulator; a reduction pad alone masks
+     nothing, and is reported apart so it is never read as one. *)
+  let pad_lines =
+    let role_name = function
+      | Pad_row -> "row"
+      | Pad_column -> "column"
+      | Pad_reduction -> "reduction"
+    in
+    let reason pads =
+      let axis sp =
+        Printf.sprintf "the %s axis (extent %d, padded to the %d-wide block)"
+          (role_name sp.pad_role) sp.pad_extent sp.pad_block
+      in
+      let acc, red = List.partition_tf pads ~f:(fun sp -> pad_masks_accumulator sp.pad_role) in
+      let red_note =
+        match red with
+        | [] -> ""
+        | red ->
+            "; "
+            ^ String.concat ~sep:" and " (List.map red ~f:axis)
+            ^ " is discharged by the zero-fringe staged tiles"
+      in
+      match acc with
+      | [] ->
+          "reduction pad only, no accumulator mask: "
+          ^ String.concat ~sep:" and " (List.map red ~f:axis)
+      | acc ->
+          "pad-masked accumulator, forced by "
+          ^ String.concat ~sep:" and " (List.map acc ~f:axis)
+          ^ red_note
+    in
+    let counts = Hashtbl.create (module String) in
+    let order =
+      List.filter_map c.sc_seeds ~f:(fun p ->
+          match seeding_seed_pads c.sc_family p with
+          | None | Some [] -> None
+          | Some pads ->
+              let r = reason pads in
+              let seen = Hashtbl.mem counts r in
+              Hashtbl.incr counts r;
+              if seen then None else Some r)
+    in
+    List.map order ~f:(fun r -> detail "%s (x%d)" r (Hashtbl.find_exn counts r))
+  in
   let nests =
     match c.sc_conv_nests with
     | [] -> []
@@ -5168,7 +5273,7 @@ let seeding_census_lines ~where (c : seeding_census) : string list =
             detail "coalesced %s: %d seeds: %s" layout (List.length v.cv_seeds)
               (String.concat ~sep:" " geometries))
   in
-  (head :: family_details) @ coalesced @ nests
+  (head :: family_details) @ pad_lines @ coalesced @ nests
 
 (* The exported tree view of the matmul family alone (site detection included);
    {!sketch_family_tree} is the view of whichever family claims the lowering. *)
