@@ -259,7 +259,10 @@ files.
   an ancestor nobody can release (gh-ocannl-1762). The analysis cache keeps eight compiles' nodes,
   bounded. To find a pinner, put weak witnesses on the nodes and clear candidates one at a time
   (`clear_analysis_cache`, `unsafe_reinitialize`, `sync_device`, the constant cache): the recipe
-  that found these two, and `dropped_graph_buffers` pins what it found.
+  that found these two, and `dropped_graph_buffers` pins what it found. A device-memory claim
+  reads the process's own accounting (`Alloc_census`, the used gauge), never the driver's free
+  bytes: device-wide, so any concurrent GPU process -- the suite's own parallel GPU tests included
+  -- moves them between two readings (gh-ocannl-1798); print them on stderr only.
 - Five facts about the allocation seams that each cost a review round to learn, and that any further
   release work will meet again. (1) There are **two** shared allocation sites, not one:
   `Backends.allocate_delta` for a compile's delta, and the transfer destinations inside
