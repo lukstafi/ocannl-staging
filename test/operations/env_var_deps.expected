@@ -290,6 +290,7 @@ Ambient environment gates, by dune file and every alias whose build runs one:
   test/operations/dune                     @runtest-refused_action_streams
   test/operations/dune                     @runtest-render_decline_inventory
   test/operations/dune                     @runtest-reusable_tensor_programs
+  test/operations/dune                     @runtest-routine_log_rng_init
   test/operations/dune                     @runtest-routine_log_stream_files
   test/operations/dune                     @runtest-schedule_bench_padded
   test/operations/dune                     @runtest-schedule_conv_gemm-tf32

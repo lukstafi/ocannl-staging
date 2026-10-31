@@ -1544,6 +1544,9 @@ module Impl = struct
     let log_index_arg doc =
       if Utils.settings.large_models then ("%ld", PPrint.(string "(long)" ^^ doc)) else ("%d", doc)
 
+    (* Metal spells [uint4x32] as its native [uint4] vector, whose lanes subscript. *)
+    let uint4x32_log_lane doc lane = PPrint.(parens doc ^^ brackets (string (Int.to_string lane)))
+
     (* If we wanted to reintroduce the log_id parameter: [Some ("const int&", "log_id")]. *)
     let kernel_log_param = None
     let log_involves_file_management = false
