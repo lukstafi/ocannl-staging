@@ -1,0 +1,8 @@
+B: refused, naming the loss's backprop fragment: true
+B: the update carrying it once computes 6 w: true
+B: run twice, it double-counts into 18 w: true
+F: refused, naming the forward fragment: true
+E: refused, naming the embedded fragment: true
+O: the operand is no longer a forward root: true
+O: and was not marked taken: consuming it is refused: true
+O: the even positions of 2 x: true

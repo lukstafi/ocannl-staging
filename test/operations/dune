@@ -10136,6 +10136,17 @@
   (pps ppx_here ppx_ocannl)))
 
 (test
+ (name fragment_sequenced_twice)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules fragment_sequenced_twice)
+ (libraries base ocannl stdio arrayjit.verdict)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+(test
  (name consume_code_replay)
  (package neural_nets_lib)
  (locks ocannl_training_test)
