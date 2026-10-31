@@ -200,6 +200,25 @@ ok: boundary -- a haystack read back out of an array cell is a mutation
 ok: boundary -- a source parameter rebound to other text
 ok: boundary -- a source-taking helper handed ordinary text is unvalidated
 every partial-itemisation boundary has a case meeting it alone: true
+ok: support module -- a plain library's module is a support module
+ok: support module -- an inline-test library's module is one too
+ok: support module -- a test's module is not
+ok: support module -- a module no stanza owns is not
+ok: harness -- the frontier closes under reference and include, and nothing else
+ok: executing -- a staged callback naming a node is a member
+ok: executing -- matching on the constructor builds nothing
+ok: executing -- a hand-held lowering through the seam is a member
+ok: executing -- the seam forwarded as an optional argument is one too
+ok: executing -- link_delta's ~prelowered:true links nothing
+ok: executing -- a harness value reaching the seam, by its qualifier
+ok: executing -- a harness value reaching nothing is not
+ok: executing -- a harness value reached through an alias of its module
+ok: executing -- a harness value reached through a library's qualifier
+ok: executing -- a harness value reached by its bare name under an open
+ok: executing -- a test's own value of a harness value's name, nothing opened, is not
+ok: executing -- a support module including the harness passes its values on
+ok: executing -- a link-free harness value is not
+ok: executing -- a comment or a string naming the routes is not
 ok: rerun -- a test stanza's own golden
 ok: rerun -- a pform in the golden path is a substitution, reported
 ok: rerun -- the shortest backend extension substitutes as well

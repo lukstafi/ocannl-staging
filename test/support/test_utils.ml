@@ -74,6 +74,11 @@ module Codegen_text_scan = Codegen_text_scan
 (** Deciding what pins the TEXT of generated code: goldens holding emitted kernel or IR source, and
     test sources asserting on it from a string literal. *)
 
+module Kernel_exec_scan = Kernel_exec_scan
+(** Deciding which tests compile or execute kernel text they built themselves -- a staged callback,
+    a [?prelowered] compile, or a support value reaching either -- the population a codegen change
+    breaks without any of it pinning text (gh-ocannl-1685). *)
+
 module Scan_attempt = Scan_attempt
 (** Classifying a scan's failure on one source: the input's parse error, or the scanner's own
     exception with its text -- never the second reported as the first. *)

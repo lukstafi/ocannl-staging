@@ -230,11 +230,22 @@ let module_runners stanzas ~dir ~module_name =
         List.map (rule_aliases s) ~f:(at s.dir)
       else [])
 
+let dir_and_base path =
+  match String.rsplit2 path ~on:'/' with Some (dir, base) -> (dir, base) | None -> ("", path)
+
+(** Whether a [(library)] stanza owns [path], a repository-relative source: a support module, which
+    runs only inside the tests linking it, so nothing re-runs it by name and nothing needs to. *)
+let owned_by_library stanzas ~path =
+  let dir, base = dir_and_base path in
+  let module_name = module_of stanzas ~dir ~base in
+  List.exists stanzas ~f:(fun s ->
+      String.equal s.dir dir
+      && Option.equal String.equal (Dune.head s.stanza) (Some "library")
+      && owns stanzas s ~module_name)
+
 (** The aliases that run [path], a repository-relative test source. *)
 let for_source stanzas ~path =
-  let dir, base =
-    match String.rsplit2 path ~on:'/' with Some (dir, base) -> (dir, base) | None -> ("", path)
-  in
+  let dir, base = dir_and_base path in
   let module_name = module_of stanzas ~dir ~base in
   List.concat_map stanzas ~f:(fun s ->
       if not (String.equal s.dir dir && owner s && owns stanzas s ~module_name) then []

@@ -705,8 +705,223 @@ so, and the goldens' families say which backends a change has to be run on.
 @test/operations/runtest-zero_out_local_decl-extension
 @test/operations/runtest-zero_out_local_decl-unoptimized
 
+== tests compiling or executing kernel text they built themselves ==
+They pin nothing, and a codegen change breaks them all the same (gh-ocannl-1685): a staged
+callback's text is emitted verbatim and renamed by nothing, a [?prelowered] lowering is an IR
+shape the pipeline never emits, a shipped kernel compiled alone loses the batch around it. Run
+them on every GPU backend. The rules are stated in test/support/kernel_exec_scan.ml.
+support values reaching such text, derived from the sources:
+Bench_harness.compile_shipped_kernel [prelowered compile]
+Bench_harness.dominant_kernel [through Bench_harness.time_shipped_kernels]
+Bench_harness.measure_and_emit [through Bench_harness.dominant_kernel]
+Bench_harness.run_self_test [through Bench_harness.dominant_kernel; through Bench_harness.measure_and_emit]
+Bench_harness.time_shipped_kernels [through Bench_harness.compile_shipped_kernel]
+Bench_harness.time_shipped_segments [through Bench_harness.time_shipped_kernels]
+Ll_test.execute [through Ll_test.execute_with_census]
+Ll_test.execute_with_census [through Ll_test.run_routine]
+Ll_test.link [prelowered compile]
+Ll_test.link_finalized [through Ll_test.link]
+Ll_test.optimize_and_execute [through Ll_test.execute]
+Ll_test.run [through Ll_test.run_routine]
+Ll_test.run_routine [through Ll_test.link]
+
+roots scanned: arrayjit/test, test
+arrayjit/test/test_cross_cse.ml [staged callback; run by @arrayjit/test/runtest-test_cross_cse]
+arrayjit/test/test_vectorized_codegen.ml [staged callback; run by @arrayjit/test/runtest-test_vectorized_codegen]
+test/operations/accum_max_one_extent.ml [through Ll_test.execute; run by @test/operations/runtest-accum_max_one_extent]
+test/operations/accum_width.ml [staged callback; through Ll_test.execute; run by @test/operations/runtest-accum_width]
+test/operations/affine_extraction.ml [staged callback; run by @test/operations/runtest-affine_extraction]
+test/operations/autotune_timing_modes.ml [through Ll_test.link; run by @test/operations/runtest-autotune_timing_modes]
+test/operations/back_to_back_runs.ml [prelowered compile; run by @test/operations/runtest-back_to_back_runs]
+test/operations/bench_self_test.ml [through Bench_harness.run_self_test; through Bench_harness.time_shipped_segments; run by @test/operations/runtest-bench_self_test]
+test/operations/bf16_subnormal_storage.ml [through Ll_test.execute; run by @test/operations/runtest-bf16_subnormal_storage, @test/operations/runtest-bf16_subnormal_storage-reproducible]
+test/operations/branchless_select.ml [through Ll_test.optimize_and_execute; run by @test/operations/runtest-branchless_select]
+test/operations/canonical_render.ml [staged callback; run by @test/operations/runtest-canonical_render]
+test/operations/capture_pass_side_effects.ml [through Ll_test.execute; through Ll_test.run; run by @test/operations/runtest-capture_pass_side_effects]
+test/operations/cc_kernel_outline.ml [through Ll_test.execute; run by @test/operations/runtest-cc_kernel_outline]
+test/operations/cc_march_census.ml [through Ll_test.link; run by @test/operations/runtest-cc_march_census-emission, @test/operations/runtest-cc_march_census-w16_native_foreign, @test/operations/runtest-cc_march_census-w16_native_host, @test/operations/runtest-cc_march_census-w16_wide_foreign, @test/operations/runtest-cc_march_census-w16_wide_host, @test/operations/runtest-cc_march_census-w32_native_foreign, @test/operations/runtest-cc_march_census-w32_native_host, @test/operations/runtest-cc_march_census-w32_wide_foreign, @test/operations/runtest-cc_march_census-w32_wide_host, @test/operations/runtest-cc_march_census-w64_native_foreign, @test/operations/runtest-cc_march_census-w64_native_host, @test/operations/runtest-cc_march_census-w64_wide_foreign, @test/operations/runtest-cc_march_census-w64_wide_host]
+test/operations/codegen_fma_precision.ml [through Ll_test.execute; through Ll_test.link; run by @test/operations/runtest-codegen_fma_precision]
+test/operations/compile_failure_declines.ml [staged callback; prelowered compile; run by @test/operations/runtest-compile_failure_declines]
+test/operations/context_handle_refusals.ml [through Ll_test.link; run by @test/operations/runtest-context_handle_refusals]
+test/operations/cost_model_template.ml [through Ll_test.execute; through Ll_test.run; run by @test/operations/runtest-cost_model_template]
+test/operations/cpu_fork_join_chains.ml [prelowered compile; through Ll_test.execute; run by @test/operations/runtest-cpu_fork_join_chains]
+test/operations/dynamic_axis_coverage.ml [through Ll_test.execute; run by @test/operations/runtest-dynamic_axis_coverage]
+test/operations/fixed_name_temporaries.ml [through Ll_test.execute; through Ll_test.execute_with_census; through Ll_test.run_routine; run by @test/operations/runtest-fixed_name_temporaries-logged, @test/operations/runtest-fixed_name_temporaries-plain]
+test/operations/float_literal_forms.ml [through Ll_test.execute; run by @test/operations/runtest-float_literal_forms]
+test/operations/footprint_materialization.ml [through Ll_test.execute; run by @test/operations/runtest-footprint_materialization]
+test/operations/fp_licence_values.ml [through Ll_test.execute; through Ll_test.run; run by @test/operations/runtest-fp_licence_values]
+test/operations/gather_table_placement.ml [through Ll_test.execute; run by @test/operations/runtest-gather_table_placement]
+test/operations/gpu_lane_reduction.ml [through Ll_test.execute; through Ll_test.link; run by @test/operations/runtest-gpu_lane_reduction]
+test/operations/gpu_packed_prec.ml [through Ll_test.execute; run by @test/operations/runtest-gpu_packed_prec]
+test/operations/gpu_parallel_prefix.ml [through Ll_test.execute; run by @test/operations/runtest-gpu_parallel_prefix]
+test/operations/gpu_serial_lanes.ml [prelowered compile; through Ll_test.execute; run by @test/operations/runtest-gpu_serial_lanes]
+test/operations/gpu_small_leading_axis.ml [through Ll_test.execute; run by @test/operations/runtest-gpu_small_leading_axis]
+test/operations/half_float_power.ml [through Ll_test.execute; run by @test/operations/runtest-half_float_power]
+test/operations/half_unary_math.ml [through Ll_test.execute; run by @test/operations/runtest-half_unary_math]
+test/operations/hardware_warp_shuffle.ml [prelowered compile; through Ll_test.execute; run by @test/operations/runtest-hardware_warp_shuffle]
+test/operations/heap_local_arrays.ml [through Ll_test.execute; run by @test/operations/runtest-heap_local_arrays]
+test/operations/hip_half_load.ml [through Ll_test.link; run by @test/operations/runtest-hip_half_load]
+test/operations/hip_half_masked_gradient.ml [through Ll_test.link; run by @test/operations/runtest-hip_half_masked_gradient]
+test/operations/integer_power_domain.ml [through Ll_test.execute; through Ll_test.link; run by @test/operations/runtest-integer_power_domain]
+test/operations/launch_predicate_parity.ml [through Ll_test.execute; through Ll_test.execute_with_census; run by @test/operations/runtest-launch_predicate_parity, @test/operations/runtest-launch_predicate_parity-tf32]
+test/operations/lineage_template_supersession.ml [through Ll_test.execute; through Ll_test.run; run by @test/operations/runtest-lineage_template_supersession]
+test/operations/matmul_interchange.ml [through Ll_test.execute_with_census; run by @test/operations/runtest-matmul_interchange, @test/operations/runtest-matmul_interchange-tf32]
+test/operations/metal_routine_log_delivery.ml [through Ll_test.run_routine; run by @test/operations/runtest-metal_routine_log_delivery]
+test/operations/narrow_storage_compute.ml [through Ll_test.link; run by @test/operations/runtest-narrow_storage_compute]
+test/operations/narrow_uniform_bound.ml [through Ll_test.execute; through Ll_test.run; run by @test/operations/runtest-narrow_uniform_bound]
+test/operations/online_softmax.ml [staged callback; through Ll_test.execute; run by @test/operations/runtest-online_softmax, @test/operations/runtest-online_softmax_fast_math, @test/operations/runtest-online_softmax_fp_licences]
+test/operations/op_table_compile.ml [prelowered compile; through Ll_test.execute; run by @test/operations/runtest-op_table_compile]
+test/operations/operand_precision_annotation.ml [through Ll_test.link; run by @test/operations/runtest-operand_precision_annotation]
+test/operations/padded_conv_cache.ml [through Ll_test.optimize_and_execute; run by @test/operations/runtest-padded_conv_cache]
+test/operations/peel_census.ml [prelowered compile; run by @test/operations/runtest-peel_census]
+test/operations/peel_dead_level.ml [through Ll_test.execute; run by @test/operations/runtest-peel_dead_level]
+test/operations/prelowered_seam.ml [staged callback; prelowered compile; through Ll_test.link; through Ll_test.optimize_and_execute; run by @test/operations/runtest-prelowered_seam]
+test/operations/privatize_recheck.ml [through Ll_test.execute; run by @test/operations/runtest-privatize_recheck]
+test/operations/qkv_zero_init.ml [prelowered compile; through Ll_test.execute; through Ll_test.link; run by @test/operations/runtest-qkv_zero_init, @test/operations/runtest-qkv_zero_init-approximate]
+test/operations/reduction_accumulator_residency.ml [prelowered compile; through Ll_test.link; run by @test/operations/runtest-reduction_accumulator_residency]
+test/operations/reduction_forms.ml [prelowered compile; run by @test/operations/runtest-reduction_forms]
+test/operations/rev_sides_padded_target.ml [through Ll_test.link; run by @test/operations/runtest-rev_sides_padded_target]
+test/operations/rev_sides_width1_store.ml [through Ll_test.link; run by @test/operations/runtest-rev_sides_width1_store]
+test/operations/routine_log_stream_files.ml [through Ll_test.run_routine; run by @test/operations/runtest-routine_log_stream_files]
+test/operations/runtime_integer_power.ml [through Ll_test.execute; run by @test/operations/runtest-runtime_integer_power]
+test/operations/scan_loop.ml [staged callback; through Ll_test.execute; through Ll_test.link; through Ll_test.optimize_and_execute; through Ll_test.run; run by @test/operations/runtest-scan_loop]
+test/operations/schedule_coalesce.ml [prelowered compile; through Ll_test.execute; run by @test/operations/runtest-schedule_coalesce]
+test/operations/scope_over_materialized.ml [through Ll_test.execute; run by @test/operations/runtest-scope_over_materialized]
+test/operations/shipped_kernels_alone.ml [staged callback; through Bench_harness.time_shipped_kernels; through Ll_test.execute; run by @test/operations/runtest-shipped_kernels_alone]
+test/operations/simplify_const_left_sub.ml [through Ll_test.execute; run by @test/operations/runtest-simplify_const_left_sub]
+test/operations/simplify_fma_precision.ml [through Ll_test.execute; run by @test/operations/runtest-simplify_fma_precision]
+test/operations/simplify_rng_operands.ml [through Ll_test.execute; run by @test/operations/runtest-simplify_rng_operands]
+test/operations/splice_semantics.ml [through Ll_test.execute; through Ll_test.link_finalized; through Ll_test.run; run by @test/operations/runtest-splice_semantics]
+test/operations/stage_scope_anchor.ml [through Ll_test.execute; run by @test/operations/runtest-stage_scope_anchor]
+test/operations/stored_template_elision.ml [through Ll_test.execute; through Ll_test.link_finalized; through Ll_test.run; run by @test/operations/runtest-stored_template_elision]
+test/operations/symbolic_extent_backward.ml [through Ll_test.execute; run by @test/operations/runtest-symbolic_extent_backward]
+test/operations/symbolic_extent_contract.ml [through Ll_test.link; run by @test/operations/runtest-symbolic_extent_contract]
+test/operations/thread_private_gate.ml [through Ll_test.link; run by @test/operations/runtest-thread_private_gate]
+test/operations/tile_bf16_row_groups.ml [through Ll_test.execute; run by @test/operations/runtest-tile_bf16_row_groups]
+test/operations/unary_math_special_values.ml [through Ll_test.execute; run by @test/operations/runtest-unary_math_special_values, @test/operations/runtest-unary_math_special_values-reproducible]
+test/operations/virtual_affine.ml [through Ll_test.execute; through Ll_test.run; run by @test/operations/runtest-virtual_affine]
+test/operations/virtual_chain_fanin.ml [through Ll_test.execute; through Ll_test.link; through Ll_test.run; run by @test/operations/runtest-virtual_chain_fanin]
+test/operations/virtual_diagonal.ml [through Ll_test.execute; run by @test/operations/runtest-virtual_diagonal]
+test/operations/virtual_guarded_setter.ml [through Ll_test.execute; through Ll_test.link; run by @test/operations/runtest-virtual_guarded_setter]
+test/operations/virtual_rejection_boundary.ml [through Ll_test.execute; run by @test/operations/runtest-virtual_rejection_boundary]
+test/operations/virtual_shared_loop.ml [through Ll_test.execute; run by @test/operations/runtest-virtual_shared_loop]
+test/operations/virtual_uncaptured_loop.ml [through Ll_test.execute; run by @test/operations/runtest-virtual_uncaptured_loop]
+test/operations/winograd_conv.ml [through Ll_test.optimize_and_execute; run by @test/operations/runtest-winograd_conv]
+test/operations/zero_elision.ml [through Ll_test.link; run by @test/operations/runtest-zero_elision]
+test/operations/zero_out_local_decl.ml [through Ll_test.execute; run by @test/operations/runtest-zero_out_local_decl, @test/operations/runtest-zero_out_local_decl-extension, @test/operations/runtest-zero_out_local_decl-unoptimized]
+test/operations/zero_run_reorder.ml [prelowered compile; run by @test/operations/runtest-zero_run_reorder]
+
+== the aliases a codegen change runs on every GPU backend ==
+@arrayjit/test/runtest-test_cross_cse
+@arrayjit/test/runtest-test_vectorized_codegen
+@test/operations/runtest-accum_max_one_extent
+@test/operations/runtest-accum_width
+@test/operations/runtest-affine_extraction
+@test/operations/runtest-autotune_timing_modes
+@test/operations/runtest-back_to_back_runs
+@test/operations/runtest-bench_self_test
+@test/operations/runtest-bf16_subnormal_storage
+@test/operations/runtest-bf16_subnormal_storage-reproducible
+@test/operations/runtest-branchless_select
+@test/operations/runtest-canonical_render
+@test/operations/runtest-capture_pass_side_effects
+@test/operations/runtest-cc_kernel_outline
+@test/operations/runtest-cc_march_census-emission
+@test/operations/runtest-cc_march_census-w16_native_foreign
+@test/operations/runtest-cc_march_census-w16_native_host
+@test/operations/runtest-cc_march_census-w16_wide_foreign
+@test/operations/runtest-cc_march_census-w16_wide_host
+@test/operations/runtest-cc_march_census-w32_native_foreign
+@test/operations/runtest-cc_march_census-w32_native_host
+@test/operations/runtest-cc_march_census-w32_wide_foreign
+@test/operations/runtest-cc_march_census-w32_wide_host
+@test/operations/runtest-cc_march_census-w64_native_foreign
+@test/operations/runtest-cc_march_census-w64_native_host
+@test/operations/runtest-cc_march_census-w64_wide_foreign
+@test/operations/runtest-cc_march_census-w64_wide_host
+@test/operations/runtest-codegen_fma_precision
+@test/operations/runtest-compile_failure_declines
+@test/operations/runtest-context_handle_refusals
+@test/operations/runtest-cost_model_template
+@test/operations/runtest-cpu_fork_join_chains
+@test/operations/runtest-dynamic_axis_coverage
+@test/operations/runtest-fixed_name_temporaries-logged
+@test/operations/runtest-fixed_name_temporaries-plain
+@test/operations/runtest-float_literal_forms
+@test/operations/runtest-footprint_materialization
+@test/operations/runtest-fp_licence_values
+@test/operations/runtest-gather_table_placement
+@test/operations/runtest-gpu_lane_reduction
+@test/operations/runtest-gpu_packed_prec
+@test/operations/runtest-gpu_parallel_prefix
+@test/operations/runtest-gpu_serial_lanes
+@test/operations/runtest-gpu_small_leading_axis
+@test/operations/runtest-half_float_power
+@test/operations/runtest-half_unary_math
+@test/operations/runtest-hardware_warp_shuffle
+@test/operations/runtest-heap_local_arrays
+@test/operations/runtest-hip_half_load
+@test/operations/runtest-hip_half_masked_gradient
+@test/operations/runtest-integer_power_domain
+@test/operations/runtest-launch_predicate_parity
+@test/operations/runtest-launch_predicate_parity-tf32
+@test/operations/runtest-lineage_template_supersession
+@test/operations/runtest-matmul_interchange
+@test/operations/runtest-matmul_interchange-tf32
+@test/operations/runtest-metal_routine_log_delivery
+@test/operations/runtest-narrow_storage_compute
+@test/operations/runtest-narrow_uniform_bound
+@test/operations/runtest-online_softmax
+@test/operations/runtest-online_softmax_fast_math
+@test/operations/runtest-online_softmax_fp_licences
+@test/operations/runtest-op_table_compile
+@test/operations/runtest-operand_precision_annotation
+@test/operations/runtest-padded_conv_cache
+@test/operations/runtest-peel_census
+@test/operations/runtest-peel_dead_level
+@test/operations/runtest-prelowered_seam
+@test/operations/runtest-privatize_recheck
+@test/operations/runtest-qkv_zero_init
+@test/operations/runtest-qkv_zero_init-approximate
+@test/operations/runtest-reduction_accumulator_residency
+@test/operations/runtest-reduction_forms
+@test/operations/runtest-rev_sides_padded_target
+@test/operations/runtest-rev_sides_width1_store
+@test/operations/runtest-routine_log_stream_files
+@test/operations/runtest-runtime_integer_power
+@test/operations/runtest-scan_loop
+@test/operations/runtest-schedule_coalesce
+@test/operations/runtest-scope_over_materialized
+@test/operations/runtest-shipped_kernels_alone
+@test/operations/runtest-simplify_const_left_sub
+@test/operations/runtest-simplify_fma_precision
+@test/operations/runtest-simplify_rng_operands
+@test/operations/runtest-splice_semantics
+@test/operations/runtest-stage_scope_anchor
+@test/operations/runtest-stored_template_elision
+@test/operations/runtest-symbolic_extent_backward
+@test/operations/runtest-symbolic_extent_contract
+@test/operations/runtest-thread_private_gate
+@test/operations/runtest-tile_bf16_row_groups
+@test/operations/runtest-unary_math_special_values
+@test/operations/runtest-unary_math_special_values-reproducible
+@test/operations/runtest-virtual_affine
+@test/operations/runtest-virtual_chain_fanin
+@test/operations/runtest-virtual_diagonal
+@test/operations/runtest-virtual_guarded_setter
+@test/operations/runtest-virtual_rejection_boundary
+@test/operations/runtest-virtual_shared_loop
+@test/operations/runtest-virtual_uncaptured_loop
+@test/operations/runtest-winograd_conv
+@test/operations/runtest-zero_elision
+@test/operations/runtest-zero_out_local_decl
+@test/operations/runtest-zero_out_local_decl-extension
+@test/operations/runtest-zero_out_local_decl-unoptimized
+@test/operations/runtest-zero_run_reorder
+
 every scanned root meets its golden floor: true
 every scanned root meets its source-site floor: true
+every scanned root meets its floor of tests building their own kernel text: true
 every source handed over parsed as OCaml: true
 every member has an alias that re-runs it: true
 the scan raised on no source handed over: true
@@ -719,6 +934,7 @@ no test source reads build_files/ itself: generated code is read through Test_ut
 Synthetic controls: scanner refusal diagnostics exercised by this control golden:
   [scanner-refusal:a59159ac0fd0f431da9519f8016e6762] every scanned root
   [scanner-refusal:c995ea0a058a228bf654449befcccb4b] meets its source-site
+  [scanner-refusal:1b40c8a4f6d202c5b6563c1565f86060] tests building their
   [scanner-refusal:d246f03ca5c483db40b94796658cf426] every source handed
   [scanner-refusal:73a439e337c34309cf51b52176da80ad] alias that re-runs
   [scanner-refusal:8879574435d6aa60f13f262f594c3d45] source handed over
