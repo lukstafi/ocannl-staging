@@ -2076,13 +2076,22 @@
 # in shape error exceptions.
 #max_shape_error_origins=20
 
-# Automatic shape schemes of `%op` functions (gh-ocannl-1751): `check` (the default) traces the
-# scheme of a `%op` function whose returned function takes only tensors when its closure is built
-# (at its `()` application, or at the first application without a `()` stage), and checks each
-# application against it before the body runs, so a shape error inside the function is reported
-# naming it. `off` builds every function as before, unchecked. Either way the graph, its tensor ids
-# and the generated code are the same. Read once per process. See docs/syntax_extensions.md.
-#op_shape_schemes=check
+# Automatic shape schemes of `%op` functions (gh-ocannl-1751, gh-ocannl-1761). The scheme of a
+# `%op` function whose returned function takes only tensors is traced when its closure is built (at
+# its `()` application, or at the first application without a `()` stage); an application error
+# that depends on the arguments is reported naming the function, before the body runs.
+# `guided` (the default): each application instantiates the scheme once against its arguments, and
+#   the body's shape registration follows the trace -- every update step that matches the trace's
+#   next step skips deriving and solving its own constraints. The function's graph must not depend
+#   on state outside its closure and its arguments' shapes: a trace step the body does not build
+#   raises "the function built a different graph than at its trace".
+# `check`: each application checks the scheme in a rewound window, then the body registers as
+#   without schemes (costlier: the diagnostic mode).
+# `off`: every function builds as before, unchecked.
+# In every mode the closed shapes, the tensor ids and node uids, the generated code and the values
+# are the same (guided registration changes only the ids of open shape variables, which closure
+# discards). Read once per process. See docs/syntax_extensions.md.
+#op_shape_schemes=guided
 
 # Whether Persistence.load / Persistence.restore wrap a checkpoint's payloads as private
 # (copy-on-write) memory mappings of the file instead of decoding them into fresh host buffers.

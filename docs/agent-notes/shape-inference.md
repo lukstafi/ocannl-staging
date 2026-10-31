@@ -285,3 +285,18 @@ files.
   in reading order, never by id: a trace's ids come from the reserved range, and so do the ids in
   its errors' constraint sexps, which a golden must not pin (the tutorial prints only the message
   and the `Dim_mismatch` sizes).
+- Guided registration (gh-ocannl-1761, `Shape.Scheme.guided`, the default `op_shape_schemes`):
+  `get_inequalities` is not only constraints. It unmarks `unused_shapes` (filtering the closure's
+  Terminal/Shape rows), so a recording trace logs the unmarks it ATTEMPTS per step, not the set
+  difference (an operand already used at the trace can be unused at an application). A match
+  needs the key, slot correspondence (argument / pre-existing / own, bindings injective) AND a fresh
+  lhs's creation rows equal up to renaming (`Row.canonical_rows`); the creation check applies only
+  to a lhs first bound by that step (a `%cd`-style step into an existing shape has solved rows).
+  Traces use `Prohibit_grad` tracers, so an application whose operands need gradients builds
+  backward helper steps the trace lacked (layer_norm's `sqrt`/`/.` under a model): they register
+  as unmatched, which is why unmatched steps are tolerated and only an UNBUILT trace step is a
+  divergence. Checkpoints, rewinds and closures are refused while a guide is installed
+  (`refuse_while_guided`), which is what keeps its cursor consistent; a closure built inside a
+  guided body therefore stays pending. Shape-variable ids are not neutral under guided (inline
+  registration mints variables guided skips): goldens printing open shapes after a schemed
+  application (`test_extend_dsls`) move; tensor ids and node uids are neutral.
