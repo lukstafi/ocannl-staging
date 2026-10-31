@@ -690,8 +690,170 @@ let branch_explanation_probe () =
   let held, silent = explain ~holds:true in
   Verdict.p "a branch claim that holds prints nothing" (held && String.is_empty silent)
 
+(* {2 GPU dumps (gh-ocannl-1695)}
+
+   Excerpts of real listings, kept in their tools' exact syntax: [nvdisasm -g -c] over [ptxas
+   -arch=sm_120 -lineinfo] (CUDA 13.4) and [llvm-objdump -d -l] (LLVM 21, gfx1151) of the gate
+   [out[i] = (x[i] == m[i]) ? g[i] : 0.0f] -- spelled short-circuiting, which branches around the
+   load, and blended, which selects ([FSEL] / [v_cndmask_b32]). Line 5 of [k.cu] / [k.hip] is the
+   select, line 4 the kernel's bounds guard. *)
+let gpu_probes () =
+  let source = "#\n#\n#\n  if (i < n) {\n    out[i] = SELECT;\n  }\n" in
+  let anchor = Census.anchor_lines ~source ~patterns:[ "SELECT" ] in
+  let sass_branching =
+    String.concat ~sep:"\n"
+      [
+        "//--------------------- .text.k_eq                --------------------------";
+        "\t.section\t.text.k_eq,\"ax\",@progbits";
+        ".text.k_eq:";
+        "\t//## File \"/tmp/k.cu\", line 4";
+        "        /*0060*/                   ISETP.GE.AND P0, PT, R9, UR5, PT ;";
+        "        /*0070*/               @P0 EXIT ;";
+        "\t//## File \"/tmp/k.cu\", line 5";
+        "        /*00d0*/                   LDG.E.CONSTANT R2, desc[UR4][R2.64] ;";
+        "        /*00f0*/                   LDG.E.CONSTANT R5, desc[UR4][R4.64] ;";
+        "        /*0100*/                   BSSY.RECONVERGENT B0, `(.L_x_4) ;";
+        "        /*0130*/                   FSETP.NEU.FTZ.AND P0, PT, R2, R5, PT ;";
+        "        /*0140*/               @P0 BRA `(.L_x_5) ;";
+        "        /*0170*/                   LDG.E.CONSTANT R11, desc[UR4][R2.64] ;";
+        "        /*0190*/                   BSYNC.RECONVERGENT B0 ;";
+        "\t//## File \"/tmp/k.cu\", line 7";
+        "        /*01b0*/                   EXIT ;";
+        "        /*01c0*/                   BRA `(.L_x_6);";
+      ]
+  in
+  let sass_blended =
+    String.concat ~sep:"\n"
+      [
+        ".text.b_eq:";
+        "\t//## File \"/tmp/k.cu\", line 5";
+        "        /*00e0*/                   LDG.E.CONSTANT R4, desc[UR4][R4.64] ;";
+        "        /*0100*/                   LDG.E.CONSTANT R7, desc[UR4][R6.64] ;";
+        "        /*0120*/                   LDG.E.CONSTANT R2, desc[UR4][R2.64] ;";
+        "        /*0140*/                   FSETP.NEU.FTZ.AND P0, PT, R4, R7, PT ;";
+        "        /*0150*/                   FSEL R11, R2, RZ, !P0 ;";
+        "        /*0160*/              @!P1 LDG.E.CONSTANT R9, desc[UR4][R2.64] ;";
+        "        /*0170*/              @PT BRA `(.L_x_1) ;";
+      ]
+  in
+  let amdgpu_branching =
+    String.concat ~sep:"\n"
+      [
+        "0000000000002600 <k_eq>:";
+        "; k_eq():";
+        "; /usr/include/hip/amd_detail/amd_hip_runtime.h:264";
+        "\ts_load_b32 s3, s[0:1], 0x34                                // 000000002604: F40000C0 \
+         F8000034";
+        "; /tmp/k.hip:4";
+        "\tv_cmpx_gt_i32_e64 s4, v0                                   // 000000002630: D4C4007E \
+         00020004";
+        "\ts_cbranch_execz 47                                         // 000000002638: BFA5002F \
+         <k_eq+0xf8>";
+        "; /tmp/k.hip:5";
+        "\tglobal_load_b32 v2, v[2:3], off                            // 000000002688: DC520000 \
+         027C0002";
+        "\tglobal_load_b32 v3, v[4:5], off                            // 000000002690: DC520000 \
+         037C0004";
+        "\tv_cmp_eq_f32_e32 vcc_lo, v2, v3                            // 00000000269C: 7C240702";
+        "\ts_and_saveexec_b32 s4, vcc_lo                              // 0000000026A4: BE84206A";
+        "\ts_cbranch_execz 10                                         // 0000000026A8: BFA5000A \
+         <k_eq+0xd4>";
+        "\tglobal_load_b32 v2, v[2:3], off                            // 0000000026CC: DC520000 \
+         027C0002";
+        "; /tmp/k.hip:6";
+        "\ts_endpgm                                                   // 0000000026F0: BFB00000";
+      ]
+  in
+  let amdgpu_blended =
+    String.concat ~sep:"\n"
+      [
+        "0000000000001f00 <b_eq>:";
+        "; /tmp/k.hip:5";
+        "\tglobal_load_b32 v2, v[2:3], off                            // 000000001F90: DC520000 \
+         027C0002";
+        "\tv_cmp_eq_f32_e32 vcc_lo, v2, v3                            // 000000001FAC: 7C240702";
+        "\ts_delay_alu instid0(VALU_DEP_1) | instskip(SKIP_1) | instid1(VALU_DEP_1)// \
+         000000001FB0: BF8700A1";
+        "\tv_cndmask_b32_e32 v2, 0, v4, vcc_lo                        // 000000001FB4: 02040880";
+        "\ts_branch 3                                                 // 000000001FB8: BFA00003 \
+         <b_eq+0xc8>";
+      ]
+  in
+  let census dialect ~basename dump =
+    let parsed = Census.parse_gpu dialect ~dump ~source_basename:basename in
+    let sites, instructions = Census.gpu_branch_sites parsed ~anchor in
+    (List.length sites, instructions, parsed.Census.g_markers)
+  in
+  Verdict.p "a GPU census anchor is the select's line alone"
+    (Set.equal anchor (Set.singleton (module Int) 5));
+  Verdict.p
+    "SASS: the branch around a gate's load is counted, the bounds guard's exit and the \
+     unconditional trap are not"
+    (Poly.equal (census Census.Sass ~basename:"k.cu" sass_branching) (1, 7, 3));
+  Verdict.p
+    "SASS: a blended select has no branch, a predicated load is no branch, and nor is an [@PT] \
+     branch"
+    (Poly.equal (census Census.Sass ~basename:"k.cu" sass_blended) (0, 7, 1));
+  Verdict.p
+    "AMDGPU: the exec-mask skip around a gate's load is counted, the bounds guard's is not, nor a \
+     vendor header's line"
+    (Poly.equal (census Census.Amdgpu ~basename:"k.hip" amdgpu_branching) (1, 6, 3));
+  Verdict.p "AMDGPU: a blended select has no conditional branch ([s_branch] is unconditional)"
+    (Poly.equal (census Census.Amdgpu ~basename:"k.hip" amdgpu_blended) (0, 5, 1));
+  (* The failures a census must not read as success: line tables naming another file (or none), and
+     a listing of nothing. *)
+  Verdict.p
+    "a listing whose line tables name another source has no markers and no instructions there"
+    (Poly.equal (census Census.Sass ~basename:"other.cu" sass_blended) (0, 0, 0)
+    && Poly.equal (census Census.Amdgpu ~basename:"other.hip" amdgpu_blended) (0, 0, 0));
+  (* A native Windows run's markers: the drive letter's colon is the path's, and a trailing column
+     is not the line. *)
+  let amdgpu_windows =
+    String.concat ~sep:"\n"
+      [
+        "; C:/checkout/k.hip:5";
+        "\ts_and_saveexec_b32 s4, vcc_lo                              // 0000000026A4: BE84206A";
+        "\ts_cbranch_execz 10                                         // 0000000026A8: BFA5000A \
+         <k_eq+0xd4>";
+        "; C:/checkout/k.hip:5:7";
+        "\tglobal_load_b32 v2, v[2:3], off                            // 0000000026CC: DC520000 \
+         027C0002";
+        "; C:/checkout/k.hip:6:1";
+        "\ts_endpgm                                                   // 0000000026F0: BFB00000";
+      ]
+  in
+  Verdict.p "AMDGPU: a Windows path's drive letter and a trailing column leave the line read"
+    (Poly.equal (census Census.Amdgpu ~basename:"k.hip" amdgpu_windows) (1, 3, 3));
+  (* A native Windows run's markers: the drive letter's colon is the path's, and a trailing column
+     is not the line. *)
+  let amdgpu_windows =
+    String.concat ~sep:"\n"
+      [
+        "; C:/checkout/k.hip:5";
+        "\ts_and_saveexec_b32 s4, vcc_lo                              // 0000000026A4: BE84206A";
+        "\ts_cbranch_execz 10                                         // 0000000026A8: BFA5000A \
+         <k_eq+0xd4>";
+        "; C:/checkout/k.hip:5:7";
+        "\tglobal_load_b32 v2, v[2:3], off                            // 0000000026CC: DC520000 \
+         027C0002";
+        "; C:/checkout/k.hip:6:1";
+        "\ts_endpgm                                                   // 0000000026F0: BFB00000";
+      ]
+  in
+  Verdict.p "AMDGPU: a Windows path's drive letter and a trailing column leave the line read"
+    (Poly.equal (census Census.Amdgpu ~basename:"k.hip" amdgpu_windows) (1, 3, 3));
+  Verdict.p "an empty listing has no markers and no instructions"
+    (Poly.equal (census Census.Sass ~basename:"k.cu" "") (0, 0, 0)
+    && Poly.equal (census Census.Amdgpu ~basename:"k.hip" "") (0, 0, 0));
+  Verdict.p "a PTX file's target is what ptxas assembles for"
+    (Poly.equal
+       (Census.ptx_target "//\n.version 9.0\n.target sm_120\n.address_size 64\n")
+       (Some "sm_120")
+    && Poly.equal (Census.ptx_target ".target sm_90a, debug\n") (Some "sm_90a"))
+
 let () =
   branch_explanation_probe ();
+  gpu_probes ();
   compilation_plan_probe ();
   dialect_probes ();
   anchor_precedence_probe ();
