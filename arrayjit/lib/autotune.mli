@@ -1011,6 +1011,11 @@ val split_reduce_sites :
     keeps that split. [static_indices] only reaches the interchange and coalescing probes'
     [Sched.apply]. Exposed for tests. *)
 
+val same_split_site : sr_site -> sr_site -> bool
+(** Whether two {!split_reduce_sites} enumerations' sites are one site (gh-ocannl-1697): the same
+    target, and the same split loop -- or, for a coalesced site, whose merged loop each enumeration
+    mints afresh, the same pair of loops merged. *)
+
 val split_reduce_prelude : (sr_site * int) list -> Ir.Schedule.schedule
 (** The whole-routine prelude splitting each [(site, num_blocks)]: per site its interchange
     ([sr_swaps]), its coalescing ([sr_coalesce], minting the merged loop under the symbol [sr_axis]
@@ -1711,7 +1716,8 @@ type report = {
       (** The seeded singles proposed (gh-ocannl-1664, config [autotune_seeded_singles], default
           on): where the search seeds a seeded plan ({!seeded_plan}) with a segmentation of its own,
           its per-segment singles are timed inside that plan instead of over the search's own
-          segmentation around presets: for each keyed segment of the plan's segmentation
+          segmentation around presets: for each keyed segment of the plan's segmentation -- the
+          running plan the seeded split sweep leaves ([seeded_split_candidates], gh-ocannl-1697) --
           ({!seeded_single_seeds}), each seed the model pre-filter keeps, as the plan with that
           segment code's choice swapped for the seed ({!seeded_swap}, labelled [F_swap[...]]). The
           keys are swept one at a time, heaviest first; a key's single joins the running seeded
@@ -1728,6 +1734,21 @@ type report = {
   seeded_single_fallbacks : int;
       (** Seeded singles refused with a non-empty staff and retried with the key swapped alone,
           under [fiss_sketch_backdrop_fallbacks]' rule. *)
+  seeded_split_candidates : int;
+      (** The seeded split singles proposed (gh-ocannl-1697): where the seeded singles run, each
+          {!split_reduce_sites} site within [max_split_reduce_sites] at each other choice of the
+          split menu's -- a block count of [split_reduce_candidates]' menu, or unsplit -- as the
+          running seeded plan re-derived over that split ({!seeded_resplit}, labelled
+          [F_resplit[...]]), swept site by site, heaviest first, before the segment singles; a
+          site's fastest joins the running plan only by reading faster than it. A choice whose
+          derivation fails or reproduces the running plan is not counted. [split_reduce_candidates]
+          is then [0]: no split single is timed around presets. *)
+  seeded_split_timed : int;
+      (** Of the seeded split singles, those that reached a timing window (refused windows included,
+          as for [seeded_single_timed]). *)
+  seeded_split_joins : int;
+      (** Sites whose choice the seeded split sweep changed: each a split single that read faster
+          than the running seeded plan and became it. *)
   split_reduce_candidates : int;
       (** Split-reduce seeds (gh-ocannl-484 task 3): one candidate per {!split_reduce_sites} site
           within the [max_split_reduce_sites] cap and eligible [num_blocks] value — the two-pass
@@ -2838,11 +2859,21 @@ type seeded_segment =
   | Seeded_sunk of { digest : string; swaps : int }
       (** {!reduction_sink}'s [swaps] interchanges, then the default preset, likewise matched. *)
 
+type seeded_memo
+(** The per-segment decisions several derivations of one search share (gh-ocannl-1697): each
+    distinct segment code's seed and sink, as one derivation decides them. Sound across derivations
+    under one gate, limits and settings: a decision is a function of the segment's code. *)
+
+val seeded_memo : unit -> seeded_memo
+(** An empty {!seeded_memo}. *)
+
 type seeded_start = {
   decide : Ir.Low_level.optimized -> sketch_params option;
       (** The plan's per-segment decision: the sketch its gate admits on a segment, probed and
           validated there, or [None] for the preset. *)
   gate_tag : string;  (** The gate it reads, rendered for the search shape. *)
+  rederive : seeded_memo -> (sr_site * int) list -> Ir.Low_level.optimized -> seeded_plan option;
+      (** The plan's whole derivation over another split (gh-ocannl-1697): {!seeded_resplit}. *)
 }
 (** The seeded plan's decision rule, for {!tune}'s staffed start (gh-ocannl-1138, config
     [autotune_staffed_singles]), which applies it to the search's own segments: the plan's recorded
@@ -2850,7 +2881,7 @@ type seeded_start = {
     Carried in the plan so that the device readings the gate rests on reach {!tune} only through
     {!seeded_plan}. *)
 
-type seeded_plan = {
+and seeded_plan = {
   sp_split : (sr_site * int) list;
       (** The reductions split whole-routine before segmenting ({!seeded_split_sites}). *)
   sp_segments : (Ir.Schedule.segmentation * seeded_segment list) option;
@@ -2879,6 +2910,7 @@ val seeded_plan :
   ?min_serial:int ->
   ?reduction_sink:bool ->
   ?seed_narrow:bool ->
+  ?memo:seeded_memo ->
   ?capabilities:Ir.Backend_intf.codegen_capabilities ->
   facts:Ir.Backend_intf.backend_facts ->
   limits:Ir.Backend_intf.hardware_limits ->
@@ -2893,7 +2925,30 @@ val seeded_plan :
     the search trajectory's identity, so a gate steered by the device description's [Untimed]
     capacity reaches the search only as the plan it resolved to (gh-ocannl-1253). [capabilities] are
     the compiling context's, which {!seeded_params} prices workgroup memory by — in the plan's
-    segments and in its decision rule; {!tune} passes its context's, as the untuned compile does. *)
+    segments and in its decision rule; {!tune} passes its context's, as the untuned compile does.
+    [memo] (default: a fresh one) takes and records the derivation's per-segment decisions; {!tune}
+    shares one with its {!seeded_resplit}s. *)
+
+val seeded_resplit :
+  ?memo:seeded_memo ->
+  seeded_plan ->
+  (sr_site * int) list ->
+  Ir.Low_level.optimized ->
+  seeded_plan option
+(** [seeded_resplit plan split opt] (gh-ocannl-1697): [plan] re-derived with [split] for its split
+    prelude -- the prelude applied to a hermetic copy of [opt], the lowering [plan] was derived on,
+    then the plan's decision rule over the split routine, exactly as {!seeded_plan} derived [plan]
+    (the rule is [plan]'s [sp_start], so the gate's device readings reach {!tune} only through the
+    plan). A seeded split single is this with one site's choice changed: every segment the change
+    leaves alone is decided as [plan] decided it, by the same rule on the same code, which [memo]
+    (default: a fresh one) shares instead of probing again; it prints no seeding census. [None] for
+    a plan without a rule (one the untuned compile builds for itself) or where the prelude does not
+    apply. With [plan]'s own split it is [plan] again. *)
+
+val seeded_resplit_label : from:string -> sr_site -> int option -> string
+(** A seeded split single's label: [F_resplit[<site at its block count>; plan <prefix of from>]],
+    the site rendered as a split-reduce label renders it, [b0 unsplit] for [None]; [from] is the
+    {!seeded_plan_digest} of the plan the single changes. Never prefixed [F_seeded] or [F_swap]. *)
 
 val seeded_plan_digest : seeded_plan -> string
 (** The plan's identity from its content (split sites by target name, extents and block count; the
