@@ -236,7 +236,7 @@ val numerics_tag : unit -> string
     and {!entry}. *)
 
 val codegen_tag :
-  backend:string ->
+  facts:Backend_intf.backend_facts ->
   limits:Backend_intf.hardware_limits ->
   capabilities:Backend_intf.codegen_capabilities ->
   unit ->
@@ -258,8 +258,9 @@ val codegen_tag :
     this backend — including which tensor-unit arm it selects — is identity by derivation rather
     than by a hand-named component (gh-ocannl-1117, gh-ocannl-1153). Pass the compiling context's
     [Context.codegen_capabilities]: a required argument, so no key-minting site can default to a
-    resolution codegen does not use. On a GPU [backend] with [gpu_elide_covered_zeros] on, the tag
-    also hashes the elision, which rewrites a GPU routine's timed kernel list after its transform
+    resolution codegen does not use. On a backend whose [facts] bind a hardware grid
+    ({!Ir.Backend_intf.binds_hardware_grid}), with [gpu_elide_covered_zeros] on, the tag also hashes
+    the elision, which rewrites a GPU routine's timed kernel list after its transform
     (gh-ocannl-1257): entries crowned before it, or with it off, keep the identity they had, and a
     CPU backend's kernels never depend on it. *)
 
@@ -426,6 +427,7 @@ val cache_key :
   timing_identity:Backend_intf.timing_identity option ->
   limits:Backend_intf.hardware_limits ->
   capabilities:Backend_intf.codegen_capabilities ->
+  facts:Backend_intf.backend_facts ->
   canonical ->
   backend:string ->
   string option
@@ -441,8 +443,9 @@ val cache_key :
     The objective is a key component because the two objectives crown DIFFERENT candidates
     (gh-ocannl-755, measured): an entry crowned under isolated timing is not the answer to a search
     asking about queued timing, and the times it stores are readings of a different quantity, which
-    a replay would copy into the reading process's report under its own label. CUDA/HIP [queued]
-    keys carry policy generation 2 (gh-ocannl-892), invalidating winners measured under the old
+    a replay would copy into the reading process's report under its own label. [queued] keys on a
+    backend whose [facts] state [Queued_deep] (CUDA, HIP) carry the queued policy's generation
+    (gh-ocannl-892, gh-ocannl-1144), invalidating winners measured under the old
     depth-200/short-batch regime without invalidating the unchanged cc/Metal regimes. [objective] is
     for the caller that resolved a mode explicitly rather than from configuration
     ({!Autotune.tune}'s [?timing]); everyone else wants the default. The backend-supplied components
@@ -457,6 +460,7 @@ val cache_key_components :
   timing_identity:Backend_intf.timing_identity option ->
   limits:Backend_intf.hardware_limits ->
   capabilities:Backend_intf.codegen_capabilities ->
+  facts:Backend_intf.backend_facts ->
   canonical ->
   backend:string ->
   (string * string) list option
@@ -640,6 +644,7 @@ val placement_key :
   timing_identity:Backend_intf.timing_identity option ->
   limits:Backend_intf.hardware_limits ->
   capabilities:Backend_intf.codegen_capabilities ->
+  facts:Backend_intf.backend_facts ->
   canonical ->
   backend:string ->
   string option

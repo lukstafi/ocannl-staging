@@ -162,7 +162,7 @@ let compile_and_estimate ?(probe = false) ~what ~form ctx comp =
       match form with
       | Unscheduled -> [ o ]
       | Default ->
-          Ir.Schedule.maybe_default_schedules ~backend_name:(Context.backend_name ctx)
+          Ir.Schedule.maybe_default_schedules ~facts:(Context.backend_facts ctx)
             ~limits:(Context.hardware_limits ctx) ~static_indices:[] o
     in
     let before = AC.snapshot () in
@@ -280,7 +280,7 @@ let scenario ~aliasing =
      (tag "training step") unscheduled.ld_working_bytes default_linked.ld_working_bytes;
    if aliasing then
      Verdict.gated
-       ~when_:(Ir.Schedule.backend_is_gpu backend_name)
+       ~when_:(Ir.Backend_intf.binds_hardware_grid (Context.backend_facts_of_name backend_name))
        ~on:backend_name
        (tag
           "training step: on a GPU backend under buffer_aliasing the default schedules allocate \
@@ -303,7 +303,7 @@ let fusion () =
   Unix.putenv "OCANNL_BUFFER_ALIASING" "false";
   Tensor.unsafe_reinitialize ();
   let backend_name = Context.backend_name (Context.auto ()) in
-  let on_gpu = Ir.Schedule.backend_is_gpu backend_name in
+  let on_gpu = Ir.Backend_intf.binds_hardware_grid (Context.backend_facts_of_name backend_name) in
   let m = 192 and k = 32 and nn = 32 and bm = 16 and simd_width = 32 in
   let make () =
     let ma =

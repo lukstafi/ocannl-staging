@@ -20,7 +20,7 @@ let budget_key = "autotune_budget_seconds"
 let backend_name = Context.backend_name (Context.cpu ())
 
 (* The untuned floor a cc search attempts whatever its budget: the default-pipeline seed. *)
-let default_label = Autotune.default_seed_label ~backend_name
+let default_label = Autotune.default_seed_label ~facts:(Context.backend_facts_of_name backend_name)
 let is_floor label = Option.exists default_label ~f:(String.equal label)
 
 (* The baseline slowest, the untuned default next, every other candidate a distinct faster time. *)

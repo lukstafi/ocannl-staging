@@ -460,6 +460,21 @@ val codegen_capabilities : t -> Ir.Backend_intf.codegen_capabilities
 (** Stable facts from the selected backend's C-syntax configuration. Use the compiled routine's
     censuses for decisions that depend on a particular lowering or rendering. *)
 
+val backend_facts : t -> Ir.Backend_intf.backend_facts
+(** The selected backend's capability facts ({!Ir.Backend_intf.backend_facts}, gh-ocannl-1723): what
+    the scheduler, the autotuner and the schedule cache ask of a backend instead of testing its
+    name. Static; opens nothing. *)
+
+val backend_facts_of_name : string -> Ir.Backend_intf.backend_facts
+(** The facts of the backend [Backends.get_backend] parses the name as -- for code that holds a
+    backend name rather than a context, such as a test reading the [backend] setting. Raises
+    [Invalid_argument] on a name [get_backend] does not accept: a name is parsed, never classified
+    by what it contains. *)
+
+val same_backend : t -> t -> bool
+(** Whether the two contexts are on the same backend (typed identity, not name or facts equality:
+    two backends stating equal facts are still two backends). *)
+
 (** {2 Execution dependency tracking}
 
     Execution dependencies mirror compilation dependencies: they record which routines must execute

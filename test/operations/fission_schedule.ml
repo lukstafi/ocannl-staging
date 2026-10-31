@@ -36,7 +36,7 @@ open Verdict.Claims
 
 let approx_tol _ = 1e-4
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
-let on_cpu = Sched.backend_is_cpu backend_name
+let on_cpu = Ir.Backend_intf.renders_on_host_pool (Context.backend_facts_of_name backend_name)
 
 module Generated = Test_utils.Generated
 
@@ -112,18 +112,17 @@ let () =
       (Context.auto ()) comp2 Ir.Indexing.Empty
   in
   let opt = Option.value_exn ~here:[%here] !stash in
-  let segs = Sched.maybe_default_schedules ~backend_name:"metal" ~static_indices:[] opt in
+  let segs =
+    Sched.maybe_default_schedules ~facts:Ir.Backend_intf.metal_facts ~static_indices:[] opt
+  in
   p "capture: one aligned segment" (List.length segs = 1);
   p_all "capture: the merged segment is hardware-annotated" segs ~f:annotated;
-  (match segs with
+  match segs with
   | [ seg0 ] ->
       let mem seg tn = Hashtbl.mem seg.LL.traced_store tn in
       p "capture: traced store covers the whole chain"
         (mem seg0 d2.Tensor.value && mem seg0 e2.Tensor.value)
-  | _ -> p "capture: traced store covers the whole chain" false);
-  let identity = Sched.maybe_default_schedules ~backend_name:"interpreter" ~static_indices:[] opt in
-  p "capture: identity on non-scheduling backends"
-    (match identity with [ o ] -> phys_equal o opt | _ -> false)
+  | _ -> p "capture: traced store covers the whole chain" false
 
 (* --- 3. Structural, hand-built: scope-local replication, merge-back, Local promotion --- *)
 
@@ -205,7 +204,9 @@ let () =
   let opt =
     hand_built ~stmts:(def_stmts @ [ nest1; nest2 () ]) ~tns_on_device:[ a; m1; m2 ] ~tns_local:[]
   in
-  let segs = Sched.maybe_default_schedules ~backend_name:"metal" ~static_indices:[] opt in
+  let segs =
+    Sched.maybe_default_schedules ~facts:Ir.Backend_intf.metal_facts ~static_indices:[] opt
+  in
   p "replication: two segments" (List.length segs = 2);
   p_all "replication: both segments annotated" segs ~f:annotated;
   p "replication: consumer segment carries a replica of the local's definition"
@@ -223,7 +224,9 @@ let () =
       ~stmts:(def_stmts @ [ nest1; a_writer; nest2 ~read_a:true () ])
       ~tns_on_device:[ a; m1; m2 ] ~tns_local:[]
   in
-  let segs = Sched.maybe_default_schedules ~backend_name:"metal" ~static_indices:[] opt in
+  let segs =
+    Sched.maybe_default_schedules ~facts:Ir.Backend_intf.metal_facts ~static_indices:[] opt
+  in
   p "merge-back: two segments" (List.length segs = 2);
   (match segs with
   | [ seg0; seg1 ] ->
@@ -268,7 +271,9 @@ let () =
   let opt = hand_built ~stmts:[ w1; w2; w3 ] ~tns_on_device:[ a; m; m3 ] ~tns_local:[ d ] in
   let plc = opt.LL.optimize_ctx.LL.placements in
   p "promotion: scratch starts unmaterialized" (not (Tn.Placements.is_materialized_peek plc d));
-  let segs = Sched.maybe_default_schedules ~backend_name:"metal" ~static_indices:[] opt in
+  let segs =
+    Sched.maybe_default_schedules ~facts:Ir.Backend_intf.metal_facts ~static_indices:[] opt
+  in
   p "promotion: two segments, both annotated"
     (List.length segs = 2 && List.for_all segs ~f:annotated);
   p "promotion: stranded Local scratch promoted to On_device"
@@ -281,7 +286,7 @@ let () =
   let set tn idcs llsc = LL.Set { tn; idcs; llsc; debug = "" } in
   let segs_of ~stmts ~tns_on_device ~tns_local =
     let opt = hand_built ~stmts ~tns_on_device ~tns_local in
-    (opt, Sched.maybe_default_schedules ~backend_name:"metal" ~static_indices:[] opt)
+    (opt, Sched.maybe_default_schedules ~facts:Ir.Backend_intf.metal_facts ~static_indices:[] opt)
   in
   let grid_axes seg =
     List.count (LL.hardware_axes seg.LL.llc) ~f:(fun ax ->

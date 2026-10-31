@@ -3,6 +3,7 @@ open Ir
 
 module Missing (Config : sig
   val name : string
+  val backend_facts : Backend_intf.backend_facts
 end) =
 struct
   type buffer_ptr
@@ -89,6 +90,10 @@ struct
   let timing_identity _ = None
   let hardware_limits () = Backend_intf.no_hardware_limits
   let codegen_capabilities () = Backend_intf.no_codegen_capabilities
+
+  (* The real backend's facts, not a placeholder's: static, they answer without the library, and a
+     test on a box without the toolkit still models this backend's scheduling through them. *)
+  let backend_facts = Config.backend_facts
   let classify_failure _phase _exn = None
 
   let get_debug_info _device =

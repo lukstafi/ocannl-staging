@@ -35,7 +35,7 @@ let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~d
 (* The seeding gate pinned at threshold 32, as in [autotune_seeded_seed]: the ranked [auto] gate
    seeds nothing on this fixture on HIP, and every claim needs a plan that seeds. *)
 let () = Unix.putenv "OCANNL_GPU_DEFAULT_SKETCH_MIN_REDUCTION" "32"
-let seeds_here = Autotune.seeded_default_backend backend_name
+let seeds_here = Autotune.seeded_default_backend (Context.backend_facts_of_name backend_name)
 
 (* [autotune_seeded_seed]'s fixture: one dense layer with a bias, backpropagated, whose weight
    gradient (4096 rows) and forward product (96) both reach the seeding threshold. *)
@@ -113,8 +113,8 @@ let decision_digest = function
 let () =
   let opt = lowering () in
   let plan =
-    Autotune.seeded_plan ~min_reduction:1 ~backend:"cuda" ~limits ~accum_prec:Fn.id ~static_indices
-      opt
+    Autotune.seeded_plan ~min_reduction:1 ~facts:Ir.Backend_intf.cuda_facts ~limits
+      ~accum_prec:Fn.id ~static_indices opt
   in
   match plan with
   | Some ({ Autotune.sp_segments = Some (segmentation, decisions); _ } as plan) ->

@@ -35,7 +35,7 @@ open Verdict.Claims
 
 let backend = Context.backend_name (Context.auto ())
 let () = Stdio.eprintf "backend: %s (not part of the golden)\n%!" backend
-let seeded = Autotune.seeded_split_backend backend
+let seeded = Autotune.seeded_split_backend (Context.backend_facts_of_name backend)
 let tokens = 8192
 let vocab = 16
 let embed = 64

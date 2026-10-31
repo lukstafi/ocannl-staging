@@ -49,11 +49,12 @@ let nonzero name (a : float array) =
   a
 
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
-let on_cpu = Sched.backend_is_cpu backend_name
+let on_cpu = Ir.Backend_intf.renders_on_host_pool (Context.backend_facts_of_name backend_name)
 
 module Generated = Test_utils.Generated
 
 let () = Generated.init ~backend_name
+let facts = Context.backend_facts_of_name backend_name
 
 let named name (comp : Asgns.comp) : Asgns.comp =
   { comp with asgns = Asgns.Block_comment (name, comp.asgns) }
@@ -168,11 +169,11 @@ let () =
      if on_cpu then
        (* Two f32 tile arrays: the widening (the C backends' [bfloat16_to_single]) rides the packing
           copy; the register tiling sees f32 panels, bridging only the accumulator. *)
-       count_sub ("float " ^ Generated.node_ident "tile_") = 2
+       count_sub ("float " ^ Generated.node_ident ~facts "tile_") = 2
        && has "bfloat16_to_single"
        && has "narrow storage bridged: d:bfloat16."
        && has "OCANNL_VEC_WIDEN_BFLOAT16" && has "OCANNL_VEC_NARROW_BFLOAT16"
-     else count_sub ("float " ^ Generated.node_ident "tile_") = 2));
+     else count_sub ("float " ^ Generated.node_ident ~facts "tile_") = 2));
 
   (* === gh-ocannl-639: bf16 with partial sums that are NOT bf16-exact === *)
   (* Products are multiples of 15/128 with a nonzero mean (~0.23 drift per k step), so the running
@@ -244,7 +245,7 @@ let () =
    p "half hoisted pack converts on the host; only d crosses the narrow bridge"
      ((* One in-kernel tile (A~); the B~ panel is a constant-pool buffer packed (and widened) on the
          host, so no in-kernel copy of it exists. *)
-      count_sub ("float " ^ Generated.node_ident "tile_") = 1
+      count_sub ("float " ^ Generated.node_ident ~facts "tile_") = 1
      && rendered_as_scheduled ~what:"nrw_half_hoisted" census_h
      && ((not on_cpu)
         || has "narrow storage bridged: d:half."

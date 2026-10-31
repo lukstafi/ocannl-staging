@@ -137,7 +137,8 @@ let lowered_step ~name (loss : Tensor.t) =
   (ctx, Option.value_exn ~here:[%here] !captured)
 
 let census ~what ctx (opt : LL.optimized) =
-  let is_gpu = Sched.backend_is_gpu backend_name and is_cpu = Sched.backend_is_cpu backend_name in
+  let is_gpu = Ir.Backend_intf.binds_hardware_grid (Context.backend_facts_of_name backend_name)
+  and is_cpu = Ir.Backend_intf.renders_on_host_pool (Context.backend_facts_of_name backend_name) in
   let limits = Context.hardware_limits ctx in
   let capabilities = Context.codegen_capabilities ctx in
   let accum_prec = capabilities.Ir.Backend_intf.accum_prec in

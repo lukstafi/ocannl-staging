@@ -113,8 +113,9 @@ let seeded ~min_reduction = seeded_gated (Autotune.Min_reduction min_reduction)
 let () =
   let opt = Context.lowered_for_decisions (Context.auto ()) comp Ir.Indexing.Empty in
   let derive ?(limits = Ir.Backend_intf.no_hardware_limits) ?min_reduction ?seed_gate backend =
-    Autotune.seeded_plan ?min_reduction ?seed_gate ~backend ~limits ~accum_prec:Fn.id
-      ~static_indices:[] opt
+    Autotune.seeded_plan ?min_reduction ?seed_gate
+      ~facts:(Context.backend_facts_of_name backend)
+      ~limits ~accum_prec:Fn.id ~static_indices:[] opt
   in
   let rated =
     {

@@ -60,8 +60,8 @@ let named name (comp : Asgns.comp) : Asgns.comp =
   { comp with asgns = Asgns.Block_comment (name, comp.asgns) }
 
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
-let is_gpu = Sched.backend_is_gpu backend_name
-let is_cpu = Sched.backend_is_cpu backend_name
+let is_gpu = Ir.Backend_intf.binds_hardware_grid (Context.backend_facts_of_name backend_name)
+let is_cpu = Ir.Backend_intf.renders_on_host_pool (Context.backend_facts_of_name backend_name)
 
 (* The dune sandbox persists across runs: stale entries written by an older binary would break
    miss-then-hit assertions. *)
@@ -263,8 +263,9 @@ let () =
   (* Also pre-gh-579: no stored tensorized best, so a replay of it reports none. *)
   ignore
     (Cache_plant.plant ~saved:!prelude_saved ~segments:!saved_segments ~cache_dir
-       ~backend:backend_name ~timing_identity:(Context.timing_identity sctx)
-       ~limits:(Context.hardware_limits sctx)
+       ~backend:backend_name
+       ~facts:(Context.backend_facts_of_name backend_name)
+       ~timing_identity:(Context.timing_identity sctx) ~limits:(Context.hardware_limits sctx)
        ~capabilities:(Context.codegen_capabilities sctx)
        base_canon
       : SC.cache_io list);

@@ -52,7 +52,7 @@ let () =
     | Cal.Issue_fit _ -> false)
 
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
-let seeds_here = Autotune.seeded_default_backend backend_name
+let seeds_here = Autotune.seeded_default_backend (Context.backend_facts_of_name backend_name)
 
 let () =
   let ks = [ 64; 256 ] in

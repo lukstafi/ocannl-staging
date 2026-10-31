@@ -571,7 +571,7 @@ let numerics_tag () =
    layer is a property of the lowered code, so neither can reach {!digest}. What the numerics policy
    resolves to per backend is neither a knob nor the policy itself; it is derived from the backend's
    [codegen_capabilities] below (gh-ocannl-1117). *)
-let codegen_tag ~(backend : string) ~(limits : Backend_intf.hardware_limits)
+let codegen_tag ~(facts : Backend_intf.backend_facts) ~(limits : Backend_intf.hardware_limits)
     ~(capabilities : Backend_intf.codegen_capabilities) () =
   (* Every key is spelled out at its call site, as an explicit [arg_name] string literal, rather
      than passed through a helper: that literal IS how the consistency tests find a configuration
@@ -583,14 +583,14 @@ let codegen_tag ~(backend : string) ~(limits : Backend_intf.hardware_limits)
   let parts =
     [
       (* The whole limits record, not just the backend's [codegen_tag] field (Codex P1 on PR #337):
-         [backend] is the backend NAME, so without this two GPUs of one backend -- differing in
-         compute capability, mma formats, shared-memory capacity, thread limits -- share every key
-         while generating, rendering and timing candidates differently. The record is exactly the
-         device description schedule construction already consults, so hashing it keeps the key as
-         discriminating as the decisions it stands for, and a device's own [codegen_tag] rides along
-         in it. Its [Key]-class projection (gh-ocannl-1253): the fields only the untimed choosers
-         read change neither how a stored winner compiles nor how fast it runs, and the projection
-         renders exactly as the whole record did before they existed. *)
+         the key's [backend] component is the backend NAME, so without this two GPUs of one backend
+         -- differing in compute capability, mma formats, shared-memory capacity, thread limits --
+         share every key while generating, rendering and timing candidates differently. The record
+         is exactly the device description schedule construction already consults, so hashing it
+         keeps the key as discriminating as the decisions it stands for, and a device's own
+         [codegen_tag] rides along in it. Its [Key]-class projection (gh-ocannl-1253): the fields
+         only the untimed choosers read change neither how a stored winner compiles nor how fast it
+         runs, and the projection renders exactly as the whole record did before they existed. *)
       Sexp.to_string (Backend_intf.Limits_key.sexp_of_t (Backend_intf.limits_key limits));
       (* What the numerics policy RESOLVES to on this backend (gh-ocannl-1117): the backend's own
          compute and accumulator resolution functions, tabulated over every precision, and its mma
@@ -634,7 +634,7 @@ let codegen_tag ~(backend : string) ~(limits : Backend_intf.hardware_limits)
        default, while the gate switched off finds them again; a CPU backend, where the gate does
        nothing, keeps every key it had (Codex P1, P2 and P1 on staging#1113). *)
     @ (if
-         Schedule.backend_is_gpu backend
+         Backend_intf.binds_hardware_grid facts
          && Utils.get_global_flag ~default:true ~arg_name:"gpu_elide_covered_zeros"
        then [ "zero-elision" ]
        else [])
@@ -645,7 +645,7 @@ let codegen_tag ~(backend : string) ~(limits : Backend_intf.hardware_limits)
        and HIP), so every key that predates the gate, and every other backend's, is unchanged. *)
     @
     if
-      Schedule.backend_seeds_untuned_default backend
+      facts.Backend_intf.seeds_untuned_default
       && Utils.get_global_flag ~default:false ~arg_name:"gpu_default_seed_narrow_storage"
     then [ "seed-narrow-storage" ]
     else []
@@ -837,7 +837,8 @@ let key_components = [ "digest"; "backend"; "numerics"; "codegen"; "pool"; "devi
 (* The generation of the CUDA/HIP queued timing policy, which {!cache_key} spells into the [timing]
    component as [queued-v<N>] so an old winner cannot bypass its repaired calibration. The public
    setting and the entry description stay [queued]; only the filename identity changes, and only on
-   these backends, whose policy changed (cc and Metal keep the bare [queued]). Generation 1 is that
+   the backends whose policy changed -- those whose facts state [Queued_deep] (cc and Metal keep the
+   bare [queued]). Generation 1 is that
    bare spelling, from before the policy was versioned. A bump appends its own line below. *)
 (*= queued_objective_version history -- one line per value, oldest first; a bump appends one:
    1: gh-ocannl-755 -- the queued objective, spelled bare [queued] on every backend
@@ -851,19 +852,19 @@ let queued_objective_version = 3
    (gh-ocannl-596: a flip has to move the component its classification names, not merely the
    key). *)
 let cache_key_components ?objective ~timing_identity ~(limits : Backend_intf.hardware_limits)
-    ~capabilities canonical ~backend =
+    ~capabilities ~(facts : Backend_intf.backend_facts) canonical ~backend =
   Option.map timing_identity ~f:(fun identity ->
       let objective = match objective with Some o -> sanitize o | None -> objective_tag () in
       let objective =
-        match (String.lowercase backend, objective) with
-        | ("cuda" | "hip"), "queued" -> "queued-v" ^ Int.to_string queued_objective_version
-        | _ -> objective
+        match (facts.Backend_intf.queued_timing, objective) with
+        | Queued_deep, "queued" -> "queued-v" ^ Int.to_string queued_objective_version
+        | (Queued_deep | Queued_legacy), _ -> objective
       in
       let component = function
         | "digest" -> canonical.digest
         | "backend" -> sanitize backend
         | "numerics" -> "n" ^ numerics_tag ()
-        | "codegen" -> "c" ^ codegen_tag ~backend ~limits ~capabilities ()
+        | "codegen" -> "c" ^ codegen_tag ~facts ~limits ~capabilities ()
         (* The worker-pool signature (gh-ocannl-530): CPU crowns do not transfer across pools, so a
            pool change re-tunes instead of replaying. [None] (GPU backends) contributes nothing. *)
         | "pool" -> (
@@ -884,10 +885,10 @@ let cache_key_components ?objective ~timing_identity ~(limits : Backend_intf.har
       in
       List.map key_components ~f:(fun name -> (name, component name)))
 
-let cache_key ?objective ~timing_identity ~limits ~capabilities canonical ~backend =
+let cache_key ?objective ~timing_identity ~limits ~capabilities ~facts canonical ~backend =
   Option.map
-    (cache_key_components ?objective ~timing_identity ~limits ~capabilities canonical ~backend)
-    ~f:(fun components ->
+    (cache_key_components ?objective ~timing_identity ~limits ~capabilities ~facts canonical
+       ~backend) ~f:(fun components ->
       String.concat ~sep:"-"
         (List.filter_map components ~f:(fun (_, part) ->
              Option.some_if (not (String.is_empty part)) part)))
@@ -1248,8 +1249,8 @@ type placement_entry = {
 *)
 let placement_entry_version = 2
 
-let placement_key ?objective ~timing_identity ~limits ~capabilities canonical ~backend =
-  Option.map (cache_key ?objective ~timing_identity ~limits ~capabilities canonical ~backend)
+let placement_key ?objective ~timing_identity ~limits ~capabilities ~facts canonical ~backend =
+  Option.map (cache_key ?objective ~timing_identity ~limits ~capabilities ~facts canonical ~backend)
     ~f:(fun key -> "placements-" ^ key)
 
 let store_placements ~dir ~key entry = store_sexp ~dir ~key (sexp_of_placement_entry entry)

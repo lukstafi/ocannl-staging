@@ -52,7 +52,7 @@ let () = Utils.settings.output_debug_files_in_build_directory <- true
 open Verdict.Claims
 
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
-let on_cpu = Sched.backend_is_cpu backend_name
+let on_cpu = Ir.Backend_intf.renders_on_host_pool (Context.backend_facts_of_name backend_name)
 
 (* The splat legs' claims, open on a CPU backend and skipped by name elsewhere, each written once
    (gh-ocannl-1703). *)

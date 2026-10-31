@@ -24,10 +24,10 @@ open Ocannl.Operation.DSL_modules
 open Verdict.Claims
 
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
-let is_gpu = Ir.Schedule.backend_is_gpu backend_name
+let is_gpu = Ir.Backend_intf.binds_hardware_grid (Context.backend_facts_of_name backend_name)
 
 (* The backends with a seeded untuned plan, hence a seeded start: CUDA and HIP, not Metal. *)
-let seeds = Autotune.seeded_default_backend backend_name
+let seeds = Autotune.seeded_default_backend (Context.backend_facts_of_name backend_name)
 let staffed_key = "autotune_staffed_singles"
 
 (* gh-ocannl-1664: where the seeded plan has a segmentation of its own, the seeded singles replace

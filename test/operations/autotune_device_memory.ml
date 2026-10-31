@@ -333,7 +333,7 @@ let () =
   Stdio.eprintf "backend: %s (not part of the golden)\n%!" backend_name;
   (* Where the serial baseline links: not on a GPU backend, which refuses it before codegen
      (gh-ocannl-1340) -- the predicate [Autotune.tune]'s own [dispatchable] reads. *)
-  let on_gpu = Ir.Schedule.backend_is_gpu backend_name in
+  let on_gpu = Ir.Backend_intf.binds_hardware_grid (Context.backend_facts_of_name backend_name) in
   let baseline_links = not on_gpu in
   let ctx_ref = Context.run ctx_ref routine_ref in
   let expected = Context.get_values ctx_ref t2.Tensor.value in

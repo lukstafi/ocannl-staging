@@ -75,11 +75,12 @@ let nonzero name (a : float array) =
   a
 
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
-let on_cpu = Sched.backend_is_cpu backend_name
+let on_cpu = Ir.Backend_intf.renders_on_host_pool (Context.backend_facts_of_name backend_name)
 
 module Generated = Test_utils.Generated
 
 let () = Generated.init ~backend_name
+let facts = Context.backend_facts_of_name backend_name
 
 (* Which way each compiled [Tile_mma] went is the routine's mma census to say, never the emitted
    text ({!Ll_test.renderings}, gh-ocannl-1316): on the C backends the schedules below end in
@@ -188,8 +189,8 @@ let () =
    (* Two plain local tile arrays; on the C backends both operand pointers of the register tiling
       point into them (the accumulator streams from the real output). *)
    p "packed tiles feed the register-tiled micro-kernel"
-     (count_sub ("float " ^ Generated.node_ident "tile_") = 2
-     && (not (has ("threadgroup float " ^ Generated.node_ident "tile_")))
+     (count_sub ("float " ^ Generated.node_ident ~facts "tile_") = 2
+     && (not (has ("threadgroup float " ^ Generated.node_ident ~facts "tile_")))
      && (not (has "__shared__"))
      && rendered_as_scheduled ~what:"pmm_packed" census
      && ((not on_cpu)
@@ -329,7 +330,7 @@ let () =
       in
       List.exists
         (String.substr_index_all src ~may_overlap:false
-           ~pattern:("float " ^ Generated.node_ident "tile_"))
+           ~pattern:("float " ^ Generated.node_ident ~facts "tile_"))
         ~f:(fun pos -> pos > par_pos)
     else true)
 
@@ -399,7 +400,7 @@ let () =
     (rendered_as_scheduled ~what:"pmm_gridpack" (census_of routine)
     && ((not on_cpu)
        || has_parallel_construct src && has "packed_gb"
-          && not (has ("float " ^ Generated.node_ident "tile_"))))
+          && not (has ("float " ^ Generated.node_ident ~facts "tile_"))))
 
 (* === Mixed grid-outermost composition (autotune's [sk_pack_rest] seeds, gh-ocannl-473): the
    hoisted-pack shape with the non-hoistable A operand packed in-kernel — Grid row blocks stay
@@ -489,7 +490,7 @@ let () =
       (* Exactly one in-kernel tile (A~), declared per chunk inside the parallel construct. *)
       let tile_positions =
         String.substr_index_all src ~may_overlap:false
-          ~pattern:("float " ^ Generated.node_ident "tile_")
+          ~pattern:("float " ^ Generated.node_ident ~facts "tile_")
       in
       let par_pos =
         Option.value_exn

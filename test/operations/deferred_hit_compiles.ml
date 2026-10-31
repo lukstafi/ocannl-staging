@@ -211,7 +211,9 @@ let () =
      are not only the base compile's, so the claims above are not vacuous for want of any baseline
      compile. A GPU backend never dispatches the serial form (gh-ocannl-532), so it compiles
      none. *)
-  let dispatched = not (Ir.Schedule.backend_is_gpu (Context.backend_name (Context.auto ()))) in
+  let dispatched =
+    not (Ir.Backend_intf.binds_hardware_grid (Context.backend_facts (Context.auto ())))
+  in
   p
     "cold: each search compiled its serial baseline exactly where it is dispatched (CPU), after \
      the base compile"

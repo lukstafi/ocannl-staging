@@ -2738,31 +2738,33 @@ val seeded_params_judged :
 (** {!seeded_params} with the refusing gate named (gh-ocannl-1407): [Ok] exactly where
     {!seeded_params} is [Some]. *)
 
-val seeded_default_backend : string -> bool
-(** Whether {!seeded_default} seeds on this backend ({!Context.backend_name}): CUDA and HIP. *)
+val seeded_default_backend : Ir.Backend_intf.backend_facts -> bool
+(** Whether {!seeded_default} seeds on a backend with these facts: its [seeds_untuned_default] (CUDA
+    and HIP). *)
 
-val seeded_split_backend : string -> bool
+val seeded_split_backend : Ir.Backend_intf.backend_facts -> bool
 (** Whether {!seeded_default} splits long reductions on this backend: wherever it seeds, CUDA and
     HIP (see {!seeded_split_sites}). A test states what each backend promises through these, never a
     restated list. *)
 
-val search_shaping_key_read : backend:string -> string -> bool
-(** Whether a search on [backend] can read the [Utils.Search_shaping] configuration key [key]
-    (gh-ocannl-1331): the seeded plan's [gpu_default_*] keys where {!seeded_default_backend} (and,
-    for the split threshold, {!seeded_split_backend}) holds, [autotune_register_tile_rm_twin] where
-    [Ir.Schedule.backend_is_cpu] does (only the CPU register-tiled rendering reads it), the default
-    pipeline's keys per {!Ir.Schedule.search_shaping_key_read}, and every other key everywhere. A
-    key a backend's search cannot read keys nothing in its trajectory identity
+val search_shaping_key_read : facts:Ir.Backend_intf.backend_facts -> string -> bool
+(** Whether a search on a backend with [facts] can read the [Utils.Search_shaping] configuration key
+    [key] (gh-ocannl-1331): the seeded plan's [gpu_default_*] keys where {!seeded_default_backend}
+    (and, for the split threshold, {!seeded_split_backend}) holds, [autotune_register_tile_rm_twin]
+    where {!Ir.Backend_intf.renders_on_host_pool} does (only the CPU register-tiled rendering reads
+    it), the default pipeline's keys per {!Ir.Schedule.search_shaping_key_read}, and every other key
+    everywhere. A key a backend's search cannot read keys nothing in its trajectory identity
     ({!search_shaping_identity}). *)
 
-val search_shaping_identity : backend:string -> limits:Ir.Backend_intf.hardware_limits -> string
-(** The [Search_shaping] part of {!tune}'s search-trajectory identity on [backend] at [limits]:
-    [Utils.config_class_fingerprint] of the class, over the keys {!search_shaping_key_read} says the
-    backend reads, with defaults resolved per device ({!Ir.Schedule.resolve_search_shaping_value}).
-*)
+val search_shaping_identity :
+  facts:Ir.Backend_intf.backend_facts -> limits:Ir.Backend_intf.hardware_limits -> string
+(** The [Search_shaping] part of {!tune}'s search-trajectory identity on a backend with [facts] at
+    [limits]: [Utils.config_class_fingerprint] of the class, over the keys
+    {!search_shaping_key_read} says the backend reads, with defaults resolved per device
+    ({!Ir.Schedule.resolve_search_shaping_value}). *)
 
 val seeded_split_sites :
-  backend:string ->
+  facts:Ir.Backend_intf.backend_facts ->
   min_serial:int ->
   static_indices:Ir.Indexing.static_symbol list ->
   Ir.Low_level.optimized ->
@@ -2819,7 +2821,9 @@ val seeded_default_gate : limits:Ir.Backend_intf.hardware_limits -> seed_gate
     [Utils.Invalid_config_value] naming the key on anything else (gh-ocannl-1332). *)
 
 val model_seeding :
-  backend:string -> limits:Ir.Backend_intf.hardware_limits -> (seed_gate * int * bool * bool) option
+  facts:Ir.Backend_intf.backend_facts ->
+  limits:Ir.Backend_intf.hardware_limits ->
+  (seed_gate * int * bool * bool) option
 (** Whether {!model_default} starts from the seeded untuned plan on this backend under the current
     configuration (CUDA and HIP with the seeding settings resolving): its gate, split threshold,
     reduction-sink flag and narrow-storage admission (gh-ocannl-1405), as {!seeded_default} resolves
@@ -2876,7 +2880,7 @@ val seeded_plan :
   ?reduction_sink:bool ->
   ?seed_narrow:bool ->
   ?capabilities:Ir.Backend_intf.codegen_capabilities ->
-  backend:string ->
+  facts:Ir.Backend_intf.backend_facts ->
   limits:Ir.Backend_intf.hardware_limits ->
   accum_prec:(Ir.Ops.prec -> Ir.Ops.prec) ->
   static_indices:Ir.Indexing.static_symbol list ->
@@ -3228,10 +3232,11 @@ val queue_depth_projection_factor : int
     remaining probes to walk toward it by this factor (gh-ocannl-1144). Exposed so a test states the
     bound against the policy's own factor. *)
 
-val queue_depth_cap_for_backend : string -> int
-(** Queue-memory bound selected by canonical backend name: 2048 for CUDA/HIP, and the historical 200
-    for cc/Metal. Exposed with the neighboring pure calibration seams so the backend scoping of
-    gh-ocannl-892 is pinned without running a full search. *)
+val queue_depth_cap_for_backend : Ir.Backend_intf.backend_facts -> int
+(** Queue-memory bound selected by the backend's [queued_timing] fact: 2048 under [Queued_deep]
+    (CUDA/HIP), and the historical 200 under [Queued_legacy] (cc/Metal). Exposed with the
+    neighboring pure calibration seams so the backend scoping of gh-ocannl-892 is pinned without
+    running a full search. *)
 
 val queued_batch_depth : timing_result -> int
 (** How many launches {!Queued} puts in one batch, given an estimate of what one launch plus one
@@ -3378,12 +3383,12 @@ val hopeless_window :
     host-load signal ({!host_load_reading}) over it shows a co-tenant. *)
 type dispersion_policy = Refuse_dispersed | Attribute_dispersion
 
-val dispersion_policy_for_backend : string -> dispersion_policy
-(** [Attribute_dispersion] on a CPU backend ({!Ir.Schedule.backend_is_cpu}), [Refuse_dispersed]
-    elsewhere: host CPU accounting cannot see a device co-tenant, and Metal's queued retry is for a
-    transient device-scheduler burst. On a quiet many-core host a many-thread cc routine's own
-    run-to-run spread meets the 2x rule (step p90 1.7-4.9x p10 on a 32-thread Zen 5,
-    gh-ocannl-1482), and refusing it made every search there uncacheable. *)
+val dispersion_policy_for_backend : Ir.Backend_intf.backend_facts -> dispersion_policy
+(** [Attribute_dispersion] where the backend's facts state [host_load_attributable] (the CPU
+    backends), [Refuse_dispersed] elsewhere: host CPU accounting cannot see a device co-tenant, and
+    Metal's queued retry is for a transient device-scheduler burst. On a quiet many-core host a
+    many-thread cc routine's own run-to-run spread meets the 2x rule (step p90 1.7-4.9x p10 on a
+    32-thread Zen 5, gh-ocannl-1482), and refusing it made every search there uncacheable. *)
 
 val attribute_dispersion : Utils.Host_load.verdict -> timing_result -> timing_result
 (** Pure. A window that is [dispersed] and [contended] is admitted ([contended] cleared, [dispersed]
@@ -3746,8 +3751,9 @@ val calibrate_and_time_with_retry_observer :
     never) cuts as {!time_routine}'s does. The original helper remains a no-op-observer, phase-less
     wrapper for source compatibility. *)
 
-val retry_contended_window_for_backend : string -> bool
-(** The backend whose contended queued windows get one immediate retry: Metal only. *)
+val retry_contended_window_for_backend : Ir.Backend_intf.backend_facts -> bool
+(** Whether a backend's contended queued windows get one immediate retry: its
+    [retries_contended_window] fact (Metal only). *)
 
 module Seam : sig
   type 'a t
@@ -4237,8 +4243,8 @@ val staffed_singles_setting : unit -> bool
     its recombination composites inside the sweep, so a test counting the bare search's extra
     composite window reads this rather than restating the default. *)
 
-val default_seed_label : backend_name:string -> string option
-(** The label {!on_candidate_measured} receives for the candidate a search on [backend_name]
+val default_seed_label : facts:Ir.Backend_intf.backend_facts -> string option
+(** The label {!on_candidate_measured} receives for the candidate a search on a backend with [facts]
     attributes as the untuned default — the one whose refused window sets [report.default_refused]
     and whose time is [report.default_ms]. [Some "baseline"] with automatic scheduling inactive,
     where the default is the serial form — [None] there on a GPU backend, which never dispatches it

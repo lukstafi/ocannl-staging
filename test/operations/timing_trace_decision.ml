@@ -29,7 +29,7 @@ let call ~fixed ~marginal =
           ~on_call:(fun c -> depth := Some c.Autotune.decision.depth)
           ~phase:None ~retry_contended:false ~dispersion:Autotune.Refuse_dispersed
           ~timing:Autotune.Queued ~repeats:3
-          ~queue_depth_cap:(Autotune.queue_depth_cap_for_backend "hip")
+          ~queue_depth_cap:(Autotune.queue_depth_cap_for_backend Ir.Backend_intf.hip_facts)
           ~batch:(fun d -> if d = 1 then 9.75 else fixed +. (marginal *. Float.of_int d))
       in
       (reading, !depth, !decisions))

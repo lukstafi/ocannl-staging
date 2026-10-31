@@ -44,8 +44,8 @@ open Verdict.Claims
 let approx a b = Float.(abs (a - b) < 1e-3)
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 let () = Stdio.eprintf "hardware_warp_shuffle: backend=%s (not part of the golden)\n%!" backend_name
-let on_gpu = Ir.Schedule.backend_is_gpu backend_name
-let on_cpu = Ir.Schedule.backend_is_cpu backend_name
+let on_gpu = Ir.Backend_intf.binds_hardware_grid (Context.backend_facts_of_name backend_name)
+let on_cpu = Ir.Backend_intf.renders_on_host_pool (Context.backend_facts_of_name backend_name)
 let codegen_capabilities = Context.codegen_capabilities (Context.auto ())
 let single = Ir.Ops.single
 let bf16 = Ir.Ops.bfloat16

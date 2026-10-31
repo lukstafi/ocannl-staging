@@ -1145,6 +1145,8 @@ end = struct
       | _ -> ("(" ^ typ_of_prec to_ ^ ")(", ")")
   end
 
+  let backend_facts = Backend_intf.hip_facts
+
   let codegen_capabilities () =
     let module Config = Hip_syntax_config (struct
       let procs = [||]

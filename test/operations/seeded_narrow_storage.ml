@@ -188,7 +188,7 @@ let seeded ?seed_narrow () =
    accumulator resolution widens bf16. *)
 let narrow_here =
   let ctx = Context.auto () in
-  Autotune.seeded_default_backend backend_name
+  Autotune.seeded_default_backend (Context.backend_facts_of_name backend_name)
   && not
        (Ir.Ops.equal_prec ((Context.codegen_capabilities ctx).Ir.Backend_intf.accum_prec bf16) bf16)
 
@@ -208,7 +208,7 @@ let () =
   let opt = Context.lowered_for_decisions (Context.auto ()) comp Ir.Indexing.Empty in
   let decisions ?seed_narrow accum_prec =
     match
-      Autotune.seeded_plan ~min_reduction:128 ?seed_narrow ~backend:"cuda"
+      Autotune.seeded_plan ~min_reduction:128 ?seed_narrow ~facts:Ir.Backend_intf.cuda_facts
         ~limits:Ir.Backend_intf.no_hardware_limits ~accum_prec ~static_indices:[] opt
     with
     | Some { Autotune.sp_segments = Some (_, ds); _ } ->

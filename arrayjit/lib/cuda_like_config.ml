@@ -8,6 +8,7 @@ let cuda_fast_math () = Utils.get_global_flag ~default:true ~arg_name:"cuda_fast
 
 module Cuda = struct
   let name = "CUDA"
+  let backend_facts = Backend_intf.cuda_facts
   let error_prefix = "Cuda_backend"
   let bf16_typ = "__nv_bfloat16"
   let fp8_typ = "__nv_fp8_e5m2"
@@ -37,6 +38,7 @@ end
 
 module Hip = struct
   let name = "HIP"
+  let backend_facts = Backend_intf.hip_facts
   let error_prefix = "Hip_backend"
   let bf16_typ = "__hip_bfloat16"
   let fp8_typ = "__hip_fp8_e5m2"
@@ -78,6 +80,7 @@ end
     fixes to narrow arithmetic reach both consumers. *)
 module Make (Dialect : sig
   val name : string
+  val backend_facts : Backend_intf.backend_facts
   val error_prefix : string
   val bf16_typ : string
   val fp8_typ : string
@@ -123,7 +126,7 @@ struct
 
   (* gh-ocannl-1338: the vendor headers' global types and macros ([half2], [float4], [CUDARTAPI],
      [HIPRT_INF_FP16]) cannot be shadowed by, or expand into, a node's identifier. *)
-  let node_ident_prefix = C_syntax.node_ident_prefix_for_backend Dialect.name
+  let node_ident_prefix = Dialect.backend_facts.Backend_intf.node_ident_prefix
   let fp8_from_float doc = PPrint.(group (string Dialect.fp8_from_float_fn ^^ parens doc))
   let main_kernel_prefix = "extern \"C\" __global__"
 

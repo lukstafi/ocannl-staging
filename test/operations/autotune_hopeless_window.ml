@@ -82,8 +82,8 @@ let call ?hopeless_against ~timing ~cap ~per_launch_ms () =
   in
   (outcome, List.rev !batches)
 
-let cc_cap = Autotune.queue_depth_cap_for_backend "cc"
-let hip_cap = Autotune.queue_depth_cap_for_backend "hip"
+let cc_cap = Autotune.queue_depth_cap_for_backend Ir.Backend_intf.cc_facts
+let hip_cap = Autotune.queue_depth_cap_for_backend Ir.Backend_intf.hip_facts
 
 let () =
   Stdio.printf "== one timing call ==\n";
@@ -167,7 +167,7 @@ let cache_dir = "autotune_cache_hopeless_window"
 let search ~rounds comp =
   let report = ref None in
   let attempts = ref [] in
-  let floor_label = Autotune.default_seed_label ~backend_name:"cc" in
+  let floor_label = Autotune.default_seed_label ~facts:Ir.Backend_intf.cc_facts in
   let is_floor label =
     String.equal label "baseline"
     || Option.exists floor_label ~f:(String.equal label)

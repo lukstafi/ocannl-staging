@@ -49,7 +49,7 @@ let accum_prec = Ll_test.backend_accum_prec
 open Verdict.Claims
 
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
-let on_gpu = Sched.backend_is_gpu backend_name
+let on_gpu = Ir.Backend_intf.binds_hardware_grid (Context.backend_facts_of_name backend_name)
 
 (* A hand-built leg's seeded value of [tn] at [idcs]. *)
 let seeded seed tn ~dims idcs =
@@ -258,7 +258,8 @@ let () =
   let want = run "cs_plain_run" o (fun o -> [ o ]) in
   let got =
     run "cs_split_run" os
-      (Sched.maybe_default_schedules ~backend_name
+      (Sched.maybe_default_schedules
+         ~facts:(Context.backend_facts_of_name backend_name)
          ~limits:(Context.hardware_limits (Context.auto ()))
          ~static_indices:[])
   in
@@ -599,7 +600,8 @@ let () =
   let want = run "cks_plain_run" o (fun o -> [ o ]) in
   let got =
     run "cks_split_run" os
-      (Sched.maybe_default_schedules ~backend_name
+      (Sched.maybe_default_schedules
+         ~facts:(Context.backend_facts_of_name backend_name)
          ~limits:(Context.hardware_limits (Context.auto ()))
          ~static_indices:[])
   in

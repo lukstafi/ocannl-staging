@@ -32,7 +32,7 @@ open Verdict.Claims
 let () = Fissioned_chain.small_menu ()
 let budget_key = "autotune_budget_seconds"
 let backend_name = Context.backend_name (Context.cpu ())
-let default_label = Autotune.default_seed_label ~backend_name
+let default_label = Autotune.default_seed_label ~facts:(Context.backend_facts_of_name backend_name)
 
 let is_floor label =
   String.equal label "baseline" || Option.exists default_label ~f:(String.equal label)

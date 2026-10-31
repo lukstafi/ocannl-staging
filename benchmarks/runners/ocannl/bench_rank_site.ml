@@ -143,7 +143,7 @@ let () =
       let limits = Context.hardware_limits ctx in
       let caps = Context.codegen_capabilities ctx in
       match
-        Autotune.seeded_plan ~capabilities:caps ~backend:(Context.backend_name ctx) ~limits
+        Autotune.seeded_plan ~capabilities:caps ~facts:(Context.backend_facts ctx) ~limits
           ~accum_prec:caps.Ir.Backend_intf.accum_prec ~static_indices:[]
           (Context.lowered_for_decisions ~name:(name ^ "_pick") ctx comp Ir.Indexing.Empty)
       with

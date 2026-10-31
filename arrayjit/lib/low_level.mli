@@ -82,8 +82,8 @@ type t =
   | Staged_compilation of (unit -> PPrint.document)
       (** Source text the C-family renderers emit verbatim. Its accesses are invisible to every
           analysis, and nothing renames inside it: a node it references must be spelled as the
-          dialect emits the node's identifier, its code name behind
-          [C_syntax.node_ident_prefix_for_backend] ([t_<name>] on Metal, CUDA and HIP,
+          dialect emits the node's identifier, its code name behind the backend's
+          [Backend_intf.backend_facts.node_ident_prefix] ([t_<name>] on Metal, CUDA and HIP,
           gh-ocannl-1338). *)
   | Seq of t * t
   | For_loop of { index : Indexing.symbol; from_ : int; to_ : int; body : t; axis : axis_type }

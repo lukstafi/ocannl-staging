@@ -54,7 +54,7 @@ let side = 16
 let chans = 8
 let classes = 4
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
-let on_cpu = Ir.Schedule.backend_is_cpu backend_name
+let on_cpu = Ir.Backend_intf.renders_on_host_pool (Context.backend_facts_of_name backend_name)
 
 (* Deterministic, RNG-free, and varying with every axis of the images; multiples of 1/8, exact in
    tf32, so that with the 1/8 kernel every conv sum is exact. *)

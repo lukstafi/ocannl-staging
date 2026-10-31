@@ -41,29 +41,29 @@ let entry ?(numerics = SC.numerics_tag ()) ?codegen ?objective ?(saved = []) ?se
     finals = None;
   }
 
-(** [key ~backend ~timing_identity ~limits ~capabilities canon] is the key [Autotune.tune] looks
-    [canon]'s routine up under, from the compiling context's timing identity, limits and codegen
-    capabilities; [None] without a concrete timing identity. *)
-let key ~backend ~timing_identity ~limits ~capabilities canon =
-  SC.cache_key ~timing_identity ~limits ~capabilities canon ~backend
+(** [key ~backend ~facts ~timing_identity ~limits ~capabilities canon] is the key [Autotune.tune]
+    looks [canon]'s routine up under, from the compiling context's timing identity, limits and
+    codegen capabilities; [None] without a concrete timing identity. *)
+let key ~backend ~facts ~timing_identity ~limits ~capabilities canon =
+  SC.cache_key ~timing_identity ~limits ~capabilities ~facts canon ~backend
 
-(** [plant ~cache_dir ~backend ~timing_identity ~limits ~capabilities canon] stores, under {!key},
-    an entry for [canon]'s routine self-described the way [Autotune.tune] describes one it stores
-    (the codegen tag and timing objective of this process, [canon]'s digest), carrying [saved] and
-    [segments]. Returns the store's cache I/O ({!SC.recording_cache_io}): what a claim resting on
-    the planted entry is waived by ({!unless_refused}). Without a concrete timing identity the key
-    is [None], nothing is stored, and the record is empty. *)
-let plant ?saved ?segments ?best_ms ?baseline_ms ~cache_dir ~backend ~timing_identity ~limits
+(** [plant ~cache_dir ~backend ~facts ~timing_identity ~limits ~capabilities canon] stores, under
+    {!key}, an entry for [canon]'s routine self-described the way [Autotune.tune] describes one it
+    stores (the codegen tag and timing objective of this process, [canon]'s digest), carrying
+    [saved] and [segments]. Returns the store's cache I/O ({!SC.recording_cache_io}): what a claim
+    resting on the planted entry is waived by ({!unless_refused}). Without a concrete timing
+    identity the key is [None], nothing is stored, and the record is empty. *)
+let plant ?saved ?segments ?best_ms ?baseline_ms ~cache_dir ~backend ~facts ~timing_identity ~limits
     ~capabilities canon =
   let stored =
     entry ?saved ?segments ?best_ms ?baseline_ms ~backend
-      ~codegen:(SC.codegen_tag ~backend ~limits ~capabilities ())
+      ~codegen:(SC.codegen_tag ~facts ~limits ~capabilities ())
       ~objective:(SC.objective_tag ()) ~source_digest:(SC.digest canon) ()
   in
   let (), io =
     SC.recording_cache_io (fun () ->
         SC.store ~dir:cache_dir
-          ~key:(key ~backend ~timing_identity ~limits ~capabilities canon)
+          ~key:(key ~backend ~facts ~timing_identity ~limits ~capabilities canon)
           stored)
   in
   io

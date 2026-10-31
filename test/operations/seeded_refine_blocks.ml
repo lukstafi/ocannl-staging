@@ -172,7 +172,7 @@ let () =
   let opt = Context.lowered_for_decisions (Context.auto ()) comp Ir.Indexing.Empty in
   let census ~min_reduction =
     Ll_test.seeded_census
-      (Autotune.seeded_plan ~min_reduction ~backend:"cuda"
+      (Autotune.seeded_plan ~min_reduction ~facts:Ir.Backend_intf.cuda_facts
          ~limits:Ir.Backend_intf.no_hardware_limits ~accum_prec:Fn.id ~static_indices:[] opt)
   in
   p

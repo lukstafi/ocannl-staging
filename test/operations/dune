@@ -4105,16 +4105,35 @@
  ; constant: it opens no device, compiles nothing, and its output cannot vary with the backend.
  (name marker_backend_vocabulary)
  (package neural_nets_lib)
- (deps ocannl_config)
+ ; The compiler's sources, for the backend-name constant ratchet (gh-ocannl-1723).
+ (deps
+  ocannl_config
+  (glob_files ../../arrayjit/lib/*.ml)
+  (glob_files ../../lib/*.ml)
+  (glob_files ../../tensor/*.ml))
  (modules marker_backend_vocabulary)
  (libraries
   base
   stdio
+  ppxlib
   arrayjit.ir
   arrayjit.context
   test_utils
   config_reads
   arrayjit.verdict))
+
+; gh-ocannl-1723: the running backend's capability facts agree with its live context and its device
+; limits, and each fact, varied alone, moves the decision that reads it. The device-free half of the
+; facts' relationships is `marker_backend_vocabulary`'s.
+
+(test
+ (name backend_facts)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules backend_facts)
+ (libraries base ocannl stdio arrayjit.verdict))
 
 (executable
  (name digest_completeness)

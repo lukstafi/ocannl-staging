@@ -1018,7 +1018,7 @@ let print_census ?promote_locals ~backend ~limits ~static_indices opt =
     else
       Some (Printf.sprintf "loops[%s] w:%s" loops_s (String.concat ~sep:" " (List.map ws ~f:tn_s)))
   in
-  let gpu = Sched.backend_is_gpu backend in
+  let gpu = Ir.Backend_intf.binds_hardware_grid (Context.backend_facts_of_name backend) in
   let promote_locals = Option.value promote_locals ~default:gpu in
   let preset o = if gpu then Sched.default_gpu ~limits o else Sched.default_cpu o in
   let zero_sched tns = if gpu then Sched.zero_expansion ~limits tns else [] in
@@ -1191,7 +1191,7 @@ let time_segments ?promote_locals ?(repeats = 20) ~backend ~limits ~static_indic
     ~bindings ~bind opt =
   let module LL = Ir.Low_level in
   let module Sched = Ir.Schedule in
-  let gpu = Sched.backend_is_gpu backend in
+  let gpu = Ir.Backend_intf.binds_hardware_grid (Context.backend_facts_of_name backend) in
   let promote_locals = Option.value promote_locals ~default:gpu in
   let preset o = if gpu then Sched.default_gpu ~limits o else Sched.default_cpu o in
   let zero_sched tns = if gpu then Sched.zero_expansion ~limits tns else [] in
@@ -1509,7 +1509,7 @@ let dominant_kernel ?(repeats = 20) ?budget_s ?(time_kernel = fun ~i:_ timing ->
   in
   let limits = Context.hardware_limits ctx in
   let backend = Context.backend_name ctx in
-  let gpu = Ir.Schedule.backend_is_gpu backend in
+  let gpu = Ir.Backend_intf.binds_hardware_grid (Context.backend_facts_of_name backend) in
   let flops_leg, bandwidth_leg = Autotune.envelope_legs ~limits in
   let leg_source key = function
     | v, `Backend -> (v, Printf.sprintf "%s class constant" backend)

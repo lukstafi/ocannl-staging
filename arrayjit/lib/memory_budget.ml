@@ -60,7 +60,7 @@ let log_memory_budget () = Utils.get_global_flag ~default:false ~arg_name:"log_m
 let analyze_footprint ?name ~(inline : Tn.t list) ~(footprint : Tn.t list) ctx comp bindings :
     LL.footprint * LL.flip_candidate list =
   let lowered = Context.lowered_for_decisions ?name ~inline ~footprint ctx comp bindings in
-  ( Backends.score_footprint ~backend_name:(Context.backend_name ctx)
+  ( Backends.score_footprint ~facts:(Context.backend_facts ctx)
       ~limits:(Context.hardware_limits ctx) ~static_indices:(Idx.bound_symbols bindings) lowered,
     lowered.LL.flip_candidates )
 

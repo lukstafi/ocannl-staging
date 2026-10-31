@@ -105,7 +105,7 @@ let bench_site ~failed ~unstated ~tune ((name, b, h, w, ic, oc) as site) =
   let ctx = Context.auto () in
   let backend = Context.backend_name ctx in
   let limits = Context.hardware_limits ctx in
-  let is_gpu = Ir.Schedule.backend_is_gpu backend in
+  let is_gpu = Ir.Backend_intf.binds_hardware_grid (Context.backend_facts_of_name backend) in
   (* The classifier's view, on a lowering the census compile captures and discards. *)
   let census =
     let _, comp = build site in

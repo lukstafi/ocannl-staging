@@ -58,7 +58,7 @@ let bench_site ~failed (name, b, m, n, k) =
   let ctx = Context.auto () in
   let backend = Context.backend_name ctx in
   let limits = Context.hardware_limits ctx in
-  let is_gpu = Ir.Schedule.backend_is_gpu backend in
+  let is_gpu = Ir.Backend_intf.binds_hardware_grid (Context.backend_facts_of_name backend) in
   let captured = ref None in
   let _ =
     Context.compile_outcome

@@ -105,8 +105,8 @@ let () =
         ((not (is_p0 (seeded ~capabilities:standin (Some (est - 1)))))
         && is_p0 (seeded (Some (est - 1))));
       let plan ?capabilities cap =
-        Autotune.seeded_plan ~min_reduction:1 ?capabilities ~backend:"cuda" ~limits:(limits_at cap)
-          ~accum_prec ~static_indices:[] (scratch lowered)
+        Autotune.seeded_plan ~min_reduction:1 ?capabilities ~facts:Ir.Backend_intf.cuda_facts
+          ~limits:(limits_at cap) ~accum_prec ~static_indices:[] (scratch lowered)
       in
       (* [None] where no plan is derived, so a refutation claim cannot pass vacuously. *)
       let plan_seeds ?capabilities cap =

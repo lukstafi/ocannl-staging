@@ -55,16 +55,19 @@ let timing_identity =
 type scope =
   | Every_backend
   | Cpu
-      (** the cc backend's own tag ([Schedulers.cpu_mma_limits]): not [Schedule.backend_is_gpu] *)
-  | Gpu  (** [Schedule.backend_is_gpu], which [Schedule_cache.codegen_tag] gates on *)
+      (** the cc backend's own tag ([Schedulers.cpu_mma_limits]): the backends whose facts render on
+          the host pool *)
+  | Gpu
+      (** [Backend_intf.binds_hardware_grid] of the backend's facts, which
+          [Schedule_cache.codegen_tag] gates on *)
   | Cuda_hip  (** the CUDA and HIP backends' own tags *)
   | Cuda  (** the CUDA backend's own tag *)
 
 let in_scope scope backend =
   match scope with
   | Every_backend -> true
-  | Cpu -> not (Ir.Schedule.backend_is_gpu backend)
-  | Gpu -> Ir.Schedule.backend_is_gpu backend
+  | Cpu -> Ir.Backend_intf.renders_on_host_pool (Context.backend_facts_of_name backend)
+  | Gpu -> Ir.Backend_intf.binds_hardware_grid (Context.backend_facts_of_name backend)
   | Cuda_hip -> List.mem [ "cuda"; "hip" ] (String.lowercase backend) ~equal:String.equal
   | Cuda -> String.equal (String.lowercase backend) "cuda"
 
@@ -189,10 +192,10 @@ let unflippable =
        the codegen tag hashes that resolved value -- varied in child processes" );
   ]
 
-(* What the backend name reaches besides its own component: the codegen tag gates on
-   [Schedule.backend_is_gpu] of it, and the timing component spells the CUDA/HIP queued policy's
-   generation from it. *)
-let backend_derived_components = [ "codegen"; "timing" ]
+(* What the backend reaches besides its own name component -- through its facts, never its name
+   (gh-ocannl-1723): the codegen tag gates on [binds_hardware_grid] and [seeds_untuned_default], and
+   the timing component spells the [Queued_deep] policy's generation. *)
+let facts_derived_components = [ "codegen"; "timing" ]
 
 (* Run as a child with this flag, the executable prints its cache-key components (and, on a CPU
    backend, the pool width the cc backend decided) instead of sweeping. *)
@@ -375,9 +378,10 @@ let with_stated key value resolver f =
                f ())
              ~finally:restore)
 
-let components_of ctx canon ~backend =
+let components_of ?(facts_of = Context.backend_facts_of_name) ctx canon ~backend =
   Option.value_exn ~here:[%here]
-    (SC.cache_key_components ~timing_identity ~limits:(Context.hardware_limits ctx)
+    (SC.cache_key_components ~facts:(facts_of backend) ~timing_identity
+       ~limits:(Context.hardware_limits ctx)
        ~capabilities:(Context.codegen_capabilities ctx)
        canon ~backend)
 
@@ -391,14 +395,15 @@ let () =
     let canon = canonical_of ~lower_only:true ctx in
     List.iter (components_of ctx canon ~backend) ~f:(fun (name, value) ->
         printf "component\t%s\t%s\n" name value);
-    if not (Ir.Schedule.backend_is_gpu backend) then
+    if not (Ir.Backend_intf.binds_hardware_grid (Context.backend_facts_of_name backend)) then
       printf "pool-tag\t%s\n" (Context.Cc_backend.pool_tag ());
     (* The codegen tag as it would read without the pool decision in the limits record: what must
        not move across pool classes, if the decision is all a pool class changes. *)
-    if not (Ir.Schedule.backend_is_gpu backend) then
+    if not (Ir.Backend_intf.binds_hardware_grid (Context.backend_facts_of_name backend)) then
       printf "pool-width\t%d\n" (Context.Cc_backend.effective_pool_width ());
     printf "codegen-sans-pool\t%s\n"
-      (SC.codegen_tag ~backend
+      (SC.codegen_tag
+         ~facts:(Context.backend_facts_of_name backend)
          ~limits:{ (Context.hardware_limits ctx) with Ir.Backend_intf.worker_pool_tag = None }
          ~capabilities:(Context.codegen_capabilities ctx)
          ());
@@ -616,14 +621,31 @@ let () =
       let found = Set.mem read key in
       if found then eprintf "%s is unflippable, yet read per lookup -- flip it instead\n" key;
       found);
-  (* 4b. Varying what no in-process flip reaches. The backend name, through the argument: it must
-     move its own component, and nothing it does not reach. *)
+  (* 4b. Varying what no in-process flip reaches. The backend name, through the argument, with the
+     backend's facts held: it must move its own component, and nothing else -- every decision the
+     key records about the backend reaches it through the facts (gh-ocannl-1723). Then the facts,
+     with the name held: each fact the key reads, flipped, moves only the components the facts
+     reach, and some. *)
   (let before = components () in
-   let after = components_of ctx canon ~backend:(backend ^ "_flipped") in
-   let moved = moved before after in
-   p "the backend name moves its own component" (List.mem moved "backend" ~equal:String.equal);
-   p_all ~min:1 "and only components it reaches" moved ~f:(fun c ->
-       String.equal c "backend" || List.mem backend_derived_components c ~equal:String.equal));
+   let facts = Context.backend_facts ctx in
+   let after = components_of ~facts_of:(fun _ -> facts) ctx canon ~backend:(backend ^ "_flipped") in
+   let name_moved = moved before after in
+   p "the backend name moves its own component" (List.mem name_moved "backend" ~equal:String.equal);
+   p_all ~min:1 "and only components it reaches" name_moved ~f:(fun c -> String.equal c "backend");
+   let flipped =
+     {
+       facts with
+       Ir.Backend_intf.grid_execution =
+         (if Ir.Backend_intf.binds_hardware_grid facts then Host_pool else Hardware_grid);
+       queued_timing =
+         (match facts.queued_timing with
+         | Queued_deep -> Queued_legacy
+         | Queued_legacy -> Queued_deep);
+     }
+   in
+   let facts_moved = moved before (components_of ~facts_of:(fun _ -> flipped) ctx canon ~backend) in
+   p_all ~min:1 "the backend's facts move only the components they reach" facts_moved ~f:(fun c ->
+       List.mem facts_derived_components c ~equal:String.equal));
   (* The two lazily resolved cc settings, in children that state them on the commandline (which
      outranks every other source) before anything forces the lazy. A child reports its components
      and the pool the cc backend decided. *)
@@ -648,7 +670,7 @@ let () =
         None
   in
   let grid = "--ocannl_cc_parallel_grid=openmp" in
-  let cpu = not (Ir.Schedule.backend_is_gpu backend) in
+  let cpu = not (Ir.Backend_intf.binds_hardware_grid (Context.backend_facts_of_name backend)) in
   let cap_flip =
     (* Both values stated, so neither child resolves the cap from an ambient source that might equal
        the other's (Codex P2, round 5). *)
@@ -793,9 +815,11 @@ let () =
       Option.value_exn ~here:[%here]
         (SC.cache_key ~timing_identity ~limits:(Context.hardware_limits ctx)
            ~capabilities:(Context.codegen_capabilities ctx)
-           canon ~backend)
+           ~facts:(Context.backend_facts ctx) canon ~backend)
     in
-    (key, Test_utils.Generated.normalize_minted (Test_utils.Generated.read routine))
+    ( key,
+      Test_utils.Generated.normalize_minted ~facts:(Context.backend_facts ctx)
+        (Test_utils.Generated.read routine) )
   in
   let oracle () =
     let baseline_key, baseline_src = compile_probe () in

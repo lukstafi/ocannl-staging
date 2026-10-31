@@ -44,7 +44,8 @@ let search ~tag =
 
 let () =
   p "setup: no candidate reproduces the untuned default"
-    (Option.is_none (Autotune.default_seed_label ~backend_name));
+    (Option.is_none
+       (Autotune.default_seed_label ~facts:(Context.backend_facts_of_name backend_name)));
   let cold = search ~tag:"cold" in
   let r = cold.report and attempts = cold.attempts and output = cold.output in
   p "cold: the budget cut the search before any candidate"

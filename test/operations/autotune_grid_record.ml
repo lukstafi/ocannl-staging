@@ -43,7 +43,7 @@ let () =
    seed's record, which needs the menu that proposes one. Also before the first search. *)
 let () = Fissioned_chain.small_menu_envelope ()
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
-let on_cpu = Ir.Schedule.backend_is_cpu backend_name
+let on_cpu = Ir.Backend_intf.renders_on_host_pool (Context.backend_facts_of_name backend_name)
 
 (* The census exists only where the pool does: gated on the backend's own predicate, never on the
    report under test. *)

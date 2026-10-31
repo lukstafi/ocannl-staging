@@ -31,8 +31,8 @@ module L = Ll_test
 open Verdict.Claims
 
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
-let is_gpu = Sched.backend_is_gpu backend_name
-let is_cpu = Sched.backend_is_cpu backend_name
+let is_gpu = Ir.Backend_intf.binds_hardware_grid (Context.backend_facts_of_name backend_name)
+let is_cpu = Ir.Backend_intf.renders_on_host_pool (Context.backend_facts_of_name backend_name)
 
 let nb = 128
 and ns = 64

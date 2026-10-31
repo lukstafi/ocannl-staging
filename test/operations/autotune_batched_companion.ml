@@ -38,7 +38,7 @@ let named name (comp : Asgns.comp) : Asgns.comp =
   { comp with asgns = Asgns.Block_comment (name, comp.asgns) }
 
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
-let is_gpu = Sched.backend_is_gpu backend_name
+let is_gpu = Ir.Backend_intf.binds_hardware_grid (Context.backend_facts_of_name backend_name)
 
 (* The family tree's unfused flavor is refuted on companion coverage and on nothing else (the fused
    flavor, the root's other child, is refuted separately — these sites feed their output to a
@@ -474,7 +474,7 @@ let () =
      cut's stream-order synchronization replaces the fused segment's serial order. Runs on every
      backend. *)
   let comp_e, z_e, r_e = mk_comp "lme" in
-  let is_cpu = Sched.backend_is_cpu backend_name in
+  let is_cpu = Ir.Backend_intf.renders_on_host_pool (Context.backend_facts_of_name backend_name) in
   let transforms opt =
     let preset seg =
       if is_gpu then Sched.default_gpu ~min_parallel:1 ~limits seg

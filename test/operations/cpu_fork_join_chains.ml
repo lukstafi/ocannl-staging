@@ -273,7 +273,11 @@ let () =
   let ctx, routine =
     Context.compile ~name ~prelowered:o
       ~lowered_transform:(fun opt ->
-        let segs = Sched.maybe_default_schedules ~backend_name ~static_indices:[] opt in
+        let segs =
+          Sched.maybe_default_schedules
+            ~facts:(Context.backend_facts_of_name backend_name)
+            ~static_indices:[] opt
+        in
         segments := segs;
         segs)
       (Context.cpu ()) Ir.Assignments.empty_comp Ir.Indexing.Empty

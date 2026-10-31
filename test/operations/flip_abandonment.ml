@@ -555,7 +555,7 @@ let () =
   (* The search-trajectory identity's configuration part, as [Autotune.tune] computes it for this
      chain's backend and device. *)
   let identity () =
-    Autotune.search_shaping_identity ~backend:(Context.backend_name chain_ctx)
+    Autotune.search_shaping_identity ~facts:(Context.backend_facts chain_ctx)
       ~limits:(Context.hardware_limits chain_ctx)
   in
   let warm_chain_with_stated keys =
@@ -667,7 +667,8 @@ let () =
   let backend = Context.backend_name chain_ctx in
   let search_keys = class_keys Utils.Search_shaping in
   let unread =
-    List.filter search_keys ~f:(fun key -> not (Autotune.search_shaping_key_read ~backend key))
+    List.filter search_keys ~f:(fun key ->
+        not (Autotune.search_shaping_key_read ~facts:(Context.backend_facts_of_name backend) key))
   in
   p_all ~min:8 "every gpu_ search-shaping key is one a cc search does not read"
     (List.filter search_keys ~f:(String.is_prefix ~prefix:"gpu_"))

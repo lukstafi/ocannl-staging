@@ -114,7 +114,11 @@ let () =
     (* The sites the untuned plan splits at the configured threshold, with their block counts, as
        the compile would choose them on this backend. *)
     let min_serial = Utils.registered_int ~arg_name:"gpu_default_split_reduce_min_serial" in
-    let split = Autotune.seeded_split_sites ~backend ~min_serial ~static_indices:[ batch_n ] opt in
+    let split =
+      Autotune.seeded_split_sites
+        ~facts:(Context.backend_facts_of_name backend)
+        ~min_serial ~static_indices:[ batch_n ] opt
+    in
     Stdio.printf "untuned %s split at min_serial=%d: %d site(s)\n" backend min_serial
       (List.length split);
     List.iter split ~f:(fun site -> Stdio.printf "  %s\n" (Autotune.split_sites_label [ site ]));

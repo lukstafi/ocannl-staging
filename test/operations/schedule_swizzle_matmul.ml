@@ -64,11 +64,12 @@ let skipped = Verdict.skipped ~backend:backend_name
    barrier spellings around swizzled tiles; schedule availability uses family and hardware-limit
    queries, and how a [Tile_mma] rendered, the routine's mma census. *)
 let on_metal = String.is_substring backend_name ~substring:"metal"
-let on_gpu = Sched.backend_is_gpu backend_name
+let on_gpu = Ir.Backend_intf.binds_hardware_grid (Context.backend_facts_of_name backend_name)
 
 module Generated = Test_utils.Generated
 
 let () = Generated.init ~backend_name
+let facts = Context.backend_facts_of_name backend_name
 
 let named name (comp : Asgns.comp) : Asgns.comp =
   { comp with asgns = Asgns.Block_comment (name, comp.asgns) }
@@ -176,10 +177,11 @@ let () =
     in
     let shared_ok =
       if on_metal then
-        count_sub ("threadgroup float " ^ Generated.node_ident "tile_") = 2
+        count_sub ("threadgroup float " ^ Generated.node_ident ~facts "tile_") = 2
         && has "threadgroup_barrier"
       else
-        count_sub ("__shared__ float " ^ Generated.node_ident "tile_") = 2 && has "__syncthreads()"
+        count_sub ("__shared__ float " ^ Generated.node_ident ~facts "tile_") = 2
+        && has "__syncthreads()"
     in
     (* Each tile is written by its cooperative load and read by the micro-kernel, all through the
        swizzled offset [P*8 + (col ^ (P & 7))]: at least 4 masked-XOR sites. *)
@@ -285,7 +287,7 @@ let () =
     in
     let decl =
       (if on_metal then "threadgroup float " else "__shared__ float ")
-      ^ Generated.node_ident "tile_"
+      ^ Generated.node_ident ~facts "tile_"
     in
     p "pad_stride widens the tile stride (GPU) or rejected (CPU)"
       (count_sub decl = 2
@@ -383,8 +385,8 @@ let () =
       String.substr_index_all src ~may_overlap:false ~pattern:sub |> List.length
     in
     let shared_ok =
-      if on_metal then count_sub ("threadgroup float " ^ Generated.node_ident "tile_") = 2
-      else count_sub ("__shared__ float " ^ Generated.node_ident "tile_") = 2
+      if on_metal then count_sub ("threadgroup float " ^ Generated.node_ident ~facts "tile_") = 2
+      else count_sub ("__shared__ float " ^ Generated.node_ident ~facts "tile_") = 2
     in
     (* That every statement declined is the census's to say (gh-ocannl-1316), not the lane-0 guard's
        text or an intrinsic's absence. The ma tile is [16 x 16] (mask 15), the mb tile [16 x 32]

@@ -201,7 +201,7 @@ let () =
        leg set), elsewhere the storage precision itself -- a GPU computes 16-bit formats natively,
        and assuming so only loosens the bound if it in fact widens. *)
     let compute =
-      if Sched.backend_is_cpu (Context.backend_name ctx) then
+      if Ir.Backend_intf.renders_on_host_pool (Context.backend_facts ctx) then
         Ir.Numerics.cpu_compute_prec
           ~native_fp16_arithmetic:
             (Context.hardware_limits ctx).Ir.Backend_intf.native_fp16_arithmetic prec

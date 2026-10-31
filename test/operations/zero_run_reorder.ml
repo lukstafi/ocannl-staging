@@ -41,7 +41,11 @@ let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~d
 
 (* The GPU pipeline is built (and executed, its hardware loops rendered serially) on a C backend
    under a GPU backend's name, as in [gpu_fission_mapping]. *)
-let gpu_name = if S.backend_is_gpu backend_name then backend_name else "metal"
+let gpu_name =
+  if Ir.Backend_intf.binds_hardware_grid (Context.backend_facts_of_name backend_name) then
+    backend_name
+  else "metal"
+
 let limits = { Ir.Backend_intf.no_hardware_limits with Ir.Backend_intf.simdgroup_width = Some 32 }
 let node = L.node_factory ~first_id:1250000 ~dims:[| 1 |] ()
 

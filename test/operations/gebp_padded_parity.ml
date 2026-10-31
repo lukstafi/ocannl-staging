@@ -57,7 +57,7 @@ module Asgns = Ir.Assignments
 open Verdict.Claims
 
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
-let on_cpu = Sched.backend_is_cpu backend_name
+let on_cpu = Ir.Backend_intf.renders_on_host_pool (Context.backend_facts_of_name backend_name)
 
 (* The packed composition is the C backends' register-tiled GEBP ([Tensorize] at a unit lane width);
    a GPU backend has nothing of it to execute. Its claims are made in this leg, skipped by name

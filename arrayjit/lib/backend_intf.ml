@@ -863,6 +863,137 @@ let no_hardware_limits =
     codegen_tag = None;
   }
 
+(** {2 Backend capability facts (gh-ocannl-1723)}
+
+    What the scheduler, the autotuner, the schedule cache and codegen ask about a backend, stated by
+    the backend rather than read off its name. Static: answering touches no driver, unlike
+    {!hardware_limits} (per device, queried from the driver) and {!codegen_capabilities} (per
+    configuration). Every backend binds one of the record literals below as its
+    {!Backend_device_common.backend_facts} -- the installed implementation and the missing-toolkit
+    placeholder ([Lowered_backend_missing]) alike, which is why the literals live here, in the layer
+    both link: a test on a cc box models Metal or CUDA scheduling through the placeholder's facts.
+    No literal is a [{ x with ... }] update, so a new fact is a compile error until every backend
+    states it. *)
+
+(** Where a routine's [Grid] loops execute. Exactly one of the two by construction: a caller phrased
+    [if binds_hardware_grid ... else ...] cannot take the CPU branch for a backend that is neither
+    (gh-ocannl-706). *)
+type grid_execution =
+  | Hardware_grid
+      (** [Grid] loops bind the device's hardware indices (workgroups and threads): the GPU default
+          presets and sketch family, zero segments as their own kernels, and code binding no
+          hardware dimension running the whole routine on one thread (gh-ocannl-532). *)
+  | Host_pool
+      (** [Grid] loops render as fork-join dispatches over the host CPU worker pool: the CPU default
+          preset, zero segments as [memset], the register-tiled matmul rendering. *)
+[@@deriving equal]
+
+(** The queued timing objective's policy ([Autotune]'s queued batches, and the cache key's [timing]
+    component). *)
+type queued_timing =
+  | Queued_legacy
+      (** Batches capped at the historical depth 200; the key spells the objective bare ([queued]).
+      *)
+  | Queued_deep
+      (** Batches capped at depth 2048, so a sub-microsecond device kernel still amortizes the host
+          round trip; the policy is versioned, and the key spells its generation ([queued-v<N>],
+          [Schedule_cache.queued_objective_version]). *)
+[@@deriving equal]
+
+type backend_facts = {
+  grid_execution : grid_execution;
+  workgroup_shared_placement : bool;
+      (** A node can be placed in workgroup-shared memory (the shared epilogue placement of
+          [Schedule]'s [Fuse_epilogue]): the premise of [Schedule.may_keep_off_device]. CPU codegen
+          rejects a non-empty [workgroup_shared]. *)
+  seeds_untuned_default : bool;
+      (** The untuned compile seeds its plan ([Autotune.seeded_default], gh-ocannl-1183): the
+          backends that plan's before/after was measured on. Also scopes the seeded plan's numerics
+          gate in [Schedule_cache.codegen_tag] (gh-ocannl-1405). *)
+  queued_timing : queued_timing;
+  retries_contended_window : bool;
+      (** A queued timing window refused as contended is retried once: the device scheduler's
+          transient bursts (Metal). *)
+  host_load_attributable : bool;
+      (** A dispersed timing window is attributed through the host-load signal rather than refused
+          outright (gh-ocannl-1558): the device's co-tenants are host processes, which host CPU
+          accounting sees. *)
+  node_ident_prefix : string;
+      (** The dialect's tensor-node identifier prefix ([C_syntax_config.node_ident_prefix],
+          gh-ocannl-1338): ["t_"] where the vendor headers declare global names outside the reserved
+          namespace. *)
+}
+[@@deriving equal]
+
+let binds_hardware_grid facts = equal_grid_execution facts.grid_execution Hardware_grid
+let renders_on_host_pool facts = equal_grid_execution facts.grid_execution Host_pool
+
+(** The relations between facts no backend may break, as the violations found ([[]] when
+    consistent): workgroup-shared placement, the seeded untuned plan (a GPU sketch), the deep queued
+    policy and the contended-window retry (device-dispatch timing) all presuppose a hardware grid,
+    and a dialect prefixes its node identifiers exactly when its vendor headers are a GPU
+    toolchain's. *)
+let facts_inconsistencies facts =
+  let grid = binds_hardware_grid facts in
+  List.filter_map
+    [
+      ( facts.workgroup_shared_placement && not grid,
+        "workgroup_shared_placement without a hardware grid" );
+      (facts.seeds_untuned_default && not grid, "seeds_untuned_default without a hardware grid");
+      ( equal_queued_timing facts.queued_timing Queued_deep && not grid,
+        "Queued_deep without a hardware grid" );
+      ( facts.retries_contended_window && not grid,
+        "retries_contended_window without a hardware grid" );
+      ( Bool.( <> ) (not (String.is_empty facts.node_ident_prefix)) grid,
+        "node_ident_prefix non-empty exactly when not on a hardware grid" );
+    ]
+    ~f:(fun (violated, what) -> Option.some_if violated what)
+
+(** The C backends, [cc] and [multidev_cc] alike: both render on the host worker pool. *)
+let cc_facts =
+  {
+    grid_execution = Host_pool;
+    workgroup_shared_placement = false;
+    seeds_untuned_default = false;
+    queued_timing = Queued_legacy;
+    retries_contended_window = false;
+    host_load_attributable = true;
+    node_ident_prefix = "";
+  }
+
+let cuda_facts =
+  {
+    grid_execution = Hardware_grid;
+    workgroup_shared_placement = true;
+    seeds_untuned_default = true;
+    queued_timing = Queued_deep;
+    retries_contended_window = false;
+    host_load_attributable = false;
+    node_ident_prefix = "t_";
+  }
+
+let hip_facts =
+  {
+    grid_execution = Hardware_grid;
+    workgroup_shared_placement = true;
+    seeds_untuned_default = true;
+    queued_timing = Queued_deep;
+    retries_contended_window = false;
+    host_load_attributable = false;
+    node_ident_prefix = "t_";
+  }
+
+let metal_facts =
+  {
+    grid_execution = Hardware_grid;
+    workgroup_shared_placement = true;
+    seeds_untuned_default = false;
+    queued_timing = Queued_legacy;
+    retries_contended_window = true;
+    host_load_attributable = false;
+    node_ident_prefix = "t_";
+  }
+
 (** {2 Cache identity of the device description (gh-ocannl-1253)}
 
     The schedule cache hashes the device description into its key ([Schedule_cache.codegen_tag]), so
@@ -1544,6 +1675,10 @@ module type Backend_device_common = sig
   val codegen_capabilities : unit -> codegen_capabilities
   (** Facts from the backend's C-syntax configuration. A function, like {!hardware_limits}, so
       policy-dependent fields reflect the current process configuration. *)
+
+  val backend_facts : backend_facts
+  (** The backend's capability facts (gh-ocannl-1723): one of {!cc_facts}, {!cuda_facts},
+      {!hip_facts}, {!metal_facts}. A value, not a function: static, it touches no driver. *)
 
   val classify_failure : Schedule_outcome.phase -> exn -> Schedule_outcome.classified_cause option
   (** Recognizes backend-owned failures at a tagged boundary. Returning [None] leaves the common

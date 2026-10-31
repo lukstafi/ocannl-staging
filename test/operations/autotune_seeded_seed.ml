@@ -61,8 +61,8 @@ let () = Unix.putenv "OCANNL_GPU_DEFAULT_SKETCH_MIN_REDUCTION" "32"
 
 (* What the untuned compile promises here, read off the predicates it consults: seeding on CUDA and
    HIP, the split likewise ([Autotune.seeded_split_backend], gh-ocannl-1325, gh-ocannl-1412). *)
-let seeds_here = Autotune.seeded_default_backend backend_name
-let splits_here = Autotune.seeded_split_backend backend_name
+let seeds_here = Autotune.seeded_default_backend (Context.backend_facts_of_name backend_name)
+let splits_here = Autotune.seeded_split_backend (Context.backend_facts_of_name backend_name)
 
 (* The batch axis outermost and long: the split detector splits a reduction over its outermost loop,
    which at [nb = 4] would be too short to propose (the gpt2_mini_train b8 case). *)
@@ -212,15 +212,18 @@ let () =
   let opt = Context.lowered_for_decisions (Context.auto ()) comp Ir.Indexing.Empty in
   let census backend =
     Ll_test.seeded_census
-      (Autotune.seeded_plan ~backend ~limits:Ir.Backend_intf.no_hardware_limits ~accum_prec:Fn.id
-         ~static_indices opt)
+      (Autotune.seeded_plan
+         ~facts:(Context.backend_facts_of_name backend)
+         ~limits:Ir.Backend_intf.no_hardware_limits ~accum_prec:Fn.id ~static_indices opt)
   in
   let cuda = census "cuda" in
   p "structural: the plan derived for cuda seeds a contraction"
     (Option.exists cuda ~f:(fun c -> c.Ll_test.sketched >= 1));
   p "structural: the plan derived for cuda splits a reduction exactly where CUDA splits"
     (Option.exists cuda ~f:(fun c ->
-         Bool.equal (not (List.is_empty c.Ll_test.split)) (Autotune.seeded_split_backend "cuda")));
+         Bool.equal
+           (not (List.is_empty c.Ll_test.split))
+           (Autotune.seeded_split_backend Ir.Backend_intf.cuda_facts)));
   p "structural control: for cc no plan is derived" (Option.is_none (census "cc"))
 
 let () =
@@ -247,7 +250,9 @@ let () =
            ~lowered_transform:(fun opt ->
              plan :=
                Some
-                 (Autotune.seeded_plan ~backend:backend_name ~limits ~accum_prec ~static_indices opt);
+                 (Autotune.seeded_plan
+                    ~facts:(Context.backend_facts_of_name backend_name)
+                    ~limits ~accum_prec ~static_indices opt);
              [ opt ])
            ctx comp Ir.Indexing.Empty
           : Context.t * Context.routine);

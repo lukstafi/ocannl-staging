@@ -78,8 +78,8 @@ let named name (comp : Asgns.comp) : Asgns.comp =
   { comp with asgns = Asgns.Block_comment (name, comp.asgns) }
 
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
-let is_gpu = Sched.backend_is_gpu backend_name
-let is_cpu = Sched.backend_is_cpu backend_name
+let is_gpu = Ir.Backend_intf.binds_hardware_grid (Context.backend_facts_of_name backend_name)
+let is_cpu = Ir.Backend_intf.renders_on_host_pool (Context.backend_facts_of_name backend_name)
 
 (* The dune sandbox persists across runs: stale entries written by an older binary (digest
    ingredients and the saved-schedule format evolve) would break miss-then-hit assertions. *)
@@ -192,8 +192,8 @@ let () =
   (* Also pre-gh-579: no stored tensorized best, so a replay of it reports none. *)
   ignore
     (Cache_plant.plant ~segments:!saved_segments ~cache_dir ~backend:(Context.backend_name bctx)
-       ~timing_identity:(Context.timing_identity bctx) ~limits:blimits ~capabilities:bcaps
-       base_canon
+       ~facts:(Context.backend_facts bctx) ~timing_identity:(Context.timing_identity bctx)
+       ~limits:blimits ~capabilities:bcaps base_canon
       : SC.cache_io list);
   let hit_report = ref None in
   let hctx = Context.auto () in
@@ -276,15 +276,15 @@ let () =
      Simulated by rewriting the stored entry's fingerprint: the entry still hits — the winner replay
      is config-independent — but the config-relative default reference is dropped. *)
   let key2 =
-    SC.cache_key ~timing_identity:(Context.timing_identity bctx) ~limits:blimits ~capabilities:bcaps
-      base_canon ~backend:(Context.backend_name bctx)
+    SC.cache_key ~facts:(Context.backend_facts bctx) ~timing_identity:(Context.timing_identity bctx)
+      ~limits:blimits ~capabilities:bcaps base_canon ~backend:(Context.backend_name bctx)
   in
   (match SC.lookup ~dir:cache_dir2 ~key:key2 with
   | Some entry ->
       (* gh-ocannl-995: the old GPU fingerprint carried only config, so a changed default policy
          must invalidate its timing too. Keep the real legacy spelling as the control. *)
       let stale_fingerprint =
-        if Sched.backend_is_gpu (Context.backend_name bctx) then
+        if Ir.Backend_intf.binds_hardware_grid (Context.backend_facts bctx) then
           let bs = Utils.registered_int ~arg_name:"gpu_schedule_block_size" in
           let mp = Utils.registered_int ~arg_name:"gpu_schedule_min_parallel" in
           Printf.sprintf "gpu:fission=%b:block_size=%d:min_parallel=%d"

@@ -209,7 +209,7 @@ files.
   by a C++ front end, so `C_syntax.cpp_keywords` (one shared table, added to all three) covers
   plausible labels like `class`, `new`, `operator`, `bool` and `this` that plain C leaves free.
 - On the GPU dialects every node identifier also carries a fixed prefix (`node_ident_prefix`, `t_`,
-  from `C_syntax.node_ident_prefix_for_backend`), because their vendor headers declare global types
+  stated as the backend fact `Backend_intf.backend_facts.node_ident_prefix`), because their vendor headers declare global types
   and macros outside the reserved namespace, and a blacklist would have to track headers the runtime
   compilers carry built in (gh-ocannl-1338). The measured case: Metal stores a uint4x32 node as
   `uint4`, so a node labelled `uint4` made the next `device uint4* ...` of its kernel fail to parse;
@@ -323,6 +323,27 @@ files.
   OCANNL uses none of them. `test/operations/metal_routine_log_delivery` pins delivery: exactly one
   copy of each store line by the next sync, on cc and Metal.
 
+## Backend capability facts
+
+What the scheduler, the autotuner, the schedule cache and codegen ask of a backend is its
+`Backend_intf.backend_facts` (gh-ocannl-1723), never its name: where its `Grid` loops execute
+(`grid_execution`: `Hardware_grid` | `Host_pool`, read through `binds_hardware_grid` /
+`renders_on_host_pool`), workgroup-shared placement, the seeded untuned plan, the queued timing
+policy, the contended-window retry, host-load attribution of dispersion, and the dialect's
+node-identifier prefix. The record literals (`cc_facts`, `cuda_facts`, `hip_facts`, `metal_facts`)
+live in `Backend_intf`, not in the backend modules, because a backend whose toolkit is absent is
+dune's `Lowered_backend_missing` placeholder, which must answer with the real facts (a cc box models
+Metal and CUDA scheduling through them). A new backend adds a literal, binds it as its
+`backend_facts`, and states every field: no literal is a `{ x with ... }` update. Reach a context's
+facts with `Context.backend_facts`; a name's with `Context.backend_facts_of_name`, which parses
+through `Backends.get_backend` and raises on a name it does not accept. Tests that model a GPU on a cc
+box pass the literal (`Ir.Backend_intf.metal_facts`) rather than a name. Two pins:
+`marker_backend_vocabulary` (every accepted name reaches its module's facts; the facts are
+consistent, `Backend_intf.facts_inconsistencies`; a non-backend name is refused; and the ratchet: every
+string constant in `arrayjit/lib`, `lib` and `tensor` spelling an accepted backend name sits in a
+counted, reasoned exemption) and `backend_facts` (the running backend's facts agree with its live
+context and device limits; each fact varied alone moves the decision that reads it).
+
 ## Choosing a backend-query seam
 
 The gh-ocannl-822 census sorted every production test that inferred a C-syntax capability by reading
@@ -337,7 +358,7 @@ configuration.
 | --- | --- | --- |
 | capability | `accum_width.ml` | Resolved bf16 accumulator width; query `codegen_capabilities.accum_prec`. |
 | capability | `float_literal_forms.ml` | Whether f64 storage can reach this dialect; query `codegen_capabilities.supports_f64`. |
-| capability | `hardware_warp_shuffle.ml` | CPU family uses `Schedule.backend_is_cpu`; resolved bf16 accumulator width uses `codegen_capabilities.accum_prec`. |
+| capability | `hardware_warp_shuffle.ml` | CPU family uses `Backend_intf.renders_on_host_pool` of the backend's facts; resolved bf16 accumulator width uses `codegen_capabilities.accum_prec`. |
 | capability | `reduction_forms.ml` | Resolved accumulator residency for each storage precision; query `codegen_capabilities.accum_prec`, after checking it against the test's independent exact-backend policy table (the table is an oracle, not a capability access path). |
 | capability | `schedule_batched_mma.ml` | Whether the device advertises the uniform-bf16 tile the tensorized execution leg needs; query `Backend_intf.advertises_mma_format`, and report the leg skipped when it answers no. |
 | capability | `schedule_conv_gemm.ml` | Which typed MMA formats the device advertises; derive the f32/tf32 legs with `Backend_intf.advertises_mma_format`, never an open-coded `mma_format_tiles` scan (which is easy to write with the accumulator dropped from the key). |

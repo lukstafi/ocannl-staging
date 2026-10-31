@@ -27,7 +27,7 @@ val plan_arena_offsets :
     {!plan_pool_segments}). Exposed for unit testing the coloring with synthetic sizes. *)
 
 val score_footprint :
-  backend_name:string ->
+  facts:Ir.Backend_intf.backend_facts ->
   limits:Ir.Backend_intf.hardware_limits ->
   static_indices:Ir.Indexing.static_symbol list ->
   Ir.Low_level.optimized ->
@@ -140,9 +140,17 @@ type backend = Cc | Multidev_cc | Cuda | Hip | Metal [@@deriving sexp, equal, en
     holds it equal to [List.map all_of_backend ~f:backend_name] plus ["none"], which is what stops
     it agreeing with a list that has stopped being this one (gh-ocannl-689). *)
 
+val accepted_names : (string * backend) list
+(** Every name {!get_backend} accepts, lowercase, with the backend it names: the canonical
+    {!backend_name}s and the deprecated aliases ["sync_cc"] and ["multicore_cc"]. Parsing the
+    [backend] setting is the one place a backend name is tested (gh-ocannl-1723); compiler decisions
+    ask {!backend_facts}. *)
+
 val get_backend : ?backend_name:string -> unit -> backend
-(** The backend corresponding to [backend_name], or if omitted, selected via the global [backend]
-    setting. Non-generative: the same backend value (hence the same singleton state) each call. *)
+(** The backend corresponding to [backend_name] (case-insensitively, through {!accepted_names}), or
+    if omitted, selected via the global [backend] setting. Raises [Invalid_argument] on a name it
+    does not accept. Non-generative: the same backend value (hence the same singleton state) each
+    call. *)
 
 val backend_name : backend -> string
 (** Inverse of {!get_backend}'s name parsing. *)
@@ -152,6 +160,12 @@ val backend_module : backend -> (module Ir.Backend_intf.Backend)
     thread a single backend through (the raw-API tests, [Parallel]). Code that must re-correlate two
     contexts later (e.g. [Context.copy]) should use {!wrapped_context} instead: this projection
     erases the type components. *)
+
+val backend_facts : backend -> Ir.Backend_intf.backend_facts
+(** The capability facts the backend's module states
+    ({!Ir.Backend_intf.Backend_device_common.backend_facts}, gh-ocannl-1723). Static: opens no
+    device and touches no driver, and answers for a backend whose library is not installed (its
+    placeholder states the same facts). *)
 
 (** {2 Contexts wrapped with their backend}
 

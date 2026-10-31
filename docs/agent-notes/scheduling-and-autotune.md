@@ -1089,7 +1089,7 @@ files.
 - **Dispersion is a fact; on a CPU backend contention is an attribution** (gh-ocannl-1558). The
   2x-majority rule (`window_result`) sets `dispersed`, and records `spread` (median raw wall over
   the floor). On GPU backends a dispersed window is still refused (`Refuse_dispersed`). On
-  `Sched.backend_is_cpu` backends `time_routine` reads `Utils.Host_load` (machine busy CPU-s from
+  backends whose facts state `host_load_attributable` (the CPU ones) `time_routine` reads `Utils.Host_load` (machine busy CPU-s from
   `/proc/stat` or mach ticks, minus this whole process's `Unix.times`, over the wall) from before
   the calibration to after the window, and refuses a dispersed window only on `Cotenant` (at least a
   core of foreign load plus a two-tick allowance over the span; a dispersed window shorter than

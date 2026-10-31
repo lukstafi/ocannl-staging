@@ -73,8 +73,10 @@ let () =
   let n_privatize = ref (-1) in
   let transform (opt : LL.optimized) =
     let preset =
-      if Sched.backend_is_gpu backend_name then Sched.default_gpu ~min_parallel:1 opt
-      else if Sched.backend_is_cpu backend_name then Sched.default_cpu ~min_work:0 opt
+      if Ir.Backend_intf.binds_hardware_grid (Context.backend_facts_of_name backend_name) then
+        Sched.default_gpu ~min_parallel:1 opt
+      else if Ir.Backend_intf.renders_on_host_pool (Context.backend_facts_of_name backend_name) then
+        Sched.default_cpu ~min_work:0 opt
       else []
     in
     let extended = Autotune.extend_with_privatize ~accum_prec ~static_indices:[] preset opt in

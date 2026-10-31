@@ -32,11 +32,12 @@ let expected_sum = Array.fold vv ~init:0. ~f:( +. )
 let approx a b = Float.(abs (a - b) < 1e-3)
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 let skipped = Verdict.skipped ~backend:backend_name
-let has_barriers = Ir.Schedule.backend_is_gpu backend_name
+let has_barriers = Ir.Backend_intf.binds_hardware_grid (Context.backend_facts_of_name backend_name)
 
 module Generated = Test_utils.Generated
 
 let () = Generated.init ~backend_name
+let facts = Context.backend_facts_of_name backend_name
 let single = Ir.Ops.single
 
 (* Replace the lowered serial sum with the hand-built workgroup tree reduction. *)
@@ -110,10 +111,10 @@ let () =
        qualifier and workgroup barrier token, not whether the reduction was selected. *)
     let shared_ok =
       if String.is_substring backend_name ~substring:"metal" then
-        has ("threadgroup float " ^ Generated.node_ident "partial_sums" ^ "[64]")
+        has ("threadgroup float " ^ Generated.node_ident ~facts "partial_sums" ^ "[64]")
         && has "threadgroup_barrier"
       else
-        has ("__shared__ float " ^ Generated.node_ident "partial_sums" ^ "[64]")
+        has ("__shared__ float " ^ Generated.node_ident ~facts "partial_sums" ^ "[64]")
         && has "__syncthreads()"
     in
     p "shared tile and barrier rendered (GPU) or rejected (CPU)" shared_ok)

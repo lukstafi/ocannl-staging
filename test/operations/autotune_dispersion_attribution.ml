@@ -63,8 +63,10 @@ let () =
   p_all "the attribution policy is the CPU backends' and only theirs"
     [ "cc"; "multidev_cc"; "cuda"; "hip"; "metal" ] ~f:(fun b ->
       Bool.equal
-        (Poly.equal (Autotune.dispersion_policy_for_backend b) Autotune.Attribute_dispersion)
-        (Ir.Schedule.backend_is_cpu b))
+        (Poly.equal
+           (Autotune.dispersion_policy_for_backend (Context.backend_facts_of_name b))
+           Autotune.Attribute_dispersion)
+        (Ir.Backend_intf.renders_on_host_pool (Context.backend_facts_of_name b)))
 
 (* --- The host-load classification, pure. --- *)
 
@@ -182,7 +184,7 @@ let call ?host ~dispersion ~foreign ~timing ~floor_ms () =
           ~on_retry:(fun () -> ())
           ~on_call:(fun c -> record := Some c)
           ~phase:None ~retry_contended:false ~dispersion ~timing ~repeats:3
-          ~queue_depth_cap:(Autotune.queue_depth_cap_for_backend "cc")
+          ~queue_depth_cap:(Autotune.queue_depth_cap_for_backend Ir.Backend_intf.cc_facts)
           ~batch:(scripted_clock ~floor_ms events))
   in
   { result; c = Option.value_exn ~here:[%here] !record; events = List.rev !events }
