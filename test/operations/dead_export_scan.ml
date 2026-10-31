@@ -198,7 +198,6 @@ let exempt_zero_reference_exports =
     "Ppx_shared.translate_str";
     "Schedulers.cpu_mma_limits";
     "Tnode.bounds_scan_worthwhile";
-    "Tnode.collapse_consecutive";
     "Tnode.current_namespace";
     "Tnode.fresh_uid";
     "Tnode.hash_t";

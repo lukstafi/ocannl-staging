@@ -4875,9 +4875,10 @@ box.
   the shard broadcast `n53_running_mean_parallel =: n13_running_mean_parallel.merge` had renamed
   the owner (gh-ocannl-1552). `label_name` is the identifier the default style mints when no other
   node of the routine shares the label, computed from the label alone, so it keeps the spellings
-  tests already used (`w1`, `q.grad`, `kernel_downsample_downsample`). Neither neighbour does: the
-  raw `label` join keeps an initializer's operator label (`*._w1`), and a debug name read before
-  any code name is minted collapses repeated components (`kernel_downsample2`). `debug_name_scan` (gh-ocannl-1606,
+  tests already used (`w1`, `q.grad`, `kernel_downsample_downsample`). The raw `label` join does
+  not: it keeps an initializer's operator label (`*._w1`). A debug name read before any code name
+  is minted IS `label_name` (gh-ocannl-1686: `Tnode.get_debug_name` and the heuristic minting share
+  one label-to-name function), so only minting moves it. `debug_name_scan` (gh-ocannl-1606,
   in `@test/operations/scans`) holds every `.ml` under `test/` and `arrayjit/test/` to this: a debug
   name may be printed or raised, be a `Verdict` claim's label, or be the `~substring` needle of a
   check that some rendered text names the node, directly or through `^`, `sprintf`, `String.concat`

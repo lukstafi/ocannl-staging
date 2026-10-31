@@ -1438,7 +1438,7 @@ let get_ident_within_code ?no_dots c =
   let nograd_idents = Hashtbl.create (module String) in
   let grad_idents = Hashtbl.create (module String) in
   let visit tn =
-    let is_grad, ident = Tn.no_grad_ident_label tn in
+    let is_grad, ident = Tn.no_grad_ident_label tn.Tn.label in
     let idents = if is_grad then grad_idents else nograd_idents in
     Option.iter ident
       ~f:

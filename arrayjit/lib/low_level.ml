@@ -11363,7 +11363,7 @@ let get_ident_within_code ?no_dots ?(blacklist = []) ?(reserved_prefixes = [])
       Hashtbl.set nograd_idents ~key:b_ident ~data:(Set.singleton (module Int) (-1));
       Hashtbl.set grad_idents ~key:b_ident ~data:(Set.singleton (module Int) (-1)));
   let visit tn =
-    let is_grad, ident = Tn.no_grad_ident_label tn in
+    let is_grad, ident = Tn.no_grad_ident_label tn.Tn.label in
     let idents = if is_grad then grad_idents else nograd_idents in
     Option.iter ident ~f:(fun ident ->
         (* A reserved prefix, or a name [reserved] holds, is seen as a repeat, like a blacklisted

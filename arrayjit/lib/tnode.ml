@@ -284,18 +284,30 @@ let label a = String.concat ~sep:"_" a.label
 let is_alphanum_ s =
   (not (String.is_empty s)) && String.for_all s ~f:(fun c -> Char.equal c '_' || Char.is_alphanum c)
 
-let collapse_consecutive = function
-  | [] -> []
-  | first :: rest ->
-      let emit ident count acc =
-        (if count = 1 then ident else ident ^ Int.to_string count) :: acc
-      in
-      let acc, last_ident, last_count =
-        List.fold rest ~init:([], first, 1) ~f:(fun (acc, cur, cnt) s ->
-            if String.equal s cur then (acc, cur, cnt + 1) else (emit cur cnt acc, s, 1))
-      in
-      List.rev (emit last_ident last_count acc)
+(** [no_grad_ident_label label] is whether [label] names a gradient, and its identifier: the label's
+    identifier components (operator labels such as [*.] dropped) joined by [_] with the numeric
+    components last, a leading ["grad"] peeled off as the gradient flag, and a [_] prepended to a
+    result that starts with a digit; [None] when no identifier component remains. The one source of
+    both the minted [heuristic] identifier ({!styled_ident}) and the pre-minting display name
+    ({!get_debug_name}). *)
+let no_grad_ident_label label =
+  let components = List.filter label ~f:(fun i -> is_alphanum_ i) in
+  let digits, components = List.partition_tf components ~f:(fun i -> Char.is_digit i.[0]) in
+  let has_grad, result =
+    match components @ digits with
+    | [] -> (false, None)
+    | [ "grad" ] -> (true, None)
+    | "grad" :: components -> (true, Some (String.concat ~sep:"_" components))
+    | components -> (false, Some (String.concat ~sep:"_" components))
+  in
+  ( has_grad,
+    Option.find_map result ~f:(fun s -> if Char.is_digit s.[0] then Some ("_" ^ s) else Some s) )
 
+(** [get_debug_name ?code_name ~id ~label ()] is the code name when one was minted ([_grad] read as
+    [.grad]). Otherwise it is the name the label spells -- {!label_name} of a node with this id and
+    label (gh-ocannl-1686): the identifier of {!no_grad_ident_label} with [.grad] for a gradient,
+    and [n<id>] (a gradient: its value's id) when the label has no identifier component. So before
+    and after minting one scheme names a node. *)
 let get_debug_name ?code_name ?(namespace = default_namespace) ~id ~label () =
   match code_name with
   | Some code_name -> (
@@ -303,28 +315,21 @@ let get_debug_name ?code_name ?(namespace = default_namespace) ~id ~label () =
       | None -> code_name
       | Some ident -> ident ^ ".grad")
   | None -> (
-      let components = List.filter ~f:is_alphanum_ label in
-      let components, is_grad =
-        match components with "grad" :: components -> (components, true) | _ -> (components, false)
-      in
-      let components = collapse_consecutive components in
-      let ident_label =
-        if List.is_empty components then None else Some (String.concat ~sep:"_" components)
-      in
+      let is_grad, ident = no_grad_ident_label label in
       let opt_grad = if is_grad then ".grad" else "" in
-      let n = ident_prefix namespace in
-      match ident_label with
-      | Some ident -> [%string "%{ident}%{opt_grad}"]
-      | None when is_grad -> [%string "%{n}%{id - 1#Int}%{opt_grad}"]
-      | None -> n ^ Int.to_string id)
+      match ident with
+      | Some ident -> ident ^ opt_grad
+      | None when is_grad -> [%string "%{ident_prefix namespace}%{id - 1#Int}%{opt_grad}"]
+      | None -> ident_prefix namespace ^ Int.to_string id)
 
-(** [debug_name tn] is a display name, not an identity. Once a renderer has minted an identifier for
-    [tn] ({!update_code_name}) it is that code name, and the name can change over the process: a
-    node whose label another node of the same routine also carries is minted as [n<id>_<label>], and
-    that form sticks. Which renderers run depends on configuration -- with
-    [output_debug_files_in_build_directory] the [.cd]/[.ll] printers name nodes the C emitter never
-    asks about, such as a merge-buffer source -- so the same program can report different debug
-    names (gh-ocannl-1552). To find a node by name, compare {!label_name} (or {!label}). *)
+(** [debug_name tn] is a display name, not an identity. Before any renderer has minted an identifier
+    for [tn] it is {!label_name} (gh-ocannl-1686). Once one has ({!update_code_name}) it is that
+    code name, and the name can change over the process: a node whose label another node of the same
+    routine also carries is minted as [n<id>_<label>], and that form sticks. Which renderers run
+    depends on configuration -- with [output_debug_files_in_build_directory] the [.cd]/[.ll]
+    printers name nodes the C emitter never asks about, such as a merge-buffer source -- so the same
+    program can report different debug names (gh-ocannl-1552). To find a node by name, compare
+    {!label_name} (or {!label}). *)
 let debug_name tn =
   let id = tn.id and label = tn.label and code_name = tn.code_name in
   get_debug_name ?code_name ~namespace:tn.namespace ~id ~label ()
@@ -896,34 +901,15 @@ let dims_to_string ?(with_axis_numbers = false) arr =
   in
   Ops.prec_string (Lazy.force arr.storage_prec) ^ " prec " ^ dims_s
 
-let no_grad_ident_label tn =
-  let components = List.filter tn.label ~f:(fun i -> is_alphanum_ i) in
-  let digits, components = List.partition_tf components ~f:(fun i -> Char.is_digit i.[0]) in
-  let has_grad, result =
-    match components @ digits with
-    | [] -> (false, None)
-    | [ "grad" ] -> (true, None)
-    | "grad" :: components -> (true, Some (String.concat ~sep:"_" components))
-    | components -> (false, Some (String.concat ~sep:"_" components))
-  in
-  ( has_grad,
-    Option.find_map result ~f:(fun s -> if Char.is_digit s.[0] then Some ("_" ^ s) else Some s) )
-
 (** [label_name tn] is the identifier the default ([heuristic]) style mints for [tn] when no other
     node of its routine carries the same label: the label's identifier components (an initializer's
     operator label such as [*.] dropped, numeric components last), a leading ["grad"] as a [.grad]
     suffix, and [n<id>] for a label with no identifier component. It is computed from the label
-    alone, so unlike {!debug_name} -- which takes the [n<id>_] form once a routine repeats the
-    label, and before any code name is minted collapses repeated components ([kernel_downsample2]
-    for [kernel_downsample_downsample]) -- it never changes over the process, and it is the name to
-    find a node by (gh-ocannl-1606). {!label} is the raw join, operator labels included. *)
-let label_name tn =
-  let is_grad, ident = no_grad_ident_label tn in
-  let opt_grad = if is_grad then ".grad" else "" in
-  match ident with
-  | Some ident -> ident ^ opt_grad
-  | None when is_grad -> [%string "%{ident_prefix tn.namespace}%{tn.id - 1#Int}%{opt_grad}"]
-  | None -> id tn
+    alone, so unlike {!debug_name} -- which equals it until a code name is minted, and takes the
+    [n<id>_] form once a routine repeats the label -- it never changes over the process, and it is
+    the name to find a node by (gh-ocannl-1606). {!label} is the raw join, operator labels included.
+*)
+let label_name tn = get_debug_name ~namespace:tn.namespace ~id:tn.id ~label:tn.label ()
 
 let styled_ident ~repeating_nograd_idents ~repeating_grad_idents style arr =
   let n = id arr in
@@ -933,7 +919,7 @@ let styled_ident ~repeating_nograd_idents ~repeating_grad_idents style arr =
       let label = label arr in
       if String.is_empty label then n else [%string "%{n}_%{label}"]
   | `Heuristic_ocannl grad_sep -> (
-      let is_grad, ident = no_grad_ident_label arr in
+      let is_grad, ident = no_grad_ident_label arr.label in
       let opt_grad =
         match (grad_sep, is_grad) with
         | `Dot_grad, true -> ".grad"
