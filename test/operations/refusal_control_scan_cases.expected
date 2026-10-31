@@ -500,6 +500,12 @@ env_var_deps.ml: [scanner-refusal:d29c340cf3960a26e7f234805bcebd18] the declarat
 env_var_deps.ml: [scanner-refusal:d896c784ca87717dc5c6d91befbce0e1] source is refused (claim) is catalogued beside env_var_deps_control.expected, env_var_deps.expected: true
 refused_action_streams.ml has exactly the explicitly assigned refusal controls: true
 ll_test_ratchet.ml has exactly the explicitly assigned refusal controls: true
+exact_partials_ratchet.ml has exactly the explicitly assigned refusal controls: true
+exact_partials_ratchet.ml: [scanner-refusal:ba759c72b65ab51d06be7e24325abbb2] every test source (claim) is catalogued beside exact_partials_ratchet.expected, exact_partials_scan_cases.expected: true
+exact_partials_ratchet.ml: [scanner-refusal:958e88eddd55da1a156f3795cd586c78] beside a derivation (claim) is catalogued beside exact_partials_ratchet.expected, exact_partials_scan_cases.expected: true
+exact_partials_ratchet.ml: [scanner-refusal:b30b6b3be7749ff984d2979f5a8fe292] arrayjit package's test (claim) is catalogued beside exact_partials_ratchet.expected, exact_partials_scan_cases.expected: true
+exact_partials_ratchet.ml: [scanner-refusal:392052035d276f11311768815316b580] every sentence claiming (claim) is catalogued beside exact_partials_ratchet.expected, exact_partials_scan_cases.expected: true
+exact_partials_ratchet.ml: [scanner-refusal:fa85b1960c6367c9216c627d02ede0e7] every exemption row (claim) is catalogued beside exact_partials_ratchet.expected, exact_partials_scan_cases.expected: true
 operand_key_ratchet.ml has exactly the explicitly assigned refusal controls: true
 tensorized_census_ratchet.ml has exactly the explicitly assigned refusal controls: true
 tensorized_census_ratchet.ml: [scanner-refusal:e553a74d077e12582953b27756595d9e] executed tensorized parity (claim) is catalogued beside tensorized_census_ratchet.expected, tensorized_census_scan_cases.expected: true

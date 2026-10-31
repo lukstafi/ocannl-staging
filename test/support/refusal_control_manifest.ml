@@ -18,6 +18,14 @@ let raw_entries =
   [
     ("doc_examples_extract.ml", []);
     ("ll_test_ratchet.ml", []);
+    ( "exact_partials_ratchet.ml",
+      [
+        "[scanner-refusal:ba759c72b65ab51d06be7e24325abbb2] every test source";
+        "[scanner-refusal:958e88eddd55da1a156f3795cd586c78] beside a derivation";
+        "[scanner-refusal:b30b6b3be7749ff984d2979f5a8fe292] arrayjit package's test";
+        "[scanner-refusal:392052035d276f11311768815316b580] every sentence claiming";
+        "[scanner-refusal:fa85b1960c6367c9216c627d02ede0e7] every exemption row";
+      ] );
     ("refused_action_streams.ml", []);
     ("operand_key_ratchet.ml", []);
     ( "tensorized_census_ratchet.ml",

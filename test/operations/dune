@@ -151,6 +151,8 @@
   (alias runtest-command_line_length_scan)
   (alias runtest-ll_test_ratchet)
   (alias runtest-ll_test_scan_cases)
+  (alias runtest-exact_partials_ratchet)
+  (alias runtest-exact_partials_scan_cases)
   (alias runtest-operand_key_ratchet)
   (alias runtest-tensorized_census_ratchet)
   (alias runtest-tensorized_census_scan_cases)
@@ -327,6 +329,7 @@
   (alias runtest-config_dep_completeness)
   (alias runtest-refused_action_streams)
   (alias runtest-verdict_ratchet)
+  (alias runtest-exact_partials_ratchet)
   (alias runtest-autotune_bound_pruning)
   (alias runtest-bandwidth_calibration)
   (alias runtest-autotune_routine_name)
@@ -3969,6 +3972,9 @@
   ll_test_ratchet.ml
   ll_test_ratchet.expected
   ll_test_scan_cases.expected
+  exact_partials_ratchet.ml
+  exact_partials_ratchet.expected
+  exact_partials_scan_cases.expected
   operand_key_ratchet.ml
   operand_key_ratchet.expected
   operand_key_scan_cases.expected
@@ -4046,6 +4052,8 @@
    refused_action_streams.expected,refused_action_scan_cases.expected
    ll_test_ratchet.ml
    ll_test_ratchet.expected,ll_test_scan_cases.expected
+   exact_partials_ratchet.ml
+   exact_partials_ratchet.expected,exact_partials_scan_cases.expected
    operand_key_ratchet.ml
    operand_key_ratchet.expected,operand_key_scan_cases.expected
    tensorized_census_ratchet.ml
@@ -4764,6 +4772,51 @@
  (package neural_nets_lib)
  (action
   (diff verdict_ratchet.expected verdict_ratchet.actual)))
+
+; gh-ocannl-1729: prose claiming exact partial sums sits beside an `Ll_test.exact_partials`
+; derivation. Same arrangement as verdict_ratchet: recursive globs over both packages' test
+; directories, handed over as a response file. The reader's boundary is in
+; test/support/exact_partials_scan.ml's header.
+
+(executable
+ (name exact_partials_ratchet)
+ (modules exact_partials_ratchet)
+ (libraries base stdio prose_lexemes test_utils arrayjit.verdict))
+
+(rule
+ ; ocannl-backend: none -- links no backend: it reads test sources as text and as parse trees.
+ (targets exact_partials_ratchet.actual exact_partials_ratchet.filelist)
+ (package neural_nets_lib)
+ (deps
+  (alias runtest-env_spelling_gate)
+  ocannl_config
+  (glob_files_rec ../../test/*.ml)
+  (glob_files_rec ../../arrayjit/test/*.ml))
+ (action
+  (progn
+   (with-stdout-to
+    exact_partials_ratchet.filelist
+    (echo "%{deps}"))
+   (with-stdout-to
+    exact_partials_ratchet.actual
+    (run
+     %{dep:exact_partials_ratchet.exe}
+     %{workspace_root}
+     @exact_partials_ratchet.filelist)))))
+
+(rule
+ (alias runtest-exact_partials_ratchet)
+ (package neural_nets_lib)
+ (action
+  (diff exact_partials_ratchet.expected exact_partials_ratchet.actual)))
+
+(test
+ ; ocannl-backend: none -- links no backend: synthetic sources read by the exact-partials reader.
+ (name exact_partials_scan_cases)
+ (package neural_nets_lib)
+ (deps ocannl_config)
+ (modules exact_partials_scan_cases)
+ (libraries base prose_lexemes test_utils arrayjit.verdict))
 
 ; gh-ocannl-712: what in this tree pins the TEXT of generated code, enumerated. The blast radius of
 ; a codegen change is two populations no single search finds -- goldens holding emitted kernel or IR

@@ -234,6 +234,7 @@ Ambient environment gates, by dune file and every alias whose build runs one:
   test/operations/dune                     @runtest-env_var_deps
   test/operations/dune                     @runtest-env_var_deps_control
   test/operations/dune                     @runtest-epilogue_fusion_mma_seeds-tf32
+  test/operations/dune                     @runtest-exact_partials_ratchet
   test/operations/dune                     @runtest-exit_stream_teardown
   test/operations/dune                     @runtest-fast_math_libmvec
   test/operations/dune                     @runtest-fixed_name_temporaries-logged

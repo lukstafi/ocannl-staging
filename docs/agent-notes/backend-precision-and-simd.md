@@ -1302,7 +1302,18 @@ files.
     necessary: a discrimination claim (the data DO leave a width) exhibits the inexact partial sum
     instead. A bench without the per-cell products derives the same two conditions from the operand
     range and keys the sign condition on the census: `schedule_bench` withholds its exact verdict
-    from a computation that rendered a tensor unit on HIP while its operands are signed.
+    from a computation that rendered a tensor unit on HIP while its operands are signed. A
+    reduction no gfx11 WMMA runs (f32 or f64 operands) passes `~any_sign:true`, which keeps the
+    magnitude bound alone, since that bound is all an IEEE adder needs; `Ll_test.reduction_cells`
+    builds the cells of a contraction of any shape from the init functions. Every bitwise claim's
+    premise follows the same rule (gh-ocannl-1729): `exact_partials_ratchet`, in
+    `@test/operations/scans`, holds a test-source sentence (a comment's or a string literal's)
+    holding `partial sum(s)` and `exact`/`exactly`, and no negation word, to a top-level item that
+    references `Ll_test.exact_partials` (the item it sits in, or the one a leading comment
+    precedes). The sites written before the rule are exact per-file counts there, which the next
+    edit of such a file converts. It is a lint over that phrase list: its reader's header,
+    `test/support/exact_partials_scan.ml`, states the boundary, and other wordings of the premise
+    ("dyadic inputs: any schedule computes the same bits") are its gap, not a pass.
   - *The contraction licence for two kernel shapes over inexact arithmetic.* HIP's clang
     `-ffast-math` contracts `acc + a * b` per kernel, so two kernel shapes (a seed and the default
     schedule, a fission against no fission) round differently whenever a product or partial sum is

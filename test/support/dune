@@ -69,6 +69,7 @@
   lexical_scope
   ll_test_scan
   operand_key_scan
+  exact_partials_scan
   mutation_serial_scan
   open_node_scan
   debug_name_scan
@@ -96,6 +97,7 @@
   arrayjit.verdict
   einsum_parser
   ppxlib
+  prose_lexemes
   sexplib)
  ; A fixed expression shape is written as that expression: `[%expr [%e? f] ()]` says "applied to
  ; unit" where the constructors take three lines to say it. Metaquot patterns ignore locations and
@@ -104,6 +106,17 @@
  ; binding) stay written against the constructors.
  (preprocess
   (pps ppxlib.metaquot ppx_enumerate)))
+
+; The comments and string literals of an OCaml source, read by the compiler's own lexer
+; (gh-ocannl-1729): the parse tree holds no plain comment. Through `compiler-libs`, so in a library
+; of its own for the reason the emitter frontier's note below gives; its interface is plain data, so
+; [test_utils]' prose readers consume it without seeing either library's `Location`.
+
+(library
+ (name prose_lexemes)
+ (package neural_nets_lib)
+ (modules prose_lexemes)
+ (libraries base compiler-libs.common))
 
 ; The emitter frontier is derived from the compiler libraries' COMPILED interfaces (gh-ocannl-748),
 ; so this one reads `.cmi` files through `compiler-libs`. It stays out of [test_utils] because
