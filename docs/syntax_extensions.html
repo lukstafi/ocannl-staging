@@ -1965,8 +1965,10 @@ architectures:</p>
 <h3 id="automatic-shape-schemes">Automatic shape schemes</h3>
 <p>A <code>%op</code> function gets a <em>shape scheme</em>
 automatically (gh-ocannl-1751), on top of the explicit layer
-<code>Tensor.Scheme</code> (gh-ocannl-404, see <a href="./shape_inference.md#shape-schemes">shape inference</a>), in
-<em>checking mode</em>:</p>
+<code>Tensor.Scheme</code> (gh-ocannl-404, see <a href="./shape_inference.md#shape-schemes">shape inference</a>). By
+default its applications register <em>guided</em> by the scheme
+(gh-ocannl-1761, below); <code>op_shape_schemes=check</code> selects
+<em>checking mode</em>, described first:</p>
 <ul>
 <li><strong>When it is traced.</strong> The closure built at the
 <code>()</code> application traces the scheme of the function it
@@ -1980,9 +1982,9 @@ instead: tracing it at the definition would run at module
 initialization.</li>
 <li><strong>What an application does.</strong> It checks the scheme
 against its arguments’ shapes, in a window that is always rewound, then
-runs the body, which builds and registers the graph as it always has.
-The scheme only checks; it never replaces the body (that is
-gh-ocannl-1761).</li>
+runs the body, which builds and registers the graph as it always has. In
+checking mode the scheme only checks; guided registration, below, lets
+it stand in for the body’s own constraint derivation.</li>
 <li><strong>What it reports.</strong> A shape error that does not depend
 on the arguments raises when the closure is built, as
 <code>tracing the shape scheme &lt;function&gt;: ...</code>. One that
@@ -2032,6 +2034,48 @@ shape-variable ids from reserved ranges, so printed ids and shapes,
 compilation choices, generated code and random draws are the same with
 or without schemes), but OCaml side effects of the body (a counter, a
 print) happen.</p>
+<p><strong>Guided registration (the default, gh-ocannl-1761).</strong>
+Under <code>op_shape_schemes=guided</code>, an application instantiates
+the scheme once against its arguments’ shapes – the trace’s constraints,
+renamed, solved together with the arguments – and then runs the body,
+whose shape registration follows the trace:</p>
+<ul>
+<li><strong>What is guided.</strong> Each update step the body builds
+that matches the trace’s next step – the same operation and spec, the
+same arguments and pre-existing tensors in the same operand positions,
+its own new tensors corresponding one-to-one with the trace’s, and a new
+result tensor created with the trace’s dimensions – registers without
+deriving or solving its own constraints: its new shapes are unified with
+the scheme’s rows for them, and the step is registered for closure and
+projections as inline. Closed shapes, projections, tensor ids, node
+uids, generated code and values are those of inline construction; only
+the ids of open shape variables (printed before the closure)
+differ.</li>
+<li><strong>What falls back.</strong> A matched step registers normally
+(still tied to the scheme) when its constraints read more than the
+shapes: capture references, a <code>uint4x32</code> conversion, a batch
+slice, a terminal whose constraints come from its data (a reshaped
+array, <code>Constant_fill</code>, a slice). A step the trace lacked
+registers normally; so do the gradient helpers an operation’s backprop
+code builds, which depend on which operands need gradients (the trace’s
+arguments take none) and are left out of the trace’s skeleton. A nested
+<code>%op</code> application runs its body plain, under the outer guide.
+An application whose trace applied a scheme explicitly, or one made
+where no checkpoint can be taken, is checked instead.</li>
+<li><strong>The determinism contract.</strong> The function’s graph must
+not depend on state outside its closure and its arguments’ shapes. A
+trace step the body does not build raises
+<code>applying the shape scheme &lt;function&gt; to &lt;arguments&gt;: the function built a different graph than at its trace ...</code>
+and taints the session. A body that closes inference (forcing dims),
+takes a checkpoint or rewinds is refused while guided: its trace could
+not have done that either. A registration that falls back runs beside
+the scheme’s constraints, so it does not make a graph that changes
+between applications supported: opt such a function out.</li>
+<li><strong>Errors.</strong> An argument-dependent error raises before
+the body runs, as in checking mode, and leaves the session as it was.
+<code>Tensor.Scheme.registration_counts</code> reports the guided,
+fallback and unmatched steps.</li>
+</ul>
 <p><strong>Opting out.</strong> <code>[@@ocannl.no_scheme]</code> on the
 binding, or <code>[@ocannl.no_scheme]</code> on a <code>fun</code>
 expression, leaves a function unschemed: for a body whose constraints
