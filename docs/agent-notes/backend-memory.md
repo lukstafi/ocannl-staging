@@ -165,7 +165,15 @@ files.
   buffer for the same node vouches for nothing here (the run context's node-level
   `initialized_nodes` is deliberately not consulted for this class), and a caller dropping the
   context `run` returned loses nothing. `rollback_execution` withdraws exactly the keys the
-  rolled-back run introduced (`fresh_writes`). Allocation-time zeros no longer count. A READ-ONLY
+  rolled-back run introduced (`fresh_writes`), and `release` retires the keys of every location it
+  gives up (gh-ocannl-1738): `Backends.finalize`'s `on_retire` reports each freed pool and each
+  trimmed upload-arena tenant as it goes, so a cleanup that raises part way retires exactly what it
+  freed. Freed pool ids are never minted again, and a trimmed tail, re-issued at the same location to
+  a surviving sibling's next upload, is written by that upload before anything reads it, so a stale
+  key was latent rather than a live false vouch: retiring keeps the guarantee local to `release`
+  instead of resting on every caller of `upload_slot` writing first. `Context.buffer_written`
+  reads the record, released contexts included (`set_values_pool_coalescing`'s reused-tail case,
+  `resource_fault_injection`'s partial free). Allocation-time zeros no longer count. A READ-ONLY
   input must be written the same way unless `Tnode.zero_valid` declares zero its correct value
   (gh-ocannl-1462): `Tensor` marks every gradient at creation (both sites, `op` and
   `force_param_diff`), `Tnode.mark_zero_valid` marks any other read-only accumulator, and the mark

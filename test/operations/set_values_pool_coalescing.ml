@@ -449,11 +449,14 @@ struct
      [c3], before the release) uploads a node exactly as large as the three arenas it holds tenants
      of, so its own arena has no room; after [d] and its compile child are released, [s0]'s next
      upload of [v] lands where [m] was, and a merge transfer of [v] must go ahead and carry [v]'s
-     upload. *)
+     upload. The written records are retired, not left behind (gh-ocannl-1738): the release of [d]
+     gives up [m]'s location, so the ledger no longer vouches for it before [v]'s upload writes it,
+     while the locations [s0] still holds keep theirs; the release of the merge consumer's context
+     frees the pool holding [out], and retires its record too. *)
   let case_reused_tail_ledger () =
     let module AC = Ir.Alloc_census in
     let before = AC.snapshot () in
-    let _, _, c3 = chain "ledger" in
+    let xs, _, c3 = chain "ledger" in
     let m_t = fresh_of "svpc_ledger_m" and v_t = fresh_of "svpc_ledger_v" in
     let m = m_t.Tensor.value and v = v_t.Tensor.value in
     let big = (fresh_of ~n:(4 * len) "svpc_ledger_big").Tensor.value in
@@ -469,8 +472,14 @@ struct
     p "the released leaf's writer ran on its buffer"
       (Array.equal Float.equal (Context.get_values written m)
          (Array.map (values 30) ~f:(( *. ) 2.)));
+    p "before the release, the ledger records the leaf's tail as written"
+      (Context.buffer_written d m);
     Context.release written;
     Context.release d;
+    p "the release retires the written record of the tail it trims"
+      (not (Context.buffer_written d m));
+    p_all "the written records of the locations a sibling still holds stay" xs
+      ~f:(Context.buffer_written s0);
     let held = AC.snapshot () in
     let s = Transfer.put s0 v (values 31) in
     p "the survivor's upload reuses the released tail"
@@ -492,7 +501,11 @@ struct
         let consumed = Context.run consumed consume in
         p "a merge transfer from the reused location carries the survivor's upload"
           (reads_back consumed out.Tensor.value 31);
+        p "the reused location is recorded as written by the survivor's upload"
+          (Context.buffer_written s v);
         Context.release consumed;
+        p "the release retires the written record of a pool it frees"
+          (not (Context.buffer_written consumed out.Tensor.value));
         Context.release filled);
     Context.release dst;
     Context.release s;

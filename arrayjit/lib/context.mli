@@ -491,6 +491,14 @@ val copy : ?into_merge_buffer:Ir.Backend_intf.merge_buffer_use -> src:t -> dst:t
     token -- only if [src]'s ledger vouches for it and no other root has overwritten it since (see
     {!run}). *)
 
+val buffer_written : t -> Ir.Tnode.t -> bool
+(** Whether the context's execution ledger (shared by its root) records the context's buffer for the
+    node as written -- by a {!run}, an upload or a device copy: what {!run} asks of its inputs that
+    are not [Tnode.zero_valid]. [false] for a node with no buffer in the context. Readable on a
+    {!release}d context: the release retired the records of the buffers it freed, so a released
+    leaf's node reads [false] unless a later write reused its location (gh-ocannl-1738). A
+    diagnostic. *)
+
 val ledger_entries : t -> int
 (** How many per-id records the context's execution ledger (shared by its root) holds: routine
     names, executed ids, merge-buffer reader registrations and per-run write records. Each compile
@@ -770,7 +778,11 @@ val release : t -> unit
     release its latest value, after releasing any compiled descendants. Releasing it also retires
     the merge-buffer consumers compiled into the chain before the uploads, so they no longer block a
     refill of the merge buffer; an upload fork keeps them pending until every leaf holding their
-    buffers is released (gh-ocannl-1203).
+    buffers is released (gh-ocannl-1203). It also retires the ledger's written records (see
+    {!buffer_written}) for every location it gives up -- each pool it frees, and each upload-arena
+    tail it trims, which a surviving sibling's next upload reuses at the same location -- so a
+    reused buffer never inherits a value nobody wrote there (gh-ocannl-1738); records of buffers a
+    sibling still holds stay.
 
     {b Ownership discipline}: release leaves, not interior nodes. A context compiled {e from} this
     one inherits its buffer locations while keeping it as their backend parent, so releasing an
