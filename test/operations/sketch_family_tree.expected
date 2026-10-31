@@ -225,9 +225,9 @@ tree leaves = flat enumeration: true
   fusion=fused: Schedule.Fuse_epilogue: no statement follows the reduction over awk
 -- excluded --
   fusion=unfused > pipeline=blocktile > geometry=bm64 bn64 bk8 tm4 tn4: pad waste: padding m=20 to 64, n=20 to 64, k=20 to 24 does 12.29x the site's work, 4.00x the 3.07x of this menu's least-padded geometry, at or above the 2x search-economy threshold (config autotune_pad_waste_max)
-  fusion=unfused > pipeline=tensorized > geometry=bm16 bn32 bk32 > twin=depth2: pad-masked site: Tensorize stays on the barrier-bracketed arm, so the twin could only pay the doubled shared-memory footprint (Codex P2 on PR #303)
-  fusion=unfused > pipeline=tensorized > geometry=bm32 bn32 bk32 > twin=depth2: pad-masked site: Tensorize stays on the barrier-bracketed arm, so the twin could only pay the doubled shared-memory footprint (Codex P2 on PR #303)
-  fusion=unfused > pipeline=tensorized > geometry=bm32 bn32 bk16 > twin=depth2: pad-masked site: Tensorize stays on the barrier-bracketed arm, so the twin could only pay the doubled shared-memory footprint (Codex P2 on PR #303)
+  fusion=unfused > pipeline=tensorized > geometry=bm16 bn32 bk32 > twin=depth2: padded site (row, column or reduction pad): a conservative policy pending measurement, not a hardware limit; the twin was judged (Codex P2 on PR #303) on the barrier-bracketed per-call arm, which a masked loop-site accumulator no longer takes (gh-ocannl-1736)
+  fusion=unfused > pipeline=tensorized > geometry=bm32 bn32 bk32 > twin=depth2: padded site (row, column or reduction pad): a conservative policy pending measurement, not a hardware limit; the twin was judged (Codex P2 on PR #303) on the barrier-bracketed per-call arm, which a masked loop-site accumulator no longer takes (gh-ocannl-1736)
+  fusion=unfused > pipeline=tensorized > geometry=bm32 bn32 bk16 > twin=depth2: padded site (row, column or reduction pad): a conservative policy pending measurement, not a hardware limit; the twin was judged (Codex P2 on PR #303) on the barrier-bracketed per-call arm, which a masked loop-site accumulator no longer takes (gh-ocannl-1736)
   fusion=unfused > pipeline=tensorized > geometry=lattice: beyond the curated menu (search economy): the staged tile-size lattice; config model_default_geometry_lattice lifts it for the model-argmin search
 == awkward 20^3 cpu: 4 seeds ==
 tree leaves = flat enumeration: true
@@ -537,7 +537,7 @@ fusion = unfused
           * gpu:true mma:true simd:32 bm:32  bn:32  bk:16  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
         twin = swizzled
           * gpu:true mma:true simd:32 bm:32  bn:32  bk:16  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:b128 depth:1
-        twin = depth2  [excluded: pad-masked site: Tensorize stays on the barrier-bracketed arm, so the twin could only pay the doubled shared-memory footprint (Codex P2 on PR #303)]
+        twin = depth2  [excluded: padded site (row, column or reduction pad): a conservative policy pending measurement, not a hardware limit; the twin was judged (Codex P2 on PR #303) on the barrier-bracketed per-call arm, which a masked loop-site accumulator no longer takes (gh-ocannl-1736)]
       geometry = lattice  [excluded: beyond the curated menu (search economy): the staged tile-size lattice; config model_default_geometry_lattice lifts it for the model-argmin search]
     batch = batch-grid
       geometry = bm16 bn32 bk0  [refuted: unstaged full-K block: innermost contraction extent k=12 (of K=48 over 2 loops) is not a multiple of the intrinsic tile k=8]
@@ -549,7 +549,7 @@ fusion = unfused
           * gpu:true mma:true simd:32 bm:32  bn:32  bk:16  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
         twin = swizzled
           * gpu:true mma:true simd:32 bm:32  bn:32  bk:16  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:b128 depth:1
-        twin = depth2  [excluded: pad-masked site: Tensorize stays on the barrier-bracketed arm, so the twin could only pay the doubled shared-memory footprint (Codex P2 on PR #303)]
+        twin = depth2  [excluded: padded site (row, column or reduction pad): a conservative policy pending measurement, not a hardware limit; the twin was judged (Codex P2 on PR #303) on the barrier-bracketed per-call arm, which a masked loop-site accumulator no longer takes (gh-ocannl-1736)]
       geometry = lattice  [excluded: beyond the curated menu (search economy): the staged tile-size lattice; config model_default_geometry_lattice lifts it for the model-argmin search]
 fusion = fused  [refuted: Schedule.Fuse_epilogue: no statement follows the reduction over oproj]
 last leaf's decision path: fusion=unfused > pipeline=tensorized > batch=batch-grid > geometry=bm32 bn32 bk16 > twin=swizzled
@@ -587,11 +587,11 @@ tree leaves = flat enumeration: true
 -- excluded --
   fusion=unfused > pipeline=tensorized > batch=batch-serial > geometry=bm16 bn32 bk32: pad waste: padding k=12 to 32 does 2.67x the site's work, 2.00x the 1.33x of this menu's least-padded geometry, at or above the 2x search-economy threshold (config autotune_pad_waste_max)
   fusion=unfused > pipeline=tensorized > batch=batch-serial > geometry=bm32 bn32 bk32: pad waste: padding k=12 to 32 does 2.67x the site's work, 2.00x the 1.33x of this menu's least-padded geometry, at or above the 2x search-economy threshold (config autotune_pad_waste_max)
-  fusion=unfused > pipeline=tensorized > batch=batch-serial > geometry=bm32 bn32 bk16 > twin=depth2: pad-masked site: Tensorize stays on the barrier-bracketed arm, so the twin could only pay the doubled shared-memory footprint (Codex P2 on PR #303)
+  fusion=unfused > pipeline=tensorized > batch=batch-serial > geometry=bm32 bn32 bk16 > twin=depth2: padded site (row, column or reduction pad): a conservative policy pending measurement, not a hardware limit; the twin was judged (Codex P2 on PR #303) on the barrier-bracketed per-call arm, which a masked loop-site accumulator no longer takes (gh-ocannl-1736)
   fusion=unfused > pipeline=tensorized > batch=batch-serial > geometry=lattice: beyond the curated menu (search economy): the staged tile-size lattice; config model_default_geometry_lattice lifts it for the model-argmin search
   fusion=unfused > pipeline=tensorized > batch=batch-grid > geometry=bm16 bn32 bk32: pad waste: padding k=12 to 32 does 2.67x the site's work, 2.00x the 1.33x of this menu's least-padded geometry, at or above the 2x search-economy threshold (config autotune_pad_waste_max)
   fusion=unfused > pipeline=tensorized > batch=batch-grid > geometry=bm32 bn32 bk32: pad waste: padding k=12 to 32 does 2.67x the site's work, 2.00x the 1.33x of this menu's least-padded geometry, at or above the 2x search-economy threshold (config autotune_pad_waste_max)
-  fusion=unfused > pipeline=tensorized > batch=batch-grid > geometry=bm32 bn32 bk16 > twin=depth2: pad-masked site: Tensorize stays on the barrier-bracketed arm, so the twin could only pay the doubled shared-memory footprint (Codex P2 on PR #303)
+  fusion=unfused > pipeline=tensorized > batch=batch-grid > geometry=bm32 bn32 bk16 > twin=depth2: padded site (row, column or reduction pad): a conservative policy pending measurement, not a hardware limit; the twin was judged (Codex P2 on PR #303) on the barrier-bracketed per-call arm, which a masked loop-site accumulator no longer takes (gh-ocannl-1736)
   fusion=unfused > pipeline=tensorized > batch=batch-grid > geometry=lattice: beyond the curated menu (search economy): the staged tile-size lattice; config model_default_geometry_lattice lifts it for the model-argmin search
 == fusable tail gpu: 32 seeds (16 unfused + 16 fused), 17 choice nodes, depth 4 ==
 fusion = unfused

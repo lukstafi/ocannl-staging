@@ -12407,3 +12407,17 @@
  (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
+
+(test
+ ; gh-ocannl-1736: pad-masked accumulators held in a persistent register fragment staged through a
+ ; padded scratch tile: structure on every backend, executed parity, scope census, residency and the
+ ; narrowing A/B where the GPU advertises the tile.
+ (name masked_persistent_fragment)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules masked_persistent_fragment)
+ (libraries base ocannl stdio test_utils ll_test arrayjit.verdict)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))

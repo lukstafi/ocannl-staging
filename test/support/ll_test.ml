@@ -1258,3 +1258,115 @@ let f32_mma_limits =
           mma_format_tiles = [ ((BI.Mma_f32, BI.Mma_f32, BI.Mma_f32), (8, 8, 8)) ];
         };
   }
+
+(** {1 Cross-reduction accumulator residency in emitted source}
+
+    The persistent-fragment scopes a backend's fragment hook emits mark their reduction body with a
+    begin/end comment pair, load the accumulator fragment once before it and store it once after it,
+    and leave only update-only MMA steps inside (gh-ocannl-480). Parity cannot see the difference —
+    the resident and the per-step forms are both correct — so these read the emitted source. The
+    marker strings are the hooks' own emissions per dialect, in one table shared by every test that
+    pins residency (gh-ocannl-1736 moved them here from [schedule_mma_matmul]). *)
+
+type residency_markers = {
+  frag_load : string;
+  body_begin : string;
+  body_end : string;
+  frag_store : string;
+  barrier : string;  (** The update step's trailing barrier, releasing the staged tiles. *)
+}
+
+(** The markers of [backend_name]'s fragment scope. [converted_d] names the wide-f16 arms (HIP:
+    gh-ocannl-789; Metal: gh-ocannl-837; CUDA: gh-ocannl-925), where the accumulator array's element
+    type is not the destination's: each element crosses the boundary at the coordinate an
+    accumulator-typed fragment loaded from the coordinate table names. Metal keeps the fragment
+    first in its store; the wmma backends put the destination pointer first. *)
+let residency_markers ?(converted_d = false) ~backend_name () =
+  let on name = String.is_substring backend_name ~substring:name in
+  if on "metal" then
+    {
+      frag_load =
+        (if converted_d then ".thread_elements()[__ei] = (float)(__mma_dp"
+         else "simdgroup_load(__mma_fragment_");
+      body_begin = "/* simdgroup fragment reduction body begins */";
+      body_end = "/* simdgroup fragment reduction body ends */";
+      frag_store = (if converted_d then "(__rc & 7)] = (" else "simdgroup_store(__mma_fragment_");
+      barrier = "threadgroup_barrier(mem_flags::mem_threadgroup);";
+    }
+  else if on "hip" then
+    {
+      frag_load =
+        (if converted_d then ".x[__ei] = (float)__mma_dp["
+         else "rocwmma::load_matrix_sync(__mma_fragment_");
+      body_begin = "/* rocwmma fragment reduction body begins */";
+      body_end = "/* rocwmma fragment reduction body ends */";
+      frag_store = (if converted_d then "] = (rocwmma::" else "rocwmma::store_matrix_sync(__mma_dp");
+      barrier = "__syncthreads();";
+    }
+  else
+    {
+      frag_load =
+        (if converted_d then ".x[__t] = __half2float(__mma_dp["
+         else "nvcuda::wmma::load_matrix_sync(__mma_fragment_");
+      body_begin = "/* wmma fragment reduction body begins */";
+      body_end = "/* wmma fragment reduction body ends */";
+      frag_store =
+        (if converted_d then "= __float2half(__mma_fragment_"
+         else "nvcuda::wmma::store_matrix_sync(__mma_dp");
+      barrier = "__syncthreads();";
+    }
+
+(* One region's body, [beg, fin): update-only steps (the first one followed by the trailing
+   barrier), and no fragment load or store of its own. *)
+let residency_body_holds src m ~beg ~fin =
+  let body = String.sub src ~pos:beg ~len:(fin - beg) in
+  let update_has_trailing_barrier =
+    match String.substr_index body ~pattern:"/* tile_mma fragment update" with
+    | Some update_pos ->
+        String.is_substring (String.drop_prefix body update_pos) ~substring:m.barrier
+    | None -> false
+  in
+  (not (String.is_substring body ~substring:m.frag_load))
+  && (not (String.is_substring body ~substring:m.frag_store))
+  && update_has_trailing_barrier
+
+(** [residency_holds src m]: the FIRST fragment scope of [src] is resident — its first fragment load
+    precedes its body, its body holds update steps only, and its first store follows. *)
+let residency_holds src m =
+  match
+    ( String.substr_index src ~pattern:m.frag_load,
+      String.substr_index src ~pattern:m.body_begin,
+      String.substr_index src ~pattern:m.body_end,
+      String.substr_index src ~pattern:m.frag_store )
+  with
+  | Some load, Some beg, Some fin, Some store when load < beg && beg < fin && fin < store ->
+      residency_body_holds src m ~beg ~fin
+  | _ -> false
+
+(** [resident_regions src m] is [Some r] when [src] holds [r >= 1] fragment scopes and EVERY one is
+    resident with exactly one boundary load and one boundary store: the four markers occur [r] times
+    each, interleaved as load < begin < end < store < next load, and each body holds update steps
+    only. [None] otherwise — no scope, a marker count off, an extra boundary transfer, or a body
+    that loads or stores the fragment. Stronger than {!residency_holds}, which reads the first
+    occurrences only. *)
+let resident_regions src m =
+  let all pattern = String.substr_index_all src ~may_overlap:false ~pattern in
+  let loads = all m.frag_load
+  and begins = all m.body_begin
+  and ends = all m.body_end
+  and stores = all m.frag_store in
+  let r = List.length begins in
+  if r = 0 || List.length loads <> r || List.length ends <> r || List.length stores <> r then None
+  else
+    let rec ordered prev_store = function
+      | [] -> true
+      | (load, beg, fin, store) :: rest ->
+          prev_store < load && load < beg && beg < fin && fin < store
+          && residency_body_holds src m ~beg ~fin
+          && ordered store rest
+    in
+    let regions =
+      List.map3_exn (List.zip_exn loads begins) ends stores ~f:(fun (load, beg) fin store ->
+          (load, beg, fin, store))
+    in
+    if ordered (-1) regions then Some r else None

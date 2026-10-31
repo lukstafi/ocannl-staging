@@ -3944,10 +3944,13 @@ let matmul_flavor_tree ?(coalesced : coalesce_layout option)
                                                    && divides bk site.m_nk)
                                                 then
                                                   Sspace.Excluded
-                                                    ( "pad-masked site: Tensorize stays on the \
-                                                       barrier-bracketed arm, so the twin could \
-                                                       only pay the doubled shared-memory \
-                                                       footprint (Codex P2 on PR #303)",
+                                                    ( "padded site (row, column or reduction pad): \
+                                                       a conservative policy pending measurement, \
+                                                       not a hardware limit; the twin was judged \
+                                                       (Codex P2 on PR #303) on the \
+                                                       barrier-bracketed per-call arm, which a \
+                                                       masked loop-site accumulator no longer \
+                                                       takes (gh-ocannl-1736)",
                                                       lazy (leaf { base with sk_depth = d }) )
                                                 else if
                                                   Ir.Ops.prec_in_bytes a_prec < 4
@@ -4864,11 +4867,14 @@ let conv_family_tree ?(capabilities = Ir.Backend_intf.no_codegen_capabilities) ~
                                          | None, _ ->
                                              if masked p0 then
                                                Sspace.Excluded
-                                                 ( "pad-masked flavor: Tensorize stays on the \
-                                                    barrier-bracketed per-call arm, whose leading \
-                                                    bracket sits between the prefetch and the \
-                                                    compute, so the twin could only pay the \
-                                                    doubled footprint (Codex P2 on PR #303)",
+                                                 ( "padded flavor (row, column or reduction pad): \
+                                                    a conservative policy pending measurement, not \
+                                                    a hardware limit; the twin was judged (Codex \
+                                                    P2 on PR #303) on the barrier-bracketed \
+                                                    per-call arm, whose leading bracket sits \
+                                                    between the prefetch and the compute, which a \
+                                                    masked loop-site accumulator no longer takes \
+                                                    (gh-ocannl-1736)",
                                                    lazy twin )
                                              else if not async_wide then
                                                Sspace.Excluded

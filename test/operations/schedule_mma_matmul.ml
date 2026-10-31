@@ -195,70 +195,12 @@ let named name (comp : Asgns.comp) : Asgns.comp =
   { comp with asgns = Asgns.Block_comment (name, comp.asgns) }
 
 (* The cross-[k_o] accumulator-residency structural pin (gh-ocannl-480), shared by every staged half
-   leg and backend: the accumulator fragment is loaded once before the serial [k_o] body (bracketed
-   by [body_begin]/[body_end] marker comments) and stored once after it, and the body in between
-   carries update-only MMA steps (with the trailing [barrier] that releases the staged tiles) and no
-   fragment-array load/store of its own. Parity alone cannot see the difference — both the resident
-   and the per-[k_o] forms are correct — so the pin is on the emitted source. *)
-let residency_holds src ~frag_load ~body_begin ~body_end ~frag_store ~barrier =
-  match
-    ( String.substr_index src ~pattern:frag_load,
-      String.substr_index src ~pattern:body_begin,
-      String.substr_index src ~pattern:body_end,
-      String.substr_index src ~pattern:frag_store )
-  with
-  | Some load, Some beg, Some fin, Some store when load < beg && beg < fin && fin < store ->
-      let reduction_body = String.sub src ~pos:beg ~len:(fin - beg) in
-      let update_has_trailing_barrier =
-        match String.substr_index reduction_body ~pattern:"/* tile_mma fragment update" with
-        | Some update_pos ->
-            String.is_substring (String.drop_prefix reduction_body update_pos) ~substring:barrier
-        | None -> false
-      in
-      (not (String.is_substring reduction_body ~substring:frag_load))
-      && (not (String.is_substring reduction_body ~substring:frag_store))
-      && update_has_trailing_barrier
-  | _ -> false
-
-(* The per-backend marker sets for [residency_holds] on a staged half leg. The fragment scope emits
-   the same anchor comments regardless of accumulator element type, so both the uniform-f16 and the
-   f16->f32 legs share these. Metal keeps the fragment first in its store; the wmma backends put the
-   destination pointer first.
-
-   [converted_d] names the wide-f16 arms (HIP: gh-ocannl-789; Metal: gh-ocannl-837; CUDA:
-   gh-ocannl-925), where the accumulator array's element type is not the destination's. Each element
-   crosses the boundary at the coordinate an accumulator-typed fragment loaded from the coordinate
-   table names, widened on the way in and narrowed on the way out. *)
-let staged_half_resident ?(converted_d = false) src =
-  if on_metal then
-    residency_holds src
-      ~frag_load:
-        (if converted_d then ".thread_elements()[__ei] = (float)(__mma_dp"
-         else "simdgroup_load(__mma_fragment_")
-      ~body_begin:"/* simdgroup fragment reduction body begins */"
-      ~body_end:"/* simdgroup fragment reduction body ends */"
-      ~frag_store:(if converted_d then "(__rc & 7)] = (" else "simdgroup_store(__mma_fragment_")
-      ~barrier:"threadgroup_barrier(mem_flags::mem_threadgroup);"
-  else if on_hip then
-    residency_holds src
-      ~frag_load:
-        (if converted_d then ".x[__ei] = (float)__mma_dp["
-         else "rocwmma::load_matrix_sync(__mma_fragment_")
-      ~body_begin:"/* rocwmma fragment reduction body begins */"
-      ~body_end:"/* rocwmma fragment reduction body ends */"
-      ~frag_store:(if converted_d then "] = (rocwmma::" else "rocwmma::store_matrix_sync(__mma_dp")
-      ~barrier:"__syncthreads();"
-  else
-    residency_holds src
-      ~frag_load:
-        (if converted_d then ".x[__t] = __half2float(__mma_dp["
-         else "nvcuda::wmma::load_matrix_sync(__mma_fragment_")
-      ~body_begin:"/* wmma fragment reduction body begins */"
-      ~body_end:"/* wmma fragment reduction body ends */"
-      ~frag_store:
-        (if converted_d then "= __float2half(__mma_fragment_"
-         else "nvcuda::wmma::store_matrix_sync(__mma_dp")
-      ~barrier:"__syncthreads();"
+   leg and backend: [Ll_test.residency_holds] over the backend's [Ll_test.residency_markers] — the
+   accumulator fragment loaded once before the serial [k_o] body and stored once after it, the body
+   carrying update-only MMA steps. Parity alone cannot see the difference, so the pin is on the
+   emitted source. *)
+let staged_half_resident ?converted_d src =
+  Ll_test.residency_holds src (Ll_test.residency_markers ?converted_d ~backend_name ())
 
 (* HIP's rocWMMA f32 accumulator fragment, and its f16 A operand fragment (the layout argument
    follows), the declarations the f16 -> f32 legs pin. *)
@@ -2411,9 +2353,14 @@ let () =
          ~scope:Ir.Backend_intf.Mma_fragment_scope Ir.Ops.bfloat16 Ir.Ops.bfloat16 Ir.Ops.bfloat16)
   in
   let cuda_register_resident src =
-    residency_holds src ~frag_load:"[0] = __bfloat162float(__mma_dr0[0]);"
-      ~body_begin:register_body_begin ~body_end:register_body_end
-      ~frag_store:"__mma_dr0[0] = __float2bfloat16(__mma_fragment_" ~barrier:"__syncthreads();"
+    Ll_test.residency_holds src
+      {
+        Ll_test.frag_load = "[0] = __bfloat162float(__mma_dr0[0]);";
+        body_begin = register_body_begin;
+        body_end = register_body_end;
+        frag_store = "__mma_dr0[0] = __float2bfloat16(__mma_fragment_";
+        barrier = "__syncthreads();";
+      }
     &&
     match
       ( String.substr_index src ~pattern:register_body_begin,
@@ -2527,8 +2474,14 @@ let () =
           writes the rows back ([__mma_dr0[0] = narrow(frag…)]). The per-[k_o] rendering this
           replaces reads and writes the same [__mma_dr0] rows inside the body, at every block. *)
        let register_resident src =
-         residency_holds src ~frag_load:"[__mi][__ni][0] = " ~body_begin:register_body_begin
-           ~body_end:register_body_end ~frag_store:"__mma_dr0[0] = " ~barrier:"__syncthreads();"
+         Ll_test.residency_holds src
+           {
+             Ll_test.frag_load = "[__mi][__ni][0] = ";
+             body_begin = register_body_begin;
+             body_end = register_body_end;
+             frag_store = "__mma_dr0[0] = ";
+             barrier = "__syncthreads();";
+           }
          &&
          match
            ( String.substr_index src ~pattern:register_body_begin,

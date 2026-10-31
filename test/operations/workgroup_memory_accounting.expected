@@ -18,4 +18,5 @@ reduction-padded: no flavor places its accumulator fragment in workgroup memory:
 masked: the conv site is mixed precision, f16 operands into an f32 output: true
 masked: every GPU conv seed is kept at a limit of exactly its gate estimate: true
 masked: every GPU conv seed is refused one byte below its gate estimate: true
-masked: every flavor places an f32 accumulator fragment in workgroup memory: true
+masked: every flavor stages a register fragment through one f32 scratch tile, the only accumulator tile in workgroup memory: true
+masked: the gate's estimate charges exactly the scratch tile beyond the operand tiles: true

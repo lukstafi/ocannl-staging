@@ -33,9 +33,10 @@
    rendering has none.
 
    gh-ocannl-1707: that control judges the persistent-fragment region only where a seed has one. A
-   pad-masked accumulator never does (its fragment is workgroup-shared or a local array, never
-   marked), and CUDA's 16-row wmma tile masked every seed of an 8-wide step, so its smoke passed
-   with gh-ocannl-1677's defect restored. The images are 16 wide, which CUDA's and Metal's row tiles
+   pad-masked accumulator then never did (its tile was workgroup-shared or a local array, never
+   marked; since gh-ocannl-1736 a staged loop-site one is a fragment over a padded scratch tile),
+   and CUDA's 16-row wmma tile masked every seed of an 8-wide step, so its smoke passed with
+   gh-ocannl-1677's defect restored. The images are 16 wide, which CUDA's and Metal's row tiles
    divide, and where the backend renders an f32 persistent-fragment scope some executed conv seed
    must hold its accumulator in one, by the census of the scopes the fragment hook rendered. The
    persistent-fragment scope count is also part of the rendering the control compares. *)
@@ -213,8 +214,10 @@ let () =
         | _ -> false));
   (* gh-ocannl-1707: the smoke must reach the region gh-ocannl-1677's control dissolved, or the
      negative control above judges no seed on it: on CUDA every seed of the 8-wide step was
-     pad-masked (16-row wmma tiles), and a masked accumulator is never a persistent fragment. The
-     census counts the scopes the fragment hook rendered, so the claim is the renderer's own. *)
+     pad-masked (16-row wmma tiles), and a masked accumulator was then never a persistent fragment
+     (gh-ocannl-1736 changed that for staged loop-site contractions; the geometry stays unmasked,
+     the case the control was designed around). The census counts the scopes the fragment hook
+     rendered, so the claim is the renderer's own. *)
   in_leg ~leg
     "persistent fragment: some executed conv seed holds its accumulator in a persistent-fragment \
      scope, the region the negative control keeps" (fun label ->
