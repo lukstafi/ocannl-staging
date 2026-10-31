@@ -935,6 +935,12 @@ module type C_syntax_config = sig
   val styled_log_arg : PPrint.document -> PPrint.document
   (** Function to convert potentially floating-point numeric values for logging. *)
 
+  val uint4x32_log_lane : PPrint.document -> int -> PPrint.document
+  (** Lane [i] (0 to 3) of a [uint4x32] value, as a [%u] routine-log argument. A [uint4x32] value is
+      a struct ([uint4x32_t], C/CUDA/HIP) or a vector ([uint4], Metal), never a number, so neither
+      {!float_log_style} nor {!styled_log_arg} applies to it: a log statement prints its four lanes
+      as unsigned integers instead. Coupled to [typ_of_prec]'s spelling of [Uint4x32_prec]. *)
+
   val log_index_arg : PPrint.document -> string * PPrint.document
   (** How a value of {!loop_index_type} is passed to a log statement: the printf conversion
       specification to splice into the format string, and the argument document, cast where the
@@ -2706,6 +2712,9 @@ struct
       let open PPrint in
       string "(int)(" ^^ doc ^^ string " * 1000.0)"
 
+  (* The [uint4x32_t] struct the C preludes (and CUDA's and HIP's) define: [uint32_t v[4]]. *)
+  let uint4x32_log_lane doc lane = PPrint.(parens doc ^^ string (Printf.sprintf ".v[%d]" lane))
+
   (* [long long] is the widest type C's variadic promotions name portably, and [%lld] its conversion
      -- available on glibc, musl, the MSVC runtime, nvrtc and hiprtc alike, with no [<inttypes.h>]
      and no [PRId64] string-concatenation dance. The cast is a no-op where [loop_index_type] is
@@ -3847,6 +3856,39 @@ module C_syntax (B : C_syntax_config) = struct
     let buf = Buffer.create 128 in
     PPrint.ToBuffer.compact buf doc;
     Buffer.contents buf
+
+  (* Routine-log format strings. A log statement's format literal splices TEXT -- the [debug]
+     rendering of the statement, a comment, the C expression a value came from -- next to the
+     conversions its arguments need, and that text can carry a [%] of its own: integer [Mod] renders
+     as [(a % b)], whose [% 4)] printf reads as a conversion ([' '] flag, width 4, conversion
+     [')']), a compile-time [-Wformat] diagnostic and a run-time mismatch between conversions and
+     arguments. So text goes in through [log_literal], which doubles every [%]; and {!debug_float},
+     whose rendering interleaves the two, spells its own conversions with [log_conversion_marker] in
+     place of [%], which [log_format_of_debug] turns back into [%] after doubling the text's. *)
+  let log_literal s = String.substr_replace_all s ~pattern:"%" ~with_:"%%"
+
+  (* A byte no rendering of C code, identifiers or numbers produces. *)
+  let log_conversion_marker = '\001'
+  let log_conversion spec = String.tr ~target:'%' ~replacement:log_conversion_marker spec
+
+  let log_format_of_debug doc =
+    String.tr ~target:log_conversion_marker ~replacement:'%' (log_literal (doc_to_string doc))
+
+  (* The conversion specification and the arguments for one value of precision [prec] in a log
+     statement. A [uint4x32] value prints its four lanes as [%u], everything else as a number in the
+     backend's [float_log_style]. [guard] (see {!debug_float}) wraps each argument that dereferences
+     memory -- per lane for [uint4x32], since [(g ? v : 0)] does not typecheck for a struct [v]. *)
+  let log_value_spec (prec : Ops.prec) =
+    match prec with Uint4x32_prec _ -> "<%u,%u,%u,%u>" | _ -> B.float_log_style
+
+  let log_value_args ?guard (prec : Ops.prec) doc =
+    let open PPrint in
+    let guarded d =
+      match guard with None -> d | Some g -> parens (g ^^ string " ? " ^^ d ^^ string " : 0")
+    in
+    match prec with
+    | Uint4x32_prec _ -> List.init 4 ~f:(fun lane -> guarded (B.uint4x32_log_lane doc lane))
+    | _ -> [ B.styled_log_arg (guarded doc) ]
 
   let array_offset_to_string (idcs, dims) = doc_to_string @@ pp_array_offset (idcs, dims)
 
@@ -5650,27 +5692,21 @@ module C_syntax (B : C_syntax_config) = struct
               let num_typ = string (B.typ_of_prec store_prec) in
               let new_var = string "new_set_v" in
               let decl = num_typ ^^ space ^^ new_var ^^ string " = " ^^ val_doc ^^ semi in
-              let debug_val_doc, debug_args_docs = (debug_float ctx) prec llsc in
-              let debug_val_str = doc_to_string debug_val_doc in
-              let pp_args_docs =
-                List.map debug_args_docs ~f:(function
-                  | `Accessor arg_doc -> arg_doc
-                  | `Value v_doc -> B.styled_log_arg v_doc)
-              in
+              let debug_val_doc, pp_args_docs = (debug_float ctx) prec llsc in
+              let debug_val_str = log_format_of_debug debug_val_doc in
               let offset_spec, offset_arg_doc = B.log_index_arg offset_doc in
               let log_args_for_printf =
-                offset_arg_doc
-                :: B.styled_log_arg (ident_doc ^^ brackets offset_doc)
-                :: B.styled_log_arg new_var :: pp_args_docs
+                (offset_arg_doc :: log_value_args store_prec (ident_doc ^^ brackets offset_doc))
+                @ log_value_args store_prec new_var @ pp_args_docs
               in
               let log_doc =
                 let log_param_doc =
                   Option.map B.kernel_log_param ~f:(fun (_, name) -> string name)
                 in
-                let comment_base_msg = "# " ^ debug ^ "\n" in
+                let comment_base_msg = "# " ^ log_literal debug ^ "\n" in
                 let value_base_msg =
                   Printf.sprintf "%s[%s]{=%s} = %s = %s\n" (get_code_ident tn) offset_spec
-                    B.float_log_style B.float_log_style debug_val_str
+                    (log_value_spec store_prec) (log_value_spec store_prec) debug_val_str
                 in
                 let comment_log =
                   B.pp_log_statement ~log_param_c_expr_doc:log_param_doc
@@ -5731,25 +5767,19 @@ module C_syntax (B : C_syntax_config) = struct
           let num_typ = string (B.typ_of_prec store_prec) in
           let new_var = string "new_set_v" in
           let decl = num_typ ^^ space ^^ new_var ^^ string " = " ^^ val_doc ^^ semi in
-          let debug_val_doc, debug_args_docs = (debug_float ctx) prec llsc in
-          let debug_val_str = doc_to_string debug_val_doc in
-          let pp_args_docs =
-            List.map debug_args_docs ~f:(function
-              | `Accessor arg_doc -> arg_doc
-              | `Value v_doc -> B.styled_log_arg v_doc)
-          in
+          let debug_val_doc, pp_args_docs = (debug_float ctx) prec llsc in
+          let debug_val_str = log_format_of_debug debug_val_doc in
           let offset_spec, offset_arg_doc = B.log_index_arg offset_doc in
           let log_args_for_printf =
-            offset_arg_doc
-            :: B.styled_log_arg (ident_doc ^^ brackets offset_doc)
-            :: B.styled_log_arg new_var :: pp_args_docs
+            (offset_arg_doc :: log_value_args store_prec (ident_doc ^^ brackets offset_doc))
+            @ log_value_args store_prec new_var @ pp_args_docs
           in
           let log_doc =
             let log_param_doc = Option.map B.kernel_log_param ~f:(fun (_, name) -> string name) in
-            let comment_base_msg = "# " ^ debug ^ "\n" in
+            let comment_base_msg = "# " ^ log_literal debug ^ "\n" in
             let value_base_msg =
               Printf.sprintf "%s[%s]{=%s} = %s = %s\n" (get_code_ident tn) offset_spec
-                B.float_log_style B.float_log_style debug_val_str
+                (log_value_spec store_prec) (log_value_spec store_prec) debug_val_str
             in
             let comment_log =
               B.pp_log_statement ~log_param_c_expr_doc:log_param_doc
@@ -5777,7 +5807,7 @@ module C_syntax (B : C_syntax_config) = struct
           lbrace ^^ nest 2 (hardline ^^ block_content) ^^ hardline ^^ rbrace
     | Comment message ->
         if Utils.debug_log_from_routines () then
-          let base_message = "COMMENT: " ^ message ^ "\n" in
+          let base_message = "COMMENT: " ^ log_literal message ^ "\n" in
           let log_param_doc = Option.map B.kernel_log_param ~f:(fun (_, name) -> string name) in
           B.pp_log_statement ~log_param_c_expr_doc:log_param_doc ~base_message_literal:base_message
             ~args_docs:[]
@@ -5841,7 +5871,7 @@ module C_syntax (B : C_syntax_config) = struct
         if Utils.debug_log_from_routines () then
           let open PPrint in
           let log_param_doc = Option.map B.kernel_log_param ~f:(fun (_, name) -> string name) in
-          let comment_base_msg = "# " ^ debug ^ "\n" in
+          let comment_base_msg = "# " ^ log_literal debug ^ "\n" in
           let comment_log =
             B.pp_log_statement ~log_param_c_expr_doc:log_param_doc
               ~base_message_literal:comment_base_msg ~args_docs:[]
@@ -5861,14 +5891,11 @@ module C_syntax (B : C_syntax_config) = struct
                 let offset_spec, offset_arg_doc = B.log_index_arg offset_doc in
                 let value_base_msg =
                   Printf.sprintf "%s[%s]{=%s} = vec_result.v[%d] = %s\n" (get_code_ident tn)
-                    offset_spec B.float_log_style i B.float_log_style
+                    offset_spec (log_value_spec prec) i (log_value_spec prec)
                 in
                 let log_args =
-                  [
-                    offset_arg_doc;
-                    B.styled_log_arg (ident_doc ^^ brackets offset_doc);
-                    B.styled_log_arg (string ("vec_result.v[" ^ Int.to_string i ^ "]"));
-                  ]
+                  (offset_arg_doc :: log_value_args prec (ident_doc ^^ brackets offset_doc))
+                  @ log_value_args prec (string ("vec_result.v[" ^ Int.to_string i ^ "]"))
                 in
                 B.pp_log_statement ~log_param_c_expr_doc:log_param_doc
                   ~base_message_literal:value_base_msg ~args_docs:log_args)
@@ -5937,22 +5964,19 @@ module C_syntax (B : C_syntax_config) = struct
           let new_var = string "new_set_local_v" in
           let num_typ = string (B.typ_of_prec prec) in
           let decl = num_typ ^^ space ^^ new_var ^^ string " = " ^^ value_doc ^^ semi in
-          let debug_val_doc, debug_args_docs = (debug_float ctx) value_prec value in
-          let debug_val_str = doc_to_string debug_val_doc in
-          let pp_args_docs =
-            List.map debug_args_docs ~f:(function
-              | `Accessor arg_doc -> arg_doc
-              | `Value v_doc -> B.styled_log_arg v_doc)
-          in
+          let debug_val_doc, pp_args_docs = (debug_float ctx) value_prec value in
+          let debug_val_str = log_format_of_debug debug_val_doc in
           let log_doc =
             let log_param_doc = Option.map B.kernel_log_param ~f:(fun (_, name) -> string name) in
             let scope_doc = pp_scope_id id in
             let comment_base_msg =
-              "# local " ^ doc_to_string scope_doc ^ " := " ^ doc_to_string value_doc ^ "\n"
+              "# local " ^ doc_to_string scope_doc ^ " := "
+              ^ log_literal (doc_to_string value_doc)
+              ^ "\n"
             in
             let value_base_msg =
-              Printf.sprintf "%s{=%s} = %s = %s\n" (doc_to_string scope_doc) B.float_log_style
-                B.float_log_style debug_val_str
+              Printf.sprintf "%s{=%s} = %s = %s\n" (doc_to_string scope_doc) (log_value_spec prec)
+                (log_value_spec prec) debug_val_str
             in
             let comment_log =
               B.pp_log_statement ~log_param_c_expr_doc:log_param_doc
@@ -5961,7 +5985,8 @@ module C_syntax (B : C_syntax_config) = struct
             let value_log =
               B.pp_log_statement ~log_param_c_expr_doc:log_param_doc
                 ~base_message_literal:value_base_msg
-                ~args_docs:(B.styled_log_arg scope_doc :: B.styled_log_arg new_var :: pp_args_docs)
+                ~args_docs:
+                  (log_value_args prec scope_doc @ log_value_args prec new_var @ pp_args_docs)
             in
             let flush_log =
               if B.log_involves_file_management then string "fflush(log_file);" else empty
@@ -8232,22 +8257,22 @@ module C_syntax (B : C_syntax_config) = struct
     | Ternop _ | Binop _ | Unop _ -> pp_scalar_op ~operand:(pp_scalar ctx) prec vcomp
 
   and debug_float ctx ?guard (prec : Ops.prec) (value : Low_level.scalar_t) :
-      PPrint.document * [ `Accessor of PPrint.document | `Value of PPrint.document ] list =
-    (* Returns (value expression doc, list of arguments for printf).
+      PPrint.document * PPrint.document list =
+    (* Returns (value expression doc, list of arguments for printf). The expression doc is a
+       routine-log format fragment: its conversions are spelled with [log_conversion_marker], so a
+       caller splices it through [log_format_of_debug], never [doc_to_string]. A value's conversion
+       and arguments follow its precision ([log_value_spec], [log_value_args]): the [uint4x32]
+       operand of a [Uint4x32_to_prec_uniform_lane] prints as its four lanes.
 
        [guard] (task-9658aac9): when [Some cond_c] (a real C boolean expression), any array
-       dereference produced here is only safe when [cond_c] holds, so its printf [`Value] argument
-       is short-circuited as [(cond_c ? read : 0)]. This mirrors the runtime [Where] ternary's
+       dereference produced here is only safe when [cond_c] holds, so its printf value argument is
+       short-circuited as [(cond_c ? read : 0)]. This mirrors the runtime [Where] ternary's
        short-circuiting and closes the only debug-logging path that would otherwise dereference a
        conditionally-evaluated branch (e.g. the Stage B unit-solve then-branch producer read) out of
        bounds -- the same hazard gh-343 fixed for the sibling [Get_dynamic] gather. Only the
        dereferencing argument is gated; the displayed expression doc is unchanged. *)
     let open PPrint in
-    let guarded_value access_doc =
-      match guard with
-      | None -> access_doc
-      | Some g -> parens (g ^^ string " ? " ^^ access_doc ^^ string " : 0")
-    in
+    let value_conv prec = braces (string ("=" ^ log_conversion (log_value_spec prec))) in
     match value with
     | Local_scope { id; _ } ->
         (* Not printing the inlined definition: (1) code complexity; (2) don't overload the debug
@@ -8257,7 +8282,7 @@ module C_syntax (B : C_syntax_config) = struct
         let scope_prec = (scope_prec_of ctx) id in
         let prefix, postfix = B.convert_precision ~from:scope_prec ~to_:prec in
         let v_doc = string prefix ^^ pp_scope_id id ^^ string postfix in
-        (v_doc ^^ braces (string ("=" ^ B.float_log_style)), [ `Value v_doc ])
+        (v_doc ^^ value_conv prec, log_value_args prec v_doc)
     | Get_merge_buffer (source, idcs) ->
         let tn = source in
         let dims = Lazy.force tn.dims in
@@ -8270,11 +8295,10 @@ module C_syntax (B : C_syntax_config) = struct
         in
         let expr_doc =
           string prefix ^^ string "merge_buffer"
-          ^^ brackets (string offset_spec)
-          ^^ string postfix
-          ^^ braces (string ("=" ^ B.float_log_style))
+          ^^ brackets (string (log_conversion offset_spec))
+          ^^ string postfix ^^ value_conv prec
         in
-        (expr_doc, [ `Accessor offset_arg_doc; `Value (guarded_value access_doc) ])
+        (expr_doc, offset_arg_doc :: log_value_args ?guard prec access_doc)
     | Get (tn, idcs) ->
         let ident_doc = string (get_ident tn) in
         let dims = Lazy.force tn.dims in
@@ -8290,22 +8314,23 @@ module C_syntax (B : C_syntax_config) = struct
         let expr_doc =
           string prefix
           ^^ string (get_code_ident tn)
-          ^^ brackets (string offset_spec)
-          ^^ string postfix
-          ^^ braces (string ("=" ^ B.float_log_style))
+          ^^ brackets (string (log_conversion offset_spec))
+          ^^ string postfix ^^ value_conv prec
         in
-        (expr_doc, [ `Accessor offset_arg_doc; `Value (guarded_value access_doc) ])
+        (expr_doc, offset_arg_doc :: log_value_args ?guard prec access_doc)
     | Get_dynamic { tn; dyn_value = iv, iprec; _ } ->
         (* gh-343: do NOT dereference the table in debug logs. A [Where]'s [debug_float] collects
            all three branch values as printf arguments evaluated unconditionally, so returning the
            raw [table[((idx_typ)(idx))]] access here would read out of bounds for ids the
-           surrounding guard is meant to exclude. Log the (always-safe) dynamic index value
-           instead. *)
-        let prefix, postfix = B.convert_precision ~from:iprec ~to_:prec in
+           surrounding guard is meant to exclude. Log the (always-safe) dynamic index value instead.
+           The index is a number: a [uint4x32] gather (the packed RNG draws a lane block by a
+           computed index) shows it as a [single], not as a converted [uint4x32] block. *)
+        let shown_prec = match prec with Uint4x32_prec _ -> Ops.single | _ -> prec in
+        let prefix, postfix = B.convert_precision ~from:iprec ~to_:shown_prec in
         let _defs, idx_e = (pp_scalar ctx) iprec iv in
         let idx_doc = string prefix ^^ idx_e ^^ string postfix in
         let label = string (get_code_ident tn ^ "@dyn_idx") in
-        (label ^^ braces (string ("=" ^ B.float_log_style)), [ `Value idx_doc ])
+        (label ^^ value_conv shown_prec, log_value_args shown_prec idx_doc)
     | Constant c ->
         let from_prec = Ops.double in
         let prefix, postfix = B.convert_precision ~from:from_prec ~to_:prec in

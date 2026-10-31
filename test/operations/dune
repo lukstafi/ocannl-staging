@@ -12464,3 +12464,46 @@
  (libraries base ocannl stdio test_utils ll_test arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
+
+;; A parameter's init routine (RNG draws into a default [{ w }]) compiles and runs with routine
+;; logging at log_level=2, and logs its stores: a uint4x32 block as four [%u] lanes, and the lane
+;; index's [%] escaped in the format string. A fresh log directory per run, so the claims see only
+;; this run's lines.
+
+(executable
+ (name routine_log_rng_init)
+ (modules routine_log_rng_init)
+ (libraries base ocannl stdio arrayjit.verdict)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+(rule
+ (target routine_log_rng_init.actual)
+ (package neural_nets_lib)
+ (deps
+  (alias runtest-env_spelling_gate)
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (action
+  (with-stdout-to
+   %{target}
+   (run
+    %{dep:routine_log_rng_init.exe}
+    "--ocannl_debug_log_from_routines=true"
+    "--ocannl_log_level=2"
+    "--ocannl_debug_log_to_stream_files=true"
+    "--ocannl_log_main_domain_to_stdout=false"
+    "--ocannl_clean_up_log_files_on_startup=true"
+    "--ocannl_log_file_stem=routine_log_rng_init"
+    "--ocannl_build_files_prefix=routine_log_rng_init"))))
+
+(rule
+ (alias runtest-routine_log_rng_init)
+ (package neural_nets_lib)
+ (action
+  (diff routine_log_rng_init.expected routine_log_rng_init.actual)))
+
+(alias
+ (name runtest)
+ (deps
+  (alias runtest-routine_log_rng_init)))

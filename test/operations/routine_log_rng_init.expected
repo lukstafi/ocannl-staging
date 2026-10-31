@@ -1,0 +1,6 @@
+the parameter holds draws in the default init's range [-0.25, 0.25): true
+the parameter's draws are not all equal: true
+the forward read the initialized parameter: true
+the log records an RNG block store as four unsigned lanes: true
+the log records every store into the parameter: true
+a logged line carries the lane index's % verbatim: true
