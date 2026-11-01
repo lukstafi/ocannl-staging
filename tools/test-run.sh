@@ -78,7 +78,13 @@
 # Every value option takes its value spaced or after `=` alike (`--cap 900`,
 # `--cap=900`; `--test-cap`, `--expect-backend`, `--targets-file`, bisect's
 # `--build`, wait's `--timeout`), and an empty value is refused as a missing
-# one (opt_value).
+# one (opt_value). A flag takes no value: `--alone=1`, `--direct=1`,
+# `--no-first-parent=x` (and affected's `--referenced-only=x`) are refused by
+# name (opt_flag), as is an option repeat does not take before its count. A
+# query (`status`, `wait`, `stop`, `paths`, `lock-status`) names one run at
+# most, and a word beginning with `-` that is not its option is refused as
+# unknown rather than looked up as a run (take_run_ref); `list` takes no
+# arguments. Every such refusal exits 2.
 #
 # `aliases PATH...` lists the per-test aliases dune defines for each PATH,
 # grouped by family -- `runtest` (in `dune runtest`), `slow` (`dune build
@@ -357,6 +363,31 @@ opt_value() { # WHAT ARGV...: WHAT names the value in the refusal ("a value", "a
     *) [ $# -ge 2 ] || die "$1 requires $what"; opt_value=$2 opt_shift=2 ;;
   esac
   [ -n "$opt_value" ] || die "${1%%=*} requires $what"
+}
+
+# A flag option (repeat's `--alone` and `--direct`, bisect's
+# `--no-first-parent`) takes no value, so `--flag=V` is refused by name. Read
+# past, `repeat --alone=1 2 @x` took `--alone=1` for the repeat count, and
+# `bisect --no-first-parent=x` met only "unknown option". Every flag's arm
+# matches both spellings and calls this first: `--alone | --alone=*)`.
+opt_flag() { # OPTION, as written
+  case $1 in --*=*) die "${1%%=*} is a flag and takes no value: $1" ;; esac
+}
+
+# The run a query names (`status`, `wait`, `stop`, `paths`, `lock-status`): one
+# word at most, and never one beginning with `-`, which is an option the
+# subcommand does not take. Looked up as a run, `wait --cpu` failed as "no such
+# run", and `wait --timout=60 last` waited on `last` with the default budget,
+# the later word silently winning. Sets query_ref; the caller defaults it.
+query_ref=
+take_run_ref() { # USAGE WORD: USAGE is the subcommand's synopsis
+  case $2 in
+    -*) die "$sub: unknown option $2
+  usage: tools/test-run.sh $1" ;;
+  esac
+  [ -z "$query_ref" ] || die "$sub: one run at most, got $query_ref and $2
+  usage: tools/test-run.sh $1"
+  query_ref=$2
 }
 
 # The fleet's slot kinds are fleet-worker.sh's options, never this script's.
@@ -3202,6 +3233,7 @@ case $sub in
   paths)
     [ $# -ge 1 ] && [ $# -le 2 ] || die "usage: paths FIELD [RUN|last]"
     field=$1
+    [ $# -lt 2 ] || take_run_ref "paths FIELD [RUN|last]" "$2"
     case $field in run | worktree | runs | lock | owner | last) ;;
       *) die "unknown path field: $field (run, worktree, runs, lock, owner, last)" ;;
     esac
@@ -3234,6 +3266,7 @@ case $sub in
     ;;
   lock-status)
     [ $# -le 1 ] || die "usage: lock-status [RUN|last]"
+    [ $# -eq 0 ] || take_run_ref "lock-status [RUN|last]" "$1"
     query_state_for "${1:-}"
     if [ $# -eq 1 ]; then
       resolve_run "$1"
@@ -3260,10 +3293,14 @@ case $sub in
       case $1 in
         --cap | --cap=*) opt_value "a value" "$@"; cap=$opt_value; shift "$opt_shift" ;;
         --test-cap | --test-cap=*) opt_value "a value" "$@"; test_cap=$opt_value; shift "$opt_shift" ;;
-        --alone) alone=1; shift ;;
-        --direct) direct=1; shift ;;
+        --alone | --alone=*) opt_flag "$1"; alone=1; shift ;;
+        --direct | --direct=*) opt_flag "$1"; direct=1; shift ;;
         --cpu | --cpu=* | --gpu | --gpu=*) refuse_slot_option "$1" ;;
         --) shift; break ;;
+        # Before the count, an option repeat does not take: read as the count,
+        # it was refused as one that is not an integer, naming neither.
+        -*) die "repeat: unknown option $1
+  usage: tools/test-run.sh repeat [--cap N] [--test-cap N] [--alone] [--direct] N [DUNE ARGS...]" ;;
         *) break ;;
       esac
     done
@@ -4444,7 +4481,8 @@ case $sub in
     exit "$idle_rc"
     ;;
   status)
-    resolve_run "${1:-last}"
+    for arg do take_run_ref "status [RUN|last]" "$arg"; done
+    resolve_run "${query_ref:-last}"
     # One-shot and honest -- no sleeping in `status`. Ordered by LIVENESS,
     # never by pid-file presence: a supervisor killed after recording itself
     # must read as dead, not as running forever. The explicit `exit 0` on the
@@ -4490,10 +4528,10 @@ case $sub in
           budget=$opt_value budget_given=1
           shift "$opt_shift"
           ;;
-        *) ref=$1; shift ;;
+        *) take_run_ref "wait [RUN|last] [--timeout N]" "$1"; shift ;;
       esac
     done
-    resolve_run "$ref"
+    resolve_run "${query_ref:-$ref}"
     if [ -n "${budget_given:-}" ]; then
       # Same traps --cap had: leading zeros reach bash arithmetic as octal,
       # and oversized values wrap. Gated on the option being GIVEN, so an
@@ -4555,7 +4593,8 @@ case $sub in
     exit "$digest_rc"
     ;;
   stop)
-    resolve_run "${1:-last}"
+    for arg do take_run_ref "stop [RUN|last]" "$arg"; done
+    resolve_run "${query_ref:-last}"
     # Leftover recovery, shared by the finished and dead-without-verdict
     # branches. Descendants of dune may hold the run's worktree lock through
     # inherited fd 9, possibly having setsid'd out of the recorded group.
@@ -4779,6 +4818,7 @@ case $sub in
     fi
     ;;
   list)
+    [ $# -eq 0 ] || die "list takes no arguments"
     found=0
     for d in "$RUNS"/2*/; do
       [ -d "$d" ] || continue

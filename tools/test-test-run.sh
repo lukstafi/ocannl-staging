@@ -13,7 +13,7 @@
 # #group' leg_N` (scripts/harness-support.sh), its name led by the leg numbers
 # below and closed by the one group it belongs to (gh-ocannl-1202):
 # #group-alive (1-5), #stop (6-8, 67), #queries (39), #repeat (9-25, 38, 83-85),
-# #options (26-28, 37, 89, 94, 95), #width (29-34, 48-52, 64, 70), #digest (35-36,
+# #options (26-28, 37, 89, 94-96), #width (29-34, 48-52, 64, 70), #digest (35-36,
 # 68-69, 71-73, 80, 87, 92), #fresh (81), #lifecycle (40-47, 65, 74: the run/start
 # lifecycle with its signal legs, and both fork-window negative controls),
 # #source (59-63, 66), #slot (53-58, 78, 88, 93), #device (75-77, 91), #credentials (79, 90),
@@ -282,6 +282,15 @@
 #      not past dune's `--` (gh-ocannl-1740, gh-ocannl-1734); a mutant cutting
 #      the `=` arms, and one cutting the slot-kind arms, turns every probe of
 #      its set red.
+#  96. a flag refuses a value by name (`repeat --alone=1`, `--direct=1`,
+#      `bisect --no-first-parent=x`, before GOOD and BAD or after), and a
+#      query (status, wait, stop, paths, lock-status) refuses an option-shaped
+#      word as unknown instead of looking it up as a run (`wait --timout=60
+#      last`); a second run, an option repeat does not take and list's
+#      arguments are refused, while a run's directory, `last` and wait's
+#      timeout in either spelling still answer; a mutant cutting opt_flag's
+#      refusal, and one cutting take_run_ref's option arm, turns every probe
+#      of its set red.
 #  90. the runner's own OCANNL_TOOL_TESTRUN_BG, _RD and _OWN reach no dune: a
 #      run, a probed GPU run under a slot, a probed repeat's iterations.
 #  59-63 sit after leg 47: the source a run tested, recorded at launch
@@ -8116,6 +8125,150 @@ fi
 eq_restore
 }
 harness_leg_run '95: value options spaced or with =; the slot kinds refused by every launcher #options' leg_95
+
+# ---------------------------------------------------------------------------
+# Leg 96: a flag refuses a value; a query refuses an option-shaped run
+# ---------------------------------------------------------------------------
+# Leg 95's `=` spelling left two misreadings. `repeat --alone=1 2 @x` read
+# `--alone=1` as the repeat count (and `bisect --no-first-parent=x` met only
+# "unknown option"); `wait --cpu` was looked up as a run, and `wait --timout=60
+# last` waited on `last` with the default budget, the later word winning. Each
+# refusal is checked by its exit, its silence toward dune and the words it
+# names. A mutant cutting opt_flag's refusal turns every flag probe red, and
+# one cutting take_run_ref's option arm every option-shaped query probe; the
+# valid queries (a run's directory, `last`, a spaced or `=` timeout) must
+# still answer, or a refusal of everything would pass.
+leg_96() {
+fl_label="flags: --alone=, --direct=, --no-first-parent= are refused by name, dune never invoked"
+fl_nc_label="negative control: with opt_flag's refusal cut, every flag probe goes red"
+qr_label="queries: an option-shaped word is refused as unknown by status, wait, stop, paths and lock-status, never looked up as a run"
+qr_nc_label="negative control: with take_run_ref's option arm cut, every option-shaped query probe goes red"
+qr_ok_label="queries: a run's directory, last, and wait's timeout spaced or with = still answer; a second run, an unknown repeat option and list's arguments are refused"
+unset OCANNL_BACKEND
+fl_probes=("--alone|repeat --alone=1 2 build @cheap" "--direct|repeat --direct=1 2 build @cheap"
+           "--alone|repeat --cap 900 --alone=yes 2 build @cheap"
+           "--no-first-parent|bisect --no-first-parent=x good bad @cheap")
+fl_check() { # FLAG|ARGV: runs it; fl_detail is empty iff it holds
+  local flag=${1%%|*} args=${1#*|}
+  fl_detail=
+  # shellcheck disable=SC2086 # the probe's operands, split on purpose
+  argv_probe fl-probe $args
+  { [ "$argv_rc" = 2 ] && [ -z "$argv_calls" ] &&
+    grep -qF -- "$flag is a flag and takes no value: $flag=" <<<"$argv_err"; } ||
+    fl_detail="$args: exit $argv_rc (want 2); dune calls: ${argv_calls:-<none>}; stderr: $argv_err"
+}
+fl_all=
+for probe in "${fl_probes[@]}"; do
+  fl_check "$probe"
+  [ -z "$fl_detail" ] || { fl_all=$fl_detail; break; }
+done
+# After GOOD and BAD the flag is misplaced, spelled either way.
+if [ -z "$fl_all" ]; then
+  argv_probe fl-bisect-late bisect good bad @cheap --no-first-parent=x
+  { [ "$argv_rc" = 2 ] && grep -qF -- "--no-first-parent=x belongs before GOOD and BAD" <<<"$argv_err"; } ||
+    fl_all="bisect good bad @cheap --no-first-parent=x: exit $argv_rc; stderr: $argv_err"
+fi
+if [ -z "$fl_all" ]; then report 0 "$fl_label"; else report 1 "$fl_label" "$fl_all"; fi
+
+# A finished green run for the queries to name.
+argv_runs=$TMP/qr-runs argv_probe qr-run run build @cheap
+qr_dir=$argv_dir
+qr_query() { # ARGV: runs the query against qr-runs; qr_rc, qr_out
+  OCANNL_TOOL_TEST_RUNS=$TMP/qr-runs "$repeat_root/tools/test-run.sh" "$@" >"$TMP/qr.out" 2>&1
+  qr_rc=$?
+  qr_out=$(cat "$TMP/qr.out")
+}
+qr_probes=("status|--cpu" "wait|--timout=60 last" "wait|--cpu" "wait|last --timout 60"
+           "stop|--cpu" "paths|run --cpu" "lock-status|-x")
+qr_check() { # SUB|ARGS: runs it; qr_detail is empty iff it holds
+  local sub=${1%%|*} args=${1#*|} word
+  qr_detail=
+  for word in $args; do case $word in -*) break ;; esac; done
+  # shellcheck disable=SC2086 # the probe's operands, split on purpose
+  qr_query "$sub" $args
+  { [ "$qr_rc" = 2 ] && grep -qF -- "$sub: unknown option $word" <<<"$qr_out" &&
+    ! grep -qF "no such run" <<<"$qr_out"; } ||
+    qr_detail="$sub $args: exit $qr_rc (want 2): $qr_out"
+}
+qr_all=
+if [ "$argv_rc" != 0 ] || [ ! -d "$qr_dir" ]; then
+  qr_all="the run the queries name did not finish green: exit $argv_rc; stderr: $argv_err"
+fi
+if [ -z "$qr_all" ]; then
+  for probe in "${qr_probes[@]}"; do
+    qr_check "$probe"
+    [ -z "$qr_detail" ] || { qr_all=$qr_detail; break; }
+  done
+fi
+if [ -z "$qr_all" ]; then report 0 "$qr_label"; else report 1 "$qr_label" "$qr_all"; fi
+
+qr_ok_all=
+if [ "$argv_rc" != 0 ] || [ ! -d "$qr_dir" ]; then
+  qr_ok_all="the run the queries name did not finish green: exit $argv_rc; stderr: $argv_err"
+fi
+if [ -z "$qr_ok_all" ]; then
+  for args in "status $qr_dir" "status last" "wait $qr_dir --timeout=60" "wait --timeout 60 last" \
+              "stop last" "lock-status $qr_dir" "paths run $qr_dir"; do
+    # shellcheck disable=SC2086 # the query's operands, split on purpose
+    qr_query $args
+    [ "$qr_rc" = 0 ] || { qr_ok_all="$args: exit $qr_rc (want 0): $qr_out"; break; }
+  done
+fi
+if [ -z "$qr_ok_all" ]; then
+  qr_query wait last "$qr_dir"
+  { [ "$qr_rc" = 2 ] && grep -qF "wait: one run at most, got last and $qr_dir" <<<"$qr_out"; } ||
+    qr_ok_all="wait last DIR: exit $qr_rc (want 2): $qr_out"
+fi
+if [ -z "$qr_ok_all" ]; then
+  qr_query list extra
+  { [ "$qr_rc" = 2 ] && grep -qF "list takes no arguments" <<<"$qr_out"; } ||
+    qr_ok_all="list extra: exit $qr_rc (want 2): $qr_out"
+fi
+if [ -z "$qr_ok_all" ]; then
+  argv_probe qr-repeat-unknown repeat --alon 2 build @cheap
+  { [ "$argv_rc" = 2 ] && [ -z "$argv_calls" ] && grep -qF "repeat: unknown option --alon" <<<"$argv_err"; } ||
+    qr_ok_all="repeat --alon 2: exit $argv_rc; calls: ${argv_calls:-<none>}; stderr: $argv_err"
+fi
+if [ -z "$qr_ok_all" ]; then report 0 "$qr_ok_label"; else report 1 "$qr_ok_label" "$qr_ok_all"; fi
+
+# The mutants replace the fixture's copies (bisect's parser is bisect-steps.sh)
+# and are put back after each set; each must rewrite what it names.
+fq_mutate() { # PERL-0-PROGRAM: sets fq_made to 1 iff it rewrote test-run.sh
+  local f
+  for f in test-run.sh bisect-steps.sh; do
+    perl -0pe "$1" "$HERE/$f" >"$repeat_root/tools/$f"
+  done
+  fq_made=0
+  ! cmp -s "$HERE/test-run.sh" "$repeat_root/tools/test-run.sh" &&
+    bash -n "$repeat_root/tools/test-run.sh" && bash -n "$repeat_root/tools/bisect-steps.sh" && fq_made=1
+}
+fq_restore() { cp "$HERE/test-run.sh" "$HERE/bisect-steps.sh" "$repeat_root/tools/"; }
+fq_mutate 's/(opt_flag\(\) \{[^\n]*\n)  case \$1 in --\*=\*\) die [^\n]*\n/$1  :\n/'
+if [ "$fq_made" != 1 ]; then
+  report 1 "$fl_nc_label" "the mutant was not made"
+else
+  fl_survivors=
+  for probe in "${fl_probes[@]}"; do
+    fl_check "$probe"
+    [ -n "$fl_detail" ] || fl_survivors="$fl_survivors [${probe#*|}]"
+  done
+  if [ -z "$fl_survivors" ]; then report 0 "$fl_nc_label"; else report 1 "$fl_nc_label" "held under the mutant:$fl_survivors"; fi
+fi
+fq_restore
+fq_mutate 's/(take_run_ref\(\) \{[^\n]*\n  case \$2 in\n)    -\*\) die/$1    --cut-option-arm) die/'
+if [ "$fq_made" != 1 ]; then
+  report 1 "$qr_nc_label" "the mutant was not made"
+else
+  qr_survivors=
+  for probe in "${qr_probes[@]}"; do
+    qr_check "$probe"
+    [ -n "$qr_detail" ] || qr_survivors="$qr_survivors [${probe%%|*} ${probe#*|}]"
+  done
+  if [ -z "$qr_survivors" ]; then report 0 "$qr_nc_label"; else report 1 "$qr_nc_label" "held under the mutant:$qr_survivors"; fi
+fi
+fq_restore
+}
+harness_leg_run '96: a flag refuses a value; a query refuses an option-shaped run #options' leg_96
 
 # ---------------------------------------------------------------------------
 # Leg 90: the runner's own variables never reach dune (gh-ocannl-1448)
