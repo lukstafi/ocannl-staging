@@ -3,8 +3,9 @@
 # Backend-scoped records are judged against the backend vocabulary; environment-
 # scoped records are judged against the declared measurement-box vocabulary.
 #
-# A claim absent from one COMPLETE backend run was evaluated there; a claim
-# present in every complete run was not.  The caller owns completeness -- the
+# A claim absent from one COMPLETE backend run was evaluated there, and so was
+# one an EVALUATED record of that run names, whatever another action skipped; a
+# claim skipped and never evaluated in every complete run was not.  The caller owns completeness -- the
 # sweep passes only forced full-suite units that passed, or whose every failure
 # a serial rerun cleared, never incremental runs.
 # A box outside the declared matrix is evidence without obligation: a claim it
@@ -180,6 +181,12 @@ tmp=$(mktemp -d "${TMPDIR:-/tmp}/ocannl-skip-coverage.XXXXXX") ||
 cleanup() { rm -rf "$tmp"; }
 trap cleanup EXIT
 
+# A run's skipped claims of one scope: those a SKIP record names and no
+# EVALUATED record of the same run does. The run is every action of the unit
+# concatenated, and one executable under two stanzas is two actions -- the
+# default run skipping a configuration-gated leg, a `-tf32` rule evaluating it:
+# the box evaluated that claim, whatever its sibling action skipped. Records
+# from before Verdict wrote EVALUATED carry none, and judge as they always did.
 extract_claims() {
   local scope=$1 records=$2
   awk '
@@ -191,13 +198,24 @@ extract_claims() {
       if (fields != 3 || part[2] == "" || part[3] == "") malformed = 1
       else if (part[1] == scope || (scope == "sweep" &&
                (part[1] == "backend" || part[1] == "environment")))
-        print part[2] "\t" part[3]
+        skipped[part[2] "\t" part[3]] = 1
       else if (part[1] != "backend" && part[1] != "environment" && part[1] != "outside-sweep") malformed = 1
+      next
+    }
+    index($0, "OCANNL_TOOL_VERDICT_EVALUATED\t") == 1 {
+      if (!actions) malformed = 1
+      record = substr($0, length("OCANNL_TOOL_VERDICT_EVALUATED\t") + 1)
+      fields = split(record, part, "\t")
+      if (fields != 2 || part[1] == "" || part[2] == "") malformed = 1
+      else evaluated[part[1] "\t" part[2]] = 1
       next
     }
     /^OCANNL_TOOL_VERDICT_[A-Z][A-Z_]*\t/ { if (!actions) malformed = 1; next }
     { malformed = 1 }
-    END { if (malformed || !actions) exit 3 }
+    END {
+      if (malformed || !actions) exit 3
+      for (claim in skipped) if (!(claim in evaluated)) print claim
+    }
   ' scope="$scope" "$records" | LC_ALL=C sort -u
 }
 

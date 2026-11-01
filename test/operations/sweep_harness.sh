@@ -1307,6 +1307,36 @@ singleton_pass=$("$aggregate" \
 grep -q '^environment result: PASS -- no claim was skipped on every declared box$' \
   <<<"$singleton_pass"
 
+# One executable under two stanzas is two actions of one unit, and the unit's
+# records are their files concatenated. The 2026-11-01 shape: a default run
+# skips its configuration-gated leg (tf32 off) and a `-tf32` rule on the same
+# box evaluates it. The sibling's EVALUATED records clear the skip, in both
+# dimensions; a skip announcement is never itself an evaluation, and another
+# executable's evaluation of an equal label clears nothing.
+grep -q "^OCANNL_TOOL_VERDICT_EVALUATED$(printf '\t')verdict_skip_probe.exe$(printf '\t')common environment-gated claim$" \
+  "$tmp/cc.log"
+records_of "$verdict_probe" "$tmp/sibling-skip.records" cc
+absent 'OCANNL_TOOL_VERDICT_EVALUATED' "$tmp/sibling-skip.records"
+records_of "$verdict_probe" "$tmp/sibling-evaluate.records" cc execute-all
+cat "$tmp/sibling-skip.records" "$tmp/sibling-evaluate.records" >"$tmp/sibling-cc.records"
+cat "$tmp/sibling-skip.records" "$tmp/sibling-evaluate.records" >"$tmp/sibling-metal.records"
+sibling_pass=$("$aggregate" \
+  --known cc --known metal --known-box m4-max \
+  --run cc m4-max "$tmp/sibling-cc.records" --run metal m4-max "$tmp/sibling-metal.records")
+grep -q '^result: PASS -- no claim was skipped on every known backend$' <<<"$sibling_pass"
+grep -q '^environment result: PASS -- no claim was skipped on every declared box$' \
+  <<<"$sibling_pass"
+cp "$verdict_probe" "$tmp/sibling_other_probe.exe"
+records_of "$tmp/sibling_other_probe.exe" "$tmp/sibling-other.records" cc execute-all
+cat "$tmp/sibling-skip.records" "$tmp/sibling-other.records" >"$tmp/sibling-other-cc.records"
+set +e
+sibling_other=$("$aggregate" \
+  --known cc --known-box m4-max \
+  --run cc m4-max "$tmp/sibling-other-cc.records" 2>&1)
+set -e
+grep -q '^FAIL: skipped on every declared box: verdict_skip_probe.exe: common environment-gated claim$' \
+  <<<"$sibling_other"
+
 # A box outside the declared matrix is evidence without obligation. The
 # 2026-09-27 shape: tuf ran hip beside the declared boxes and executed the
 # environment-gated leg, so the leg was not skipped on every box.
