@@ -4701,7 +4701,13 @@ in the `tools/*.sh` scripts (gh-ocannl-1111) and in the string literals of the O
   the action that spawned them). A process that is not Verdict-linked must unset it before running a
   Verdict-linked fixture (`sweep_harness.sh`, beside its `OCANNL_BACKEND` neutralization). A record kind the
   aggregator does not judge (`OCANNL_TOOL_VERDICT_<KIND>`, the room left for gh-ocannl-996's bypass
-  record) passes through it.
+  record) passes through it. Beside its skips, each action's file names every claim it evaluated
+  and held (`OCANNL_TOOL_VERDICT_EVALUATED`, file-only, never echoed on stderr), and a skip an
+  `EVALUATED` record of the same unit names does not count for that unit: one executable under
+  two stanzas — a default run skipping its tf32 leg on CUDA, its `-tf32` rule evaluating it — is
+  two actions on one box, and before that record the concatenated files read as the box never
+  evaluating the claim (the 2026-11-01 forced sweep's `tf32_reference_rounding` and
+  `bench_seed_parity_smoke` findings). Records from before it carry none and judge as before.
   Incremental runs are refused because a cached Dune action does not run, and failed or
   interrupted units are refused because they may not have reached every test — except a red whose
   serial rerun reported `all clean` with nothing unjudged or unmapped, followed by `suite

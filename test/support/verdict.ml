@@ -43,7 +43,18 @@ let passed_label_history = ref []
     the claim that would emit that diagnostic has run and passed. *)
 let passed_labels () = List.rev !passed_label_history
 
-let record_pass label = passed_label_history := label :: !passed_label_history
+(* Set once the per-action records exist (below): writes this action's record that [label] was
+   evaluated. A forward reference because every claim combinator, defined before the records,
+   records its pass through {!record_pass}. *)
+let record_evaluated = ref (fun (_ : string) -> ())
+
+(* True while {!skipped} prints its claim's passing row: that row goes through {!record_pass} too,
+   and a skip is exactly what must not be recorded as evaluated. *)
+let announcing_skip = ref false
+
+let record_pass label =
+  passed_label_history := label :: !passed_label_history;
+  if not !announcing_skip then !record_evaluated label
 
 (* The labels of the [<label>: <bool>] rows printed so far, most recent first -- {!p}'s rows and
    {!short_fail}'s. What a leg claim's evaluation must have printed, so that its skip, which prints
@@ -482,18 +493,19 @@ let p_pairwise_distinct name xs ~equal ~to_string =
   | None -> quantified ~min:2 name xs (fun () -> true)
 
 (* Per-action machine records (gh-ocannl-1114). Every machine-readable record this module emits --
-   today the skip record of {!skipped} -- is a line [OCANNL_TOOL_VERDICT_<KIND><TAB><fields>],
-   echoed on stderr where a human reading the log sees it, and, when [OCANNL_TOOL_VERDICT_RECORDS]
-   names a directory, also appended to ONE FILE PER ACTION in it. The file is keyed by what
-   identifies the action that ran this process -- its working directory, executable and arguments,
-   which is how `test_cse.exe` under `runtest-test_cse` and under `runtest-test_cse-cse_d_fwd` stay
-   two actions -- and is TRUNCATED when the process starts, before any record. So the file always
-   holds its action's latest run: a retry of the action rewrites it, one that now records nothing
-   empties it, and an action never re-run keeps its own. `tools/sweep.sh` names the directory for a
-   unit's first attempt, serial rerun and completion pass alike, and reads it back afterwards: each
-   action's final attempt by construction, where the merged stderr of the three phases could only be
-   attributed by inference, and where dune truncating a noisy action's output could drop records
-   outright.
+   the skip record of {!skipped}, and the evaluated record of every claim that held -- is a line
+   [OCANNL_TOOL_VERDICT_<KIND><TAB><fields>]. A skip record is echoed on stderr where a human
+   reading the log sees it, and, when [OCANNL_TOOL_VERDICT_RECORDS] names a directory, also appended
+   to ONE FILE PER ACTION in it; an evaluated record goes to that file alone. The file is keyed by
+   what identifies the action that ran this process -- its working directory, executable and
+   arguments, which is how `test_cse.exe` under `runtest-test_cse` and under
+   `runtest-test_cse-cse_d_fwd` stay two actions -- and is TRUNCATED when the process starts, before
+   any record. So the file always holds its action's latest run: a retry of the action rewrites it,
+   one that now records nothing empties it, and an action never re-run keeps its own.
+   `tools/sweep.sh` names the directory for a unit's first attempt, serial rerun and completion pass
+   alike, and reads it back afterwards: each action's final attempt by construction, where the
+   merged stderr of the three phases could only be attributed by inference, and where dune
+   truncating a noisy action's output could drop records outright.
 
    The file opens with an [OCANNL_TOOL_VERDICT_ACTION] header naming the action, which is also what
    says the action ran at all; a record kind the sweep's aggregator does not judge -- the bypass
@@ -554,10 +566,8 @@ let action_records =
           fail ("cannot open the per-action verdict records: " ^ e);
           None)
 
-(* One machine record: on stderr, and in this action's record file when there is one. *)
-let emit_record kind fields =
-  let line = record_line kind fields in
-  Stdio.eprintf "%s\n%!" line;
+(* One machine record in this action's record file, when there is one. *)
+let write_record line =
   Option.iter action_records ~f:(fun (path, channel) ->
       match
         Stdlib.output_string channel (line ^ "\n");
@@ -566,6 +576,36 @@ let emit_record kind fields =
       | () -> ()
       | exception Sys_error e ->
           fail (Printf.sprintf "cannot write the per-action verdict records %s: %s" path e))
+
+(* One machine record: on stderr, and in this action's record file when there is one. *)
+let emit_record kind fields =
+  let line = record_line kind fields in
+  Stdio.eprintf "%s\n%!" line;
+  write_record line
+
+(* The executable identity every record keys its claim by: stable across worktrees and machines. *)
+let record_executable () =
+  Stdlib.String.escaped (Stdlib.Filename.basename Stdlib.Sys.executable_name)
+
+(* [OCANNL_TOOL_VERDICT_EVALUATED<TAB>executable<TAB>claim]: this action evaluated the claim and it
+   held. The skip record says which claims an action did NOT evaluate, so within one action the
+   claim's absence already says it ran; the evaluated record is for the claim another action of the
+   same executable skipped. A test run under two stanzas (the default run and a [-tf32] rule
+   flipping a configuration gate) skips its gated leg in one action and evaluates it in the other,
+   both on the same box: the sweep concatenates a unit's action files, and without this record the
+   skip read as the box never evaluating the claim (the 2026-11-01 sweep's [tf32_reference_rounding]
+   and [bench_seed_parity_smoke] findings). File-only: one stderr line per claim would double every
+   test's chatter, and only the sweep reads these. Once per label per action, since a claim
+   evaluated in a loop says nothing more the second time. *)
+let () =
+  let written = Stdlib.Hashtbl.create 64 in
+  if Option.is_some action_records then
+    record_evaluated :=
+      fun label ->
+        if not (Stdlib.Hashtbl.mem written label) then (
+          Stdlib.Hashtbl.add written label ();
+          write_record
+            (record_line "EVALUATED" [ record_executable (); Stdlib.String.escaped label ]))
 
 type skip_aggregation = [ `Backend | `Environment | `Outside_sweep ]
 (** [skipped ~backend name] reports a leg the run's backend cannot evaluate: a GPU intrinsic on a
@@ -615,10 +655,11 @@ let skipped ?(aggregation = (`Backend : skip_aggregation)) ~backend name =
       | `Backend -> "backend"
       | `Environment -> "environment"
       | `Outside_sweep -> "outside-sweep");
-      Stdlib.String.escaped (Stdlib.Filename.basename Stdlib.Sys.executable_name);
+      record_executable ();
       Stdlib.String.escaped name;
     ];
-  p name true
+  announcing_skip := true;
+  Exn.protect ~f:(fun () -> p name true) ~finally:(fun () -> announcing_skip := false)
 
 (* The one place a gate chooses between evaluating a claim and announcing its skip, so every gated
    form below skips the same way and nothing is evaluated on the closed side. *)
