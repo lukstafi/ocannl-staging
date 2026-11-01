@@ -110,7 +110,7 @@ alias family, slow test or golden format.
 
 **Training integration runs (the `train` alias)**: the toy integrations (`bigram`, `mlp_names`, `circles_conv`, `fsm_transformer`, ...) serialize on the training lock, so they live off the `runtest` path: `dune build @train`, one at a time via `@test/training/train-<name>`. Per-PR CI runs them as two ubuntu shards (`tools/ci-shard.sh targets K/N train`; macOS runs only `main` there, gh-ocannl-1422), the daily sweep on every backend; after touching training dynamics, `Train.*` plumbing or the autotuner's fission path, run the affected members locally before pushing
 
-**Slow training tests (the `slow` alias)**: excluded from `dune runtest`; `dune build @slow`, one at a time via `@test/training/slow-<name>`. `dune build @check` compiles them. Regular and `@slow` training actions share the `ocannl_training_test` Dune lock so their OpenMP pools never overlap — keep it on new ones. Gating recipe: build-and-test.md#aliases-and-goldens; `test/training/dune` is the pattern
+**Slow training tests (the `slow` alias)**: excluded from `dune runtest`; `dune build @slow`, one at a time via `@test/training/slow-<name>`. `dune build @check` compiles them. Regular and `@slow` training actions share the global `/ocannl_training_test` Dune lock so their OpenMP pools never overlap — keep it on new ones. Gating recipe: build-and-test.md#aliases-and-goldens; `test/training/dune` is the pattern
 
 **Test types and authoring**:
 - `dune promote` accepts golden changes. On Windows, and on EVERY platform during a merge, promote through `tools/promote.sh`, which stages what it promoted and on Windows strips CRLF (build-and-test.md#promotion-and-formatting)

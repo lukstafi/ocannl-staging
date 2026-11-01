@@ -1761,7 +1761,7 @@ in the `tools/*.sh` scripts (gh-ocannl-1111) and in the string literals of the O
 - `env_spelling_gate` is one gate per DIRECTORY because dune aliases are per directory, and it
   depends on `(universe)` so it reruns on every invocation — no suite comes back green with a
   rejected lowercase spelling ambient. `runtest` and `slow` are gated separately; a gate in a file
-  that serializes on `ocannl_training_test` must take the lock, since an unlocked action in a
+  that serializes on `/ocannl_training_test` must take the lock, since an unlocked action in a
   locked file is what the next training test gets copied from (the gate starts no pool). Hand-written
   per-test aliases depend on the gate explicitly, while dune's GENERATED `runtest-<name>` aliases do
   not — a targeted run of a `(test)` stanza can be served stale under a rejected spelling — and
@@ -1883,6 +1883,31 @@ in the `tools/*.sh` scripts (gh-ocannl-1111) and in the string literals of the O
   actions: dune evaluates an alias action lazily and records no dependency for it, so what an
   alias rule reads shows in no `dune rules` query. `affected` therefore rewrites each such rule
   into a file-writing twin (the `affected` bullet under Aliases and goldens).
+- **A `(locks …)` name without a leading `/` is a lock of the stanza's own directory** — the same
+  relative name in two directories is two locks. Verified 2026-10-31 on dune 3.23.1 and 3.24.2 (the
+  repository's floor is 3.20; no changelog entry since 3.17, which made `(test)`/`(tests)` honour
+  `locks`, touches how a name resolves) with two-second sleeper actions in a scratch project, two
+  per directory in `a/` and `b/`, logging start and end times: under `(locks shared)` the two
+  directories' actions overlapped while each directory's pair ran in sequence, and under
+  `(locks /shared)` all four ran one after another; a `(test)` stanza behaved the same. `dune rules`
+  prints no lock, so a run's timings are the only reading. So the training lock was two:
+  `test/operations` (~30 actions) and `test/training` (~22) each spelled
+  `(locks ocannl_training_test)`, and an operations action that runs training steps could start its
+  OpenMP pool beside a `@train` integration's, the overlap every one of those stanzas' comments says
+  the lock prevents. Every one of them now names the global `/ocannl_training_test`, and
+  `env_var_deps` refuses any other spelling of it (bare, `./`- or `../`-qualified) in every dune
+  file, and counts only the global one as taking the lock for the ambient-gate obligation. On the
+  repository itself, six locked `test/operations` tests and six locked `test/training` ones built
+  together (`-j 4`, cc, mac-studio, an explicit `--trace-file`) overlapped across the directories
+  in 7 pairs (9 s) under the relative spelling and in none under `/ocannl_training_test`, with no
+  overlap inside one directory either way. Serializing them did not lengthen the suite: on
+  minix-amd-linux (cc, 32 threads, exclusive window, one `_build`, every config-reading test rerun
+  by a comment line in `test/config/ocannl_config`), `dune build @runtest @train` took 869.7 s and
+  874.2 s with the relative spelling and 781.4 s and 773.0 s with the global one, rounds ordered
+  ABBA — about 11% faster, plausibly because two OpenMP pools that each claim every core no longer
+  contend; the chain the lock makes is not the suite's critical path (`runtest-sweep_harness`,
+  ~400 s, is). Other locks in the tree (`cc_kept_library`, `schedule_conv_gemm`, …) are meant per
+  directory and stay relative; `generated_lock_scan` already resolves both spellings as dune does.
 
 ## Verdict claims
 
@@ -2803,7 +2828,7 @@ in the `tools/*.sh` scripts (gh-ocannl-1111) and in the string literals of the O
   on a rule the aggregate omits, since `dune build @slow` would otherwise skip it silently. The
   action needs `(no-infer …)` here for the same reason as above: an `.actual` registered as a build
   target puts the slow run on plain `dune build`'s `@all`. Regular and `@slow` training actions take
-  the `ocannl_training_test` lock so their OpenMP pools never overlap; `test/operations/cpu_parallel`
+  the global `/ocannl_training_test` lock so their OpenMP pools never overlap; `test/operations/cpu_parallel`
   stays unlocked on purpose. `dune build @runtest @slow` runs both families, and `@check` compiles
   the slow executables, so they cannot bit-rot while off the default path.
 - Two focused aggregates sit beside `scans`, built the same way and answering a narrower question

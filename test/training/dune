@@ -9,11 +9,14 @@
 ; directory; the source is shared, and its header says why the dependency is the world
 ; rather than 112 key names.
 ;
-; Takes `ocannl_training_test` like every other action in this file. Not for contention of its
+; Takes `/ocannl_training_test` like every other action in this file. Not for contention of its
 ; own -- the gate links `arrayjit.utils` and starts no OpenMP pool, so the reason the lock exists
 ; does not reach it -- but because an unlocked action here is a trap for whoever copies the
 ; nearest stanza to write a real training test (Codex P1 round 4). It holds the lock for the
-; microseconds it takes to read the environment.
+; microseconds it takes to read the environment. The leading `/` makes the lock global: dune
+; resolves any other name against the stanza's own directory, so a relative spelling here would be
+; a different lock from test/operations' and the two directories' pools would overlap
+; (`env_var_deps` refuses it; build-and-test.md#dune-mechanics).
 
 (copy_files
  (files ../config/env_spelling_gate.ml))
@@ -23,7 +26,7 @@
  ; its `(universe)` dependency reruns it whatever any variable is set to.
  (name env_spelling_gate)
  (package neural_nets_lib)
- (locks ocannl_training_test)
+ (locks /ocannl_training_test)
  (deps ocannl_config (universe))
  (modules env_spelling_gate)
  (link_flags -linkall)
@@ -41,7 +44,7 @@
  ; its `(universe)` dependency reruns it whatever any variable is set to.
  (alias slow-env_spelling_gate)
  (package neural_nets_lib)
- (locks ocannl_training_test)
+ (locks /ocannl_training_test)
  (deps ocannl_config (universe))
  (action
   (run %{dep:env_spelling_gate.exe})))
@@ -54,7 +57,7 @@
  ; its `(universe)` dependency reruns it whatever any variable is set to.
  (alias train-env_spelling_gate)
  (package neural_nets_lib)
- (locks ocannl_training_test)
+ (locks /ocannl_training_test)
  (deps ocannl_config (universe))
  (action
   (run %{dep:env_spelling_gate.exe})))
@@ -73,7 +76,7 @@
  ; its `(universe)` dependency reruns it whatever any variable is set to.
  (alias runtest-env_spelling_gate)
  (package neural_nets_lib)
- (locks ocannl_training_test)
+ (locks /ocannl_training_test)
  (deps ocannl_config (universe))
  (action
   (run %{dep:env_spelling_gate.exe})))
@@ -140,7 +143,7 @@
  (name data_parallel)
  (package neural_nets_lib)
  (modules data_parallel)
- (locks ocannl_training_test)
+ (locks /ocannl_training_test)
  (deps ocannl_config)
  (libraries base ocannl stdio arrayjit.utils arrayjit.verdict)
  (preprocess
@@ -150,7 +153,7 @@
  (name fused_classifier)
  (package neural_nets_lib)
  (modules fused_classifier)
- (locks ocannl_training_test)
+ (locks /ocannl_training_test)
  (deps
   ocannl_config
   (env_var OCANNL_BACKEND))
@@ -162,7 +165,7 @@
  (name moons_demo)
  (package neural_nets_lib)
  (modules moons_demo)
- (locks ocannl_training_test)
+ (locks /ocannl_training_test)
  (deps
   ocannl_config
   (env_var OCANNL_BACKEND))
@@ -184,7 +187,7 @@
 (rule
  (alias train-bigram)
  (package neural_nets_lib)
- (locks ocannl_training_test)
+ (locks /ocannl_training_test)
  (deps
   (alias train-env_spelling_gate)
   bigram.expected
@@ -203,7 +206,7 @@
  (name embedding_ids)
  (package neural_nets_lib)
  (modules embedding_ids)
- (locks ocannl_training_test)
+ (locks /ocannl_training_test)
  (deps
   ocannl_config
   (env_var OCANNL_BACKEND))
@@ -235,7 +238,7 @@
  (name training_golden_window)
  (package neural_nets_lib)
  (modules training_golden_window)
- (locks ocannl_training_test)
+ (locks /ocannl_training_test)
  (deps ocannl_config)
  (libraries base training_golden arrayjit.verdict))
 
@@ -249,7 +252,7 @@
 (rule
  (alias train-mlp_names)
  (package neural_nets_lib)
- (locks ocannl_training_test)
+ (locks /ocannl_training_test)
  (deps
   (alias slow-env_spelling_gate)
   mlp_names.expected
@@ -277,7 +280,7 @@
 (rule
  (alias train-mlp_bn_names)
  (package neural_nets_lib)
- (locks ocannl_training_test)
+ (locks /ocannl_training_test)
  (deps
   (alias slow-env_spelling_gate)
   mlp_bn_names.expected
@@ -314,7 +317,7 @@
 (rule
  (alias train-circles_conv)
  (package neural_nets_lib)
- (locks ocannl_training_test)
+ (locks /ocannl_training_test)
  (deps
   (alias slow-env_spelling_gate)
   circles_conv.expected
@@ -347,7 +350,7 @@
 (rule
  (alias slow-mnist_conv)
  (package neural_nets_lib)
- (locks ocannl_training_test)
+ (locks /ocannl_training_test)
  (deps
   (alias slow-env_spelling_gate)
   mnist_conv.expected
@@ -377,7 +380,7 @@
 (rule
  (alias slow-cifar_conv)
  (package neural_nets_lib)
- (locks ocannl_training_test)
+ (locks /ocannl_training_test)
  (deps
   (alias slow-env_spelling_gate)
   cifar_conv.expected
@@ -409,7 +412,7 @@
 (rule
  (alias train-fsm_transformer)
  (package neural_nets_lib)
- (locks ocannl_training_test)
+ (locks /ocannl_training_test)
  (deps
   (alias slow-env_spelling_gate)
   fsm_transformer.expected
@@ -455,7 +458,7 @@
 (rule
  (alias train-transformer_names)
  (package neural_nets_lib)
- (locks ocannl_training_test)
+ (locks /ocannl_training_test)
  (deps
   (alias slow-env_spelling_gate)
   transformer_names.expected
@@ -477,7 +480,7 @@
 (test
  (name tokenizer_roundtrip)
  (package neural_nets_lib)
- (locks ocannl_training_test)
+ (locks /ocannl_training_test)
  (deps
   ocannl_config
   (env_var OCANNL_BACKEND))
@@ -514,7 +517,7 @@
 (test
  (name virtual_grads_parity)
  (package neural_nets_lib)
- (locks ocannl_training_test)
+ (locks /ocannl_training_test)
  (deps
   ocannl_config
   (env_var OCANNL_BACKEND))
@@ -530,7 +533,7 @@
 (test
  (name mixed_prec_parity)
  (package neural_nets_lib)
- (locks ocannl_training_test)
+ (locks /ocannl_training_test)
  (deps
   ocannl_config
   (env_var OCANNL_BACKEND))
@@ -549,7 +552,7 @@
  ; made on cc.
  (name resume_checkpoint)
  (package neural_nets_lib)
- (locks ocannl_training_test)
+ (locks /ocannl_training_test)
  (deps ocannl_config)
  (modules resume_checkpoint)
  (libraries
@@ -570,7 +573,7 @@
 (test
  (name loop_utils)
  (package neural_nets_lib)
- (locks ocannl_training_test)
+ (locks /ocannl_training_test)
  (deps
   ocannl_config
   (env_var OCANNL_BACKEND))
