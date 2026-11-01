@@ -17,6 +17,17 @@
    report must say so, with the bytes and the cap. The cc vector file is pinned
    ([Fissioned_chain.small_menu_envelope]), so the menu does not follow the host's width.
 
+   Ranked is the timing policy's verdict, not the seed's, and on a loaded host the policy drops
+   these seeds: a window under a co-tenant is refused as host contention, and a whole-routine seed
+   whose first samples read four times the beam head's is cut as hopeless -- on a 4 us routine, a
+   scheduler hiccup. The 2026-11-01 sweep, at the full suite's width on minix/multidev_cc, ranked
+   one Grid seed of the eight and none over the cap. So the windows are opted out of host contention
+   ([with_uncontended_test_windows], gh-ocannl-1156) and every admitted reading passes through
+   [on_candidate_measured] unchanged (gh-ocannl-1027): the readings, and so the ranking and the
+   crown, stay the clock's, but a scripted reading turns the hopeless cut off (gh-ocannl-1527) --
+   only what the policy keeps out of the ranking changes, and every seed the menu proposes is
+   ranked.
+
    The record is relational, not restated: each listed candidate's own census is serial on a pool
    backend, the crowned candidate's record is the one its routine carries, and a crowned Grid-asking
    schedule rendered serially is among the listed. The tuned routine also computes the reference
@@ -80,10 +91,15 @@ let tuned =
      let comp = Train.forward c in
      let reports = ref [] in
      let ctx, routine =
-       Autotune.tune ~name:"agr_matmul" ~search:true ~beam_width:1 ~rounds:0 ~repeats:1
-         ~cache_dir:"" ~timing_ctx:(Context.auto ())
-         ~report:(fun r -> reports := r :: !reports)
-         (Context.auto ()) comp Ir.Indexing.Empty
+       (* The clock's own reading, through the seam: see the header. *)
+       Autotune.with_uncontended_test_windows (fun () ->
+           Autotune.Seam.with_value Autotune.on_candidate_measured
+             (fun ~label:_ ~digest:_ ms -> ms)
+             (fun () ->
+               Autotune.tune ~name:"agr_matmul" ~search:true ~beam_width:1 ~rounds:0 ~repeats:1
+                 ~cache_dir:"" ~timing_ctx:(Context.auto ())
+                 ~report:(fun r -> reports := r :: !reports)
+                 (Context.auto ()) comp Ir.Indexing.Empty))
      in
      let ctx = Context.run ctx routine in
      let got = Context.get_values ctx c.Tensor.value in
@@ -106,6 +122,9 @@ let over_cap (g : Cs.grid_summary) =
       | _ -> false)
 
 let () =
+  in_leg ~leg "agr: the timing policy kept no timed seed out of the ranking" (fun label ->
+      let r, _, _, _ = Lazy.force tuned in
+      p label (r.Autotune.timings_contended = 0 && r.Autotune.timings_hopeless = 0));
   in_leg ~leg "agr: a ranked Grid seed's record shows its row-block loop serial for the cap"
     (fun label ->
       let r, _, _, _ = Lazy.force tuned in
