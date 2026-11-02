@@ -17,6 +17,7 @@
   <span><a href="#type-t">t</a> <span class="arrow">&#45;&gt;</span></span>
   <span class="xref-unresolved">PPrint</span>.document</span></code></div></div><div class="odoc-spec"><div class="spec value anchored" id="val-get_name_exn"><a href="#val-get_name_exn" class="anchor"></a><code><span><span class="keyword">val</span> get_name_exn : <span><a href="#type-t">t</a> <span class="arrow">&#45;&gt;</span></span> <span class="xref-unresolved">Base</span>.string</span></code></div></div><div class="odoc-spec"><div class="spec value anchored" id="val-lower"><a href="#val-lower" class="anchor"></a><code><span><span class="keyword">val</span> lower : 
   <span><span class="optlabel">?rewrite_target</span>:<a href="../Rewrites/index.html#type-target">Rewrites.target</a> <span class="arrow">&#45;&gt;</span></span>
+  <span><span class="optlabel">?blends_value_selects</span>:<span class="xref-unresolved">Base</span>.bool <span class="arrow">&#45;&gt;</span></span>
   <span><a href="../Low_level/index.html#type-optimize_ctx">Low_level.optimize_ctx</a> <span class="arrow">&#45;&gt;</span></span>
   <span><span class="label">unoptim_ll_source</span>:<span><span>(<span><span class="xref-unresolved">PPrint</span>.document <span class="arrow">&#45;&gt;</span></span> <span class="xref-unresolved">Base</span>.unit)</span> <span class="xref-unresolved">Base</span>.option</span> <span class="arrow">&#45;&gt;</span></span>
   <span><span class="label">ll_source</span>:<span><span>(<span><span class="xref-unresolved">PPrint</span>.document <span class="arrow">&#45;&gt;</span></span> <span class="xref-unresolved">Base</span>.unit)</span> <span class="xref-unresolved">Base</span>.option</span> <span class="arrow">&#45;&gt;</span></span>
@@ -24,4 +25,4 @@
   <span><span class="label">name</span>:<span class="xref-unresolved">Base</span>.string <span class="arrow">&#45;&gt;</span></span>
   <span><span><a href="../Indexing/index.html#type-static_symbol">Indexing.static_symbol</a> <span class="xref-unresolved">Base</span>.list</span> <span class="arrow">&#45;&gt;</span></span>
   <span><a href="#type-t">t</a> <span class="arrow">&#45;&gt;</span></span>
-  <a href="../Low_level/index.html#type-optimized">Low_level.optimized</a></span></code></div></div></div></body></html>
+  <a href="../Low_level/index.html#type-optimized">Low_level.optimized</a></span></code></div><div class="spec-doc"><p>Lowers and optimizes <code>t</code>. <code>blends_value_selects</code> is the rendering backend's fact, passed on to <a href="../Low_level/index.html#val-optimize"><code>Low_level.optimize</code></a> (gh-ocannl-1775); <code>Backends.lower_assignments</code> always states it.</p></div></div></div></body></html>
