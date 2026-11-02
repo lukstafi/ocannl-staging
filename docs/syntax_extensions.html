@@ -2021,26 +2021,61 @@ a REPL session from a failed construction.</p>
 <p><strong>Which functions qualify.</strong> The returned function –
 right after <code>()</code>, or the function a unit body ends in,
 through <code>let</code>, <code>;</code> and <code>let open</code>, as
-in <code>Nn_blocks.mlp</code> – must take only tensors. The ppx has no
-types, so it decides syntactically:</p>
+in <code>Nn_blocks.mlp</code> – must take only tensors, or optional
+tensors. The ppx has no types, so it decides syntactically:</p>
 <ul>
 <li>an unlabelled variable parameter is a tensor (the convention
 above);</li>
-<li>a labelled <code>~x</code> is a tensor only when <code>x</code>
+<li>a parameter annotated <code>(x : Tensor.t)</code>, labelled or not,
+is a tensor;</li>
+<li>a labelled <code>~x</code> is a tensor also when <code>x</code>
 occurs directly as an operand of a tensor operation (an einsum or
 concatenation, <code>+</code>, <code>*</code>, <code>*.</code>,
 <code>relu</code>, …) and is never rebound in the body;</li>
-<li>an optional or defaulted parameter, and any other pattern, is
+<li>a parameter annotated <code>~(x : Tensor.t option)</code>,
+<code>?(x : Tensor.t option)</code> or
+<code>(x : Tensor.t option)</code> is an <em>option-valued</em> tensor
+(gh-ocannl-1792);</li>
+<li>any other optional or defaulted parameter, and any other pattern, is
 not.</li>
 </ul>
-<p>A function with a parameter that is not a tensor –
-<code>dropout ~rate () ~train_step x</code>,
+<p>The annotations are type-checked: by OCaml at the parameter, and
+again by the expansion, which passes the arguments to the scheme as
+<code>Tensor.t</code> values. A parameter that is only passed on
+(<code>fun ~train_step x -&gt; bn ~train_step x</code>) gives the ppx no
+evidence, so annotate it.</p>
+<p><strong>Option-valued tensors: one scheme per presence
+pattern.</strong> A function with option-valued tensor parameters gets
+one scheme per <em>presence pattern</em>, meaning which of them are
+<code>Some</code>: at most 2^k for k such parameters. Each is traced,
+checked and refused on its own, under the label
+<code>&lt;function&gt; [p, no q]</code>. This is how
+<code>nn_blocks</code> schemes the train/eval switch.
+<code>~(train_step : Tensor.t option)</code> is the training step
+counter as a tensor (<code>Some !@step_n</code> trains,
+<code>None</code> evaluates), so <code>dropout</code>,
 <code>multi_head_attention ... () ~train_step ?mask x</code>, the
-transformer blocks – stays unschemed, and expands exactly as before: its
-parameter’s value does not exist yet when the closure is built, and the
-body may branch on it. So do <code>let%op rec</code> and
+transformer blocks and the batch norms get a training scheme and an
+evaluation scheme (four for attention, with and without a mask). The
+closure built at <code>()</code> traces every pattern, so an error in a
+variant that does not depend on the arguments – a training-only one too
+– raises when the closure is built, naming the variant. A function
+without a <code>()</code> stage traces every pattern at its first
+application. After a session reset each pattern re-traces at its own
+next application. The traces cost 2^k body runs per closure; opt out if
+that is too many.</p>
+<p>A function with a parameter that is not a tensor –
+<code>fun ~train_step x</code> with <code>train_step</code> unannotated,
+a callback, a configuration value – stays unschemed, and expands exactly
+as before: its parameter’s value does not exist yet when the closure is
+built, and the body may branch on it. So do <code>let%op rec</code> and
 <code>function</code>-case bodies. An unlabelled parameter that is not a
-tensor, against the convention, is a compile error; opt out.</p>
+tensor, against the convention, is a compile error; opt out. The
+<code>nn_blocks</code> stacks (<code>transformer_encoder</code>,
+<code>transformer_decoder</code>, <code>decoder_only</code>) and the
+<code>demo_models</code> stay plain functions on purpose: their layers
+are schemed, and a scheme of the whole stack would trace the whole
+model, which costs superlinearly in depth.</p>
 <p><strong>Refused traces degrade silently.</strong> A function whose
 trace a scheme cannot carry – random number generation inside it
 (including a closure built inside it whose parameters take the default
@@ -2049,12 +2084,12 @@ projections, a body that cannot run on tracers – stays unschemed, once
 the trace’s rewind succeeded. It is a valid function, and its
 applications report what they always reported.</p>
 <p><strong>Side effects.</strong> The trace runs the body once more per
-closure. Under the rewind it leaves no shape state, no tensor and no
-session id behind (traces and checks allocate tensor ids, node uids and
-shape-variable ids from reserved ranges, so printed ids and shapes,
-compilation choices, generated code and random draws are the same with
-or without schemes), but OCaml side effects of the body (a counter, a
-print) happen.</p>
+closure (once per presence pattern with option-valued tensors). Under
+the rewind it leaves no shape state, no tensor and no session id behind
+(traces and checks allocate tensor ids, node uids and shape-variable ids
+from reserved ranges, so printed ids and shapes, compilation choices,
+generated code and random draws are the same with or without schemes),
+but OCaml side effects of the body (a counter, a print) happen.</p>
 <p><strong>Opting out.</strong> <code>[@@ocannl.no_scheme]</code> on the
 binding, or <code>[@ocannl.no_scheme]</code> on a <code>fun</code>
 expression, leaves a function unschemed: for a body whose constraints
@@ -2075,7 +2110,7 @@ Ocannl.Nn_blocks.DSL_modules</p>
 hid_dim ] }) let () = ignore (Tensor.Scheme.check_definition
 ~name:“block” (fun () -&gt; ignore (block ~hid_dim:8 ())))</p>
 <pre><code>
-It catches the errors that hold for every configuration, and the configuration-dependent ones of the trial configuration only; it costs one trace (and the trial&#39;s construction) at program start. Prefer it to a bare `let _ = block conf ()`, which leaves the trial&#39;s parameters registered in the session. It does not reach the functions that stay unschemed (`~train_step` after `()`), beyond the sub-blocks their trial builds. `lib/nn_blocks.ml` does not run it at load time; `test/operations/nn_blocks_definitions` runs it over every schemed block.
+It catches the errors that hold for every configuration, and the configuration-dependent ones of the trial configuration only; it costs one trace (and the trial&#39;s construction) at program start. Prefer it to a bare `let _ = block conf ()`, which leaves the trial&#39;s parameters registered in the session. It traces every presence pattern of the closures the trial builds at `()`, so a training-only error is caught too. It does not reach the functions that stay unschemed, beyond the sub-blocks their trial builds, nor a function without a `()` stage that the trial only builds (that one traces at its first application). `lib/nn_blocks.ml` does not run it at load time; `test/operations/nn_blocks_definitions` runs it over every schemed block.
 
 ## The syntax extension %%extend_dsls
 

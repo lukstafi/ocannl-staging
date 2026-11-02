@@ -897,13 +897,13 @@ cells.</p>
 inference</strong> from how the result is used (e.g., pointwise ops with
 shaped tensors) 2. <strong>Explicit dimensions</strong> via
 <code>TDSL.uniform_at ~output_dims:[...] counter ()</code></p>
-<div class="sourceCode" id="cb20"><pre class="sourceCode ocaml"><code class="sourceCode ocaml"><span id="cb20-1"><a href="#cb20-1" aria-hidden="true" tabindex="-1"></a><span class="co">(* Dropout with training-step-dependent randomness *)</span></span>
-<span id="cb20-2"><a href="#cb20-2" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span>%op dropout ~rate () ~train_step x =</span>
-<span id="cb20-3"><a href="#cb20-3" aria-hidden="true" tabindex="-1"></a>  <span class="kw">match</span> train_step <span class="kw">with</span></span>
-<span id="cb20-4"><a href="#cb20-4" aria-hidden="true" tabindex="-1"></a>  | <span class="dt">Some</span> train_step <span class="kw">when</span> Float.(rate &gt; <span class="fl">0.0</span>) -&gt;</span>
-<span id="cb20-5"><a href="#cb20-5" aria-hidden="true" tabindex="-1"></a>      <span class="co">(* !@train_step embeds the step counter as a scalar tensor *)</span></span>
+<div class="sourceCode" id="cb20"><pre class="sourceCode ocaml"><code class="sourceCode ocaml"><span id="cb20-1"><a href="#cb20-1" aria-hidden="true" tabindex="-1"></a><span class="co">(* Dropout with training-step-dependent randomness. The caller passes the step counter as a</span></span>
+<span id="cb20-2"><a href="#cb20-2" aria-hidden="true" tabindex="-1"></a><span class="co">   scalar tensor, e.g. [~train_step:(Some !@step_n)] for a static symbol [step_n]. *)</span></span>
+<span id="cb20-3"><a href="#cb20-3" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span>%op dropout ~rate () ~(train_step : Tensor.t <span class="dt">option</span>) x =</span>
+<span id="cb20-4"><a href="#cb20-4" aria-hidden="true" tabindex="-1"></a>  <span class="kw">match</span> train_step <span class="kw">with</span></span>
+<span id="cb20-5"><a href="#cb20-5" aria-hidden="true" tabindex="-1"></a>  | <span class="dt">Some</span> train_step <span class="kw">when</span> Float.(rate &gt; <span class="fl">0.0</span>) -&gt;</span>
 <span id="cb20-6"><a href="#cb20-6" aria-hidden="true" tabindex="-1"></a>      <span class="co">(* Shape is inferred from pointwise comparison with x *)</span></span>
-<span id="cb20-7"><a href="#cb20-7" aria-hidden="true" tabindex="-1"></a>      x *. (!.rate &lt; uniform_at !@train_step) /. (<span class="fl">1.0</span> - !.rate)</span>
+<span id="cb20-7"><a href="#cb20-7" aria-hidden="true" tabindex="-1"></a>      x *. (!.rate &lt; uniform_at train_step) /. (<span class="fl">1.0</span> - !.rate)</span>
 <span id="cb20-8"><a href="#cb20-8" aria-hidden="true" tabindex="-1"></a>  | _ -&gt; x</span></code></pre></div>
 <p><strong>Note on shapes</strong>: The packed <code>uniform</code>
 function (without <code>1</code>) is total over shapes: element
