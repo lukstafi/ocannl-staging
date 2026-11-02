@@ -10,7 +10,8 @@
   <span><span><span class="type-var">'a</span> <a href="../../Indexing/index.html#type-bindings">Indexing.bindings</a></span> <span class="arrow">&#45;&gt;</span></span>
   <span><span><a href="../../Low_level/index.html#type-optimized">Low_level.optimized</a> <span class="xref-unresolved">Base</span>.Array.t</span> <span class="arrow">&#45;&gt;</span></span>
   <span><span class="label">includes</span>:string <span class="arrow">&#45;&gt;</span></span>
-  <span><span class="label">builtins</span>:<span><span>(<span class="xref-unresolved">Base</span>.String.t * string * <span><span class="xref-unresolved">Base</span>.String.t <span class="xref-unresolved">Base</span>.List.t</span>)</span> <span class="xref-unresolved">Base</span>.List.t</span> <span class="arrow">&#45;&gt;</span></span>
+  <span><span class="label">builtins</span>:
+    <span><span>(<span class="xref-unresolved">Base</span>.String.t * <span class="xref-unresolved">Base</span>.string * <span><span class="xref-unresolved">Base</span>.String.t <span class="xref-unresolved">Base</span>.List.t</span>)</span> <span class="xref-unresolved">Base</span>.List.t</span> <span class="arrow">&#45;&gt;</span></span>
   <span><span class="optlabel">?conditional_includes</span>:<span class="error">???</span> <span class="arrow">&#45;&gt;</span></span>
   <span>unit <span class="arrow">&#45;&gt;</span></span>
   <span><span><span>(<span class="xref-unresolved">Base</span>.string * <a href="../../Backend_intf/index.html#type-kparam_source">Backend_intf.kparam_source</a>)</span> <span class="xref-unresolved">Base</span>.list</span> <a href="#type-rendered">rendered</a></span></span></code></div><div class="spec-doc"><p>Renders a batch without compiling it: the kernels are rendered by one syntax instance over the whole batch, exactly as <a href="#val-compile_batch"><code>compile_batch</code></a> renders them, so a kernel's text is the same whichever subset of the batch is later assembled into a translation unit.</p></div></div><div class="odoc-spec"><div class="spec value anchored" id="val-drive"><a href="#val-drive" class="anchor"></a><code><span><span class="keyword">val</span> drive : 
@@ -19,7 +20,8 @@
   <span><span><span class="type-var">'a</span> <a href="../../Indexing/index.html#type-bindings">Indexing.bindings</a></span> <span class="arrow">&#45;&gt;</span></span>
   <span><span><a href="../../Low_level/index.html#type-optimized">Low_level.optimized</a> <span class="xref-unresolved">Base</span>.Array.t</span> <span class="arrow">&#45;&gt;</span></span>
   <span><span class="label">includes</span>:string <span class="arrow">&#45;&gt;</span></span>
-  <span><span class="label">builtins</span>:<span><span>(<span class="xref-unresolved">Base</span>.String.t * string * <span><span class="xref-unresolved">Base</span>.String.t <span class="xref-unresolved">Base</span>.List.t</span>)</span> <span class="xref-unresolved">Base</span>.List.t</span> <span class="arrow">&#45;&gt;</span></span>
+  <span><span class="label">builtins</span>:
+    <span><span>(<span class="xref-unresolved">Base</span>.String.t * <span class="xref-unresolved">Base</span>.string * <span><span class="xref-unresolved">Base</span>.String.t <span class="xref-unresolved">Base</span>.List.t</span>)</span> <span class="xref-unresolved">Base</span>.List.t</span> <span class="arrow">&#45;&gt;</span></span>
   <span><span class="optlabel">?conditional_includes</span>:<span class="error">???</span> <span class="arrow">&#45;&gt;</span></span>
   <span><span class="optlabel">?compiles_source</span>:<span class="error">???</span> <span class="arrow">&#45;&gt;</span></span>
   <span><span class="label">compile_source</span>:<span>(<span><span class="label">name</span>:<span class="xref-unresolved">Base</span>.String.t <span class="arrow">&#45;&gt;</span></span> <span><span class="xref-unresolved">Base</span>.String.t <span class="arrow">&#45;&gt;</span></span> <span class="type-var">'b</span>)</span> <span class="arrow">&#45;&gt;</span></span>
@@ -33,7 +35,8 @@
   <span><span><span class="type-var">'a</span> <a href="../../Indexing/index.html#type-bindings">Indexing.bindings</a></span> <span class="arrow">&#45;&gt;</span></span>
   <span><a href="../../Low_level/index.html#type-optimized">Low_level.optimized</a> <span class="arrow">&#45;&gt;</span></span>
   <span><span class="label">includes</span>:string <span class="arrow">&#45;&gt;</span></span>
-  <span><span class="label">builtins</span>:<span><span>(<span class="xref-unresolved">Base</span>.String.t * string * <span><span class="xref-unresolved">Base</span>.String.t <span class="xref-unresolved">Base</span>.List.t</span>)</span> <span class="xref-unresolved">Base</span>.List.t</span> <span class="arrow">&#45;&gt;</span></span>
+  <span><span class="label">builtins</span>:
+    <span><span>(<span class="xref-unresolved">Base</span>.String.t * <span class="xref-unresolved">Base</span>.string * <span><span class="xref-unresolved">Base</span>.String.t <span class="xref-unresolved">Base</span>.List.t</span>)</span> <span class="xref-unresolved">Base</span>.List.t</span> <span class="arrow">&#45;&gt;</span></span>
   <span><span class="optlabel">?conditional_includes</span>:<span class="error">???</span> <span class="arrow">&#45;&gt;</span></span>
   <span><span class="optlabel">?compiles_source</span>:<span class="error">???</span> <span class="arrow">&#45;&gt;</span></span>
   <span><span class="label">compile_source</span>:<span>(<span><span class="label">name</span>:<span class="xref-unresolved">Base</span>.String.t <span class="arrow">&#45;&gt;</span></span> <span><span class="xref-unresolved">Base</span>.String.t <span class="arrow">&#45;&gt;</span></span> <span class="type-var">'b</span>)</span> <span class="arrow">&#45;&gt;</span></span>
@@ -46,7 +49,8 @@
   <span><span><span class="type-var">'a</span> <a href="../../Indexing/index.html#type-bindings">Indexing.bindings</a></span> <span class="arrow">&#45;&gt;</span></span>
   <span><span><a href="../../Low_level/index.html#type-optimized">Low_level.optimized</a> <span class="xref-unresolved">Base</span>.Array.t</span> <span class="arrow">&#45;&gt;</span></span>
   <span><span class="label">includes</span>:string <span class="arrow">&#45;&gt;</span></span>
-  <span><span class="label">builtins</span>:<span><span>(<span class="xref-unresolved">Base</span>.String.t * string * <span><span class="xref-unresolved">Base</span>.String.t <span class="xref-unresolved">Base</span>.List.t</span>)</span> <span class="xref-unresolved">Base</span>.List.t</span> <span class="arrow">&#45;&gt;</span></span>
+  <span><span class="label">builtins</span>:
+    <span><span>(<span class="xref-unresolved">Base</span>.String.t * <span class="xref-unresolved">Base</span>.string * <span><span class="xref-unresolved">Base</span>.String.t <span class="xref-unresolved">Base</span>.List.t</span>)</span> <span class="xref-unresolved">Base</span>.List.t</span> <span class="arrow">&#45;&gt;</span></span>
   <span><span class="optlabel">?conditional_includes</span>:<span class="error">???</span> <span class="arrow">&#45;&gt;</span></span>
   <span><span class="optlabel">?compiles_source</span>:<span class="error">???</span> <span class="arrow">&#45;&gt;</span></span>
   <span><span class="label">compile_source</span>:<span>(<span><span class="label">name</span>:<span class="xref-unresolved">Base</span>.String.t <span class="arrow">&#45;&gt;</span></span> <span><span class="xref-unresolved">Base</span>.String.t <span class="arrow">&#45;&gt;</span></span> <span class="type-var">'b</span>)</span> <span class="arrow">&#45;&gt;</span></span>
