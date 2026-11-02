@@ -632,6 +632,20 @@ as <code>Train.grad_update</code> of a loss over their sum; or compile
 <code>Train.grad_update ~accum_steps:1</code> per objective, neither of
 which zeroes the shared leaf: after the reset and both runs, its
 gradient is the sum’s.</p>
+<p>A routine that accumulates into a gradient without zeroing it sums
+every run’s contribution until something resets the gradient.
+<code>Context.run</code> therefore refuses its run once it has run as
+many times as its computation allows since the gradient’s last reset –
+once, or <code>k</code> times for
+<code>Train.grad_update ~accum_steps:k</code>, the explicit opt-in for
+accumulating over micro-steps (gh-ocannl-1781). A reset is a run of a
+routine zeroing the gradient (<code>Train.zero_params_grads</code>, a
+plain <code>Train.grad_update</code> of the loss carrying the zeroing)
+or a write from outside a run (<code>Context.set_values</code>,
+<code>Context.from_host</code>, <code>Context.copy</code>). The refusal
+names the gradient and any routine of the lineage that zeroes it but has
+not run since. Counting is per routine, so the common reset above – one
+reset, then one run of each objective’s update – stays legal.</p>
 <h2 id="the-train-module">The Train Module</h2>
 <p>The <code>Train</code> module provides high-level utilities for
 training workflows.</p>
