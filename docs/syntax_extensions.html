@@ -2003,7 +2003,14 @@ inference</a>).</li>
 on the arguments raises when the closure is built, as
 <code>tracing the shape scheme &lt;function&gt;: ...</code>. One that
 does raises at the application, before the body runs, as
-<code>applying the shape scheme &lt;function&gt; to &lt;arguments&gt;: ...</code>.</li>
+<code>applying the shape scheme &lt;function&gt; to &lt;arguments&gt;: ...</code>.
+Printed (<code>Printexc.to_string</code>, as the toplevel prints it),
+the error lists the conflicting sizes, the failed constraint and the
+tensors it relates, with their axis kinds; the variables, and the
+tensors of the trace, are named by first appearance rather than by their
+reserved-range ids (<code>Shape.error_to_string_hum</code>;
+<code>shape_error_full_sexp=true</code> prints the raw constraint
+sexp).</li>
 </ul>
 <p>To see a function’s scheme, trace it explicitly with
 <code>Tensor.Scheme.trace</code> (the same trace the closure ran) and

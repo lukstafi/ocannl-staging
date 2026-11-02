@@ -773,11 +773,20 @@ size – fails when the closure is built, and
 <code>Tensor.Scheme.check_definition</code> finds it at program start
 from a trial configuration:</p>
 <p><code>ocaml doc-excerpt=test/operations/reusable_tensor_programs.ml let%op two_layer ~hid ~out () x =   let h = relu (({ w1; o = [ hid ] } * x) + { b1 = 0.; o = [ hid ] }) in   ({ w2; o = [ out ] } * h) + { b2 = 0.; o = [ hid ] }</code></p>
-<p><code>text doc-excerpt=test/operations/reusable_tensor_programs.ml checking the definition two_layer: tracing the shape scheme two_layer: solved dimensions for axis: mismatch   conflicting sizes: 2 vs 8</code></p>
+<p><code>text doc-excerpt=test/operations/reusable_tensor_programs.ml Shape_error: checking the definition two_layer: tracing the shape scheme two_layer: solved dimensions for axis: mismatch   conflicting sizes: 2 vs 8   failed constraint: &#39;a = 8     from two_layer (output) with b2 (output): pointwise_binary</code></p>
+<p>That is what the toplevel prints for the exception
+(<code>Printexc.to_string</code>): the message, the sizes in conflict,
+the constraint that failed, and the tensors it relates with their axis
+kinds and the operation that related them. Variables are named by first
+appearance (<code>&#39;a</code>, <code>..&#39;b..</code>), and so is a tensor of
+a trace or a check (<code>n&#39;1</code>), whose id comes from a reserved
+range; <code>Shape.error_to_string_hum</code> gives the same text, and
+the setting <code>shape_error_full_sexp=true</code> restores the
+solver’s raw constraint sexp.</p>
 <p>One that depends on the argument fails at the application, before the
 body runs: a residual block whose layer is 4 wide, applied to 3
-features, reads</p>
-<p><code>text doc-excerpt=test/operations/reusable_tensor_programs.ml Shape_error: applying the shape scheme residual_block to x: dimension comparison for axis: mismatch   conflicting sizes: 4 vs 3</code></p>
+features, reads (the first lines)</p>
+<p><code>text doc-excerpt=test/operations/reusable_tensor_programs.ml Shape_error: applying the shape scheme residual_block to x: dimension comparison for axis: mismatch   conflicting sizes: 4 vs 3   failed constraint: 4 ⊑ 3     from residual_block (output) with (its trace&#39;s solution) (output): the trace of the shape scheme residual_block</code></p>
 <p>With the scheme opted out (<code>[@@ocannl.no_scheme]</code>), the
 same mistakes surface only inside the body, naming neither the function
 nor the argument, and leave the session tainted.</p>
