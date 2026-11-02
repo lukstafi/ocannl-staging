@@ -2136,7 +2136,12 @@ for embedded tensor expressions, which create new tensors. The
 translator puts the forward code in sequence just prior to the
 assignment that made use of the created tensor. The translator includes
 the forward code of tensors that are “forward roots” at the time the
-assigments are constructed (using <code>Tensor.is_fwd_root</code>).</li>
+assigments are constructed (using <code>Tensor.is_fwd_root</code>). A
+sequence of statements is constructed in source order, so the first
+statement that uses a forward-root tensor carries its forward code, and
+the statements after it read the computed value; an explicit
+<code>t.forward</code> should come before the statements that use
+<code>t</code>.</li>
 <li>For inline declarations of tensors, the translator needs to pick the
 right other tensor, if any, to enrich the label information of the
 created tensor. Mechanisms:
