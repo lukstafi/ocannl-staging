@@ -648,11 +648,15 @@ becomes more concise:</p>
 <p>When there is a function directly under the <code>%op</code>
 extension point, like in the example above, or directly under a function
 taking a unit parameter <code>()</code>, the function parameter (to the
-right of <code>()</code>) should be a tensor. That’s because
-<code>%op</code> uses this tensor’s (value’s) label to enrich the label
-of the resulting tensor, and because automatic shape schemes take such
-an unlabelled parameter to be a tensor (see <a href="#automatic-shape-schemes">Automatic shape schemes</a>). A labelled
-or optional parameter there may be anything.</p>
+right of <code>()</code>) should be a tensor. That’s because automatic
+shape schemes take such an unlabelled parameter to be a tensor (see <a href="#automatic-shape-schemes">Automatic shape schemes</a>), and
+because, in a function without <code>()</code>, <code>%op</code> uses
+this tensor’s (value’s) label to enrich the label of the resulting
+tensor (see <a href="#label-from-function-argument">Label from function
+argument</a>). A labelled parameter of a function without
+<code>()</code> must be a tensor for the same reason; an optional
+parameter may be anything, and so may a labelled one after
+<code>()</code>.</p>
 <p>When the declaration is followed by a literal float, the float
 provides the initial value to initialize the tensor. Otherwise, the
 tensor value cells are initialized with the default parameter
@@ -1881,12 +1885,20 @@ also illustrates providing additional string list to populate the label
 of the tensor: <code>label</code> must be of type
 <code>string list</code>.</p>
 <h3 id="label-from-function-argument">Label from function argument</h3>
-<p>The resulting (primary) tensor’s label will also have incorporated
-the label of the input argument, if any. In our example, the resulting
-<code>mlp_layer</code> tensor will also include the label of the
-actually applied <code>x</code>. If the function has a unit parameter
-<code>()</code>, like <code>mlp_layer</code> above, only parameters to
-the right of <code>()</code> are considered for label extraction.</p>
+<p>When the function directly under <code>%op</code> has no unit
+parameter <code>()</code>, the resulting (primary) tensor’s label also
+incorporates the labels of its arguments: in
+<code>let%op scaled ~gamma x = gamma *. x</code>, the result’s label
+includes the labels of the applied <code>gamma</code> and
+<code>x</code>. Every parameter except an optional one is such a label
+source, so a labelled non-tensor parameter there is a type error at the
+parameter: give the function a <code>()</code> and put the parameter
+before it. An optional parameter (<code>?scale</code>,
+<code>?(stride = 2)</code>) is not a label source and may be anything
+(gh-ocannl-1787). If the function has a unit parameter <code>()</code>,
+like <code>mlp_layer</code> above, no parameter is a label source: the
+label comes from the binding’s name and the <code>~label</code>
+parameter.</p>
 <p>When there is the unit parameter, and a <code>~label</code> parameter
 (specifically a parameter with label <code>label</code>), this label is
 also incorporated.</p>
