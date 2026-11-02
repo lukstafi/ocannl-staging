@@ -54,6 +54,21 @@ let run_with fwd tensor transform =
 
 let r32 x = Int32.float_of_bits (Int32.bits_of_float x)
 
+(* How a differing output differs (gh-ocannl-1661), for the record: how many cells, the largest
+   absolute difference and the largest distance in f32 units in the last place. A rounding
+   difference (a contraction) moves cells by an ulp or two; a lost or stale copy moves them by the
+   magnitude of a product. *)
+let difference got want =
+  if Array.length got <> Array.length want then "of another length"
+  else
+    let ulps a b = Int32.(abs (bits_of_float a - bits_of_float b)) |> Int32.to_int_exn in
+    let n, abs_max, ulp_max =
+      Array.fold2_exn got want ~init:(0, 0., 0) ~f:(fun (n, m, u) g w ->
+          if Float.equal g w then (n, m, u)
+          else (n + 1, Float.max m (Float.abs (g -. w)), Int.max u (ulps g w)))
+    in
+    Printf.sprintf "in %d of %d cells, by at most %g (%d ulp)" n (Array.length want) abs_max ulp_max
+
 (* A value per cell that varies with every index (1009 is prime and above every row-major stride's
    residue period here) and is inexact in binary: a multiple of 1/37, rounded to f32 as stored. *)
 let value ~dims idcs =
@@ -132,7 +147,9 @@ let leg ~tag ~layout cand reversed =
     (Printf.sprintf "%s: the family's scalar blocktile seeds agree bitwise among themselves" tag)
     outs ~f:(fun (q, got) ->
       let ok = Array.equal Float.equal got want in
-      if not ok then Stdio.eprintf "coalesce_numerics: %s family %s differs\n%!" tag (label q);
+      if not ok then
+        Stdio.eprintf "coalesce_numerics: %s family %s differs %s\n%!" tag (label q)
+          (difference got want);
       ok);
   (* The executed control: the first family seed run on the reversed inputs sums every cell's
      products in the reverse order, and some cell's bits change -- so the bitwise claims here would
@@ -160,7 +177,9 @@ let leg ~tag ~layout cand reversed =
       match run q with
       | got ->
           let ok = Array.equal Float.equal got want in
-          if not ok then Stdio.eprintf "coalesce_numerics: %s %s differs\n%!" tag (label q);
+          if not ok then
+            Stdio.eprintf "coalesce_numerics: %s %s differs %s\n%!" tag (label q)
+              (difference got want);
           ok
       | exception exn ->
           Stdio.eprintf "coalesce_numerics: %s %s FAILED: %s\n%!" tag (label q) (Exn.to_string exn);
