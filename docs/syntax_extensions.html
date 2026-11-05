@@ -653,10 +653,10 @@ shape schemes take such an unlabelled parameter to be a tensor (see <a href="#au
 because, in a function without <code>()</code>, <code>%op</code> uses
 this tensor’s (value’s) label to enrich the label of the resulting
 tensor (see <a href="#label-from-function-argument">Label from function
-argument</a>). A labelled parameter of a function without
-<code>()</code> must be a tensor for the same reason; an optional
-parameter may be anything, and so may a labelled one after
-<code>()</code>.</p>
+argument</a>). A labelled or optional parameter may be anything, with or
+without <code>()</code>: without <code>()</code>, a labelled one is read
+as a tensor only on evidence that it is one (see <a href="#label-from-function-argument">Label from function
+argument</a>).</p>
 <p>When the declaration is followed by a literal float, the float
 provides the initial value to initialize the tensor. Otherwise, the
 tensor value cells are initialized with the default parameter
@@ -1096,13 +1096,15 @@ parameter would introduce:</p>
 <p>For <code>%op</code>, the declaration is allowed anywhere. If there
 is a unit <code>()</code> parameter in the function, the scope of
 inline-declared tensors is delimited at that parameter. The tensors are
-defined right after the unit parameter. If there is a labeled parameter
-with label <code>label</code> before the unit parameter (e.g.,
-<code>~label</code>), the inline-declared tensors will use that
-parameter (which should be of type <code>string list</code>) to enrich
-their labels. Example showing two param tensors declared inline, with
-scope delimited by <code>()</code> and labels enriched by the
-<code>label</code> parameter:</p>
+defined right after the unit parameter. If there is a labeled or
+optional parameter with label <code>label</code> before the unit
+parameter (<code>~label</code>, <code>?label</code>,
+<code>?(label = [ &quot;net&quot; ])</code>), the inline-declared tensors will use
+that parameter (which should be of type <code>string list</code>; an
+omitted <code>?label</code> adds nothing) to enrich their labels.
+Example showing two param tensors declared inline, with scope delimited
+by <code>()</code> and labels enriched by the <code>label</code>
+parameter:</p>
 <div class="sourceCode" id="cb14"><pre class="sourceCode ocaml"><code class="sourceCode ocaml"><span id="cb14-1"><a href="#cb14-1" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span>%op mlp_layer ~label ~hid_dim () x = relu ({ w } * x + { b; o = [ hid_dim ] })</span></code></pre></div>
 <h3 id="implementation-strategy-for-the-initialization-syntax">Implementation
 strategy for the initialization syntax</h3>
@@ -1904,18 +1906,24 @@ parameter <code>()</code>, the resulting (primary) tensor’s label also
 incorporates the labels of its arguments: in
 <code>let%op scaled ~gamma x = gamma *. x</code>, the result’s label
 includes the labels of the applied <code>gamma</code> and
-<code>x</code>. Every parameter except an optional one is such a label
-source, so a labelled non-tensor parameter there is a type error at the
-parameter: give the function a <code>()</code> and put the parameter
-before it. An optional parameter (<code>?scale</code>,
+<code>x</code>. An unlabelled parameter is always such a label source. A
+labelled one is when <code>%op</code> sees evidence that it is a tensor:
+it is a direct operand of a tensor operator in the body
+(<code>gamma *. x</code>), or it is annotated
+(<code>~(gamma : Tensor.t)</code>, for a tensor the body only passes
+on). Any other labelled parameter is left alone and may be anything,
+e.g. <code>let%op scaled ~scale x = x *. !.scale</code> with a float
+<code>scale</code> (gh-ocannl-1885); so a labelled tensor that the body
+only hands to another function contributes its label only when
+annotated. An optional parameter (<code>?scale</code>,
 <code>?(stride = 2)</code>) is not a label source and may be anything
 (gh-ocannl-1787). If the function has a unit parameter <code>()</code>,
 like <code>mlp_layer</code> above, no parameter is a label source: the
 label comes from the binding’s name and the <code>~label</code>
 parameter.</p>
-<p>When there is the unit parameter, and a <code>~label</code> parameter
-(specifically a parameter with label <code>label</code>), this label is
-also incorporated.</p>
+<p>When there is the unit parameter, and a <code>~label</code> or
+<code>?label</code> parameter (specifically a parameter with label
+<code>label</code>), this label is also incorporated.</p>
 <h3 id="configuring-inline-declarations-inline-output-dimensions-initial-values">Configuring
 inline declarations: inline output dimensions, initial values</h3>
 <p>In the <code>%op</code> syntax, inline declarations use record syntax
