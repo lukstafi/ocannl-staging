@@ -800,7 +800,12 @@ solver’s raw constraint sexp.</p>
 <p>One that depends on the argument fails at the application, before the
 body runs: a residual block whose layer is 4 wide, applied to 3
 features, reads (the first lines)</p>
-<p><code>text doc-excerpt=test/operations/reusable_tensor_programs.ml Shape_error: applying the shape scheme residual_block to x: dimension comparison for axis: mismatch   conflicting sizes: 4 vs 3   failed constraint: 4 ⊑ 3     from residual_block (output) with (its trace&#39;s solution) (output): the trace of the shape scheme residual_block</code></p>
+<p><code>text doc-excerpt=test/operations/reusable_tensor_programs.ml Shape_error: applying the shape scheme residual_block to x: dimension comparison for axis: mismatch   conflicting sizes: 4 vs 3   failed constraint: 4 ⊑ 3     from residual_block (output) with x (output): the shape scheme residual_block applied to x     from residual_block (output) with (its trace&#39;s solution) (output): the trace of the shape scheme residual_block</code></p>
+<p>The origins that name the failing scheme’s own tensors come first –
+its application, its trace’s solution, the tensors its trace made – then
+the rest in the order the solver met them, such as how a parameter’s
+random initialization shapes it; <code>max_shape_error_origins</code>
+caps the list from the end.</p>
 <p>With the scheme opted out (<code>[@@ocannl.no_scheme]</code>), the
 same mistakes surface only inside the body, naming neither the function
 nor the argument, and leave the session tainted.</p>
