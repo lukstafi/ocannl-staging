@@ -1342,15 +1342,28 @@ directly in einsum notation. The semantics:</p>
 <code>input_index = stride * output_position + dilation * kernel_position</code></p></li>
 <li><p><strong>Padded convolution</strong> (<code>=+</code>):
 <code>input_size = stride * output_size</code> (padding compensates for
-kernel extent). The operand is zero-padded by margins totalling the
-effective kernel span (below), split with the smaller half on the left,
-<code>left = effective_kernel_span / 2</code>, and a padded window reads
+kernel extent). The operand is zero-padded by
+<code>left = (effective_kernel_span - 1) / 2</code> cells on the left
+and <code>right = (effective_kernel_span + 1) / 2</code> on the right
+(the span is below), and a padded window reads
 <code>input[stride * output_position + offset + dilation * kernel_position - left]</code>,
 a position outside the operand reading the padding value (0 for the add
-family; a max-family window is clamped to the operand instead). So with
-stride 1 and an odd kernel the window is centered, dilated or not:
-<code>o=+2*k</code> over a kernel of 3 reads <code>o - 2</code>,
-<code>o</code>, <code>o + 2</code> (gh-ocannl-1657).</p></li>
+family; a max-family window is clamped to the operand instead). The
+split is PyTorch’s <code>padding=&#39;same&#39;</code>,
+<code>left = dilation * (kernel_size - 1) // 2</code>. So with stride 1
+an odd kernel’s window is centered, dilated or not: <code>o=+2*k</code>
+over a kernel of 3 reads <code>o - 2</code>, <code>o</code>,
+<code>o + 2</code> (gh-ocannl-1657). An even span puts its extra tap on
+the right: <code>o=+k</code> over a kernel of 4 reads <code>o - 1</code>
+through <code>o + 2</code>, and the 2/2 pool <code>2*o=+k</code> over a
+window of 2 reads <code>2*o</code>, <code>2*o + 1</code>, tiling the
+operand as TF’s <code>SAME</code> pool does (gh-ocannl-1692). The anchor
+does not depend on the stride: an odd kernel at
+<code>stride &gt; 1</code> keeps PyTorch’s explicit
+<code>padding=kernel_size//2</code>, the torchvision ResNet convention,
+not TF’s stride-aware <code>(span - stride) // 2</code>, so
+<code>2*o=+k</code> over a kernel of 3 reads <code>2*o - 1</code>,
+<code>2*o</code>, <code>2*o + 1</code>.</p></li>
 <li><p><strong>Stride and dilation are at least 1</strong>: a
 coefficient of 0 (written as a literal, or the runtime value of an
 identifier under <code>%op</code>/<code>%cd</code>) is refused with a
