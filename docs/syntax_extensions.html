@@ -2126,10 +2126,12 @@ built, and the body may branch on it. So do <code>let%op rec</code> and
 <code>function</code>-case bodies. An unlabelled parameter that is not a
 tensor, against the convention, is a compile error; opt out. The
 <code>nn_blocks</code> stacks (<code>transformer_encoder</code>,
-<code>transformer_decoder</code>, <code>decoder_only</code>) and the
-<code>demo_models</code> stay plain functions on purpose: their layers
-are schemed, and a scheme of the whole stack would trace the whole
-model, which costs superlinearly in depth.</p>
+<code>transformer_decoder</code>, <code>decoder_only</code>) stay plain
+functions on purpose: their layers are schemed, and a scheme of the
+whole stack would check every layer once more on top of its layers’ own
+checks (gh-ocannl-1814). Tracing a whole model is not the obstacle:
+<code>sokoban_cnn</code> and <code>mobile_cnn</code> are schemed, and <a href="./shape_inference.md#what-schemes-buy-measured">a whole stack’s
+trace costs a fraction of one build</a>.</p>
 <p><strong>Refused traces degrade, with a warning.</strong> A function
 whose trace a scheme cannot carry – random number generation inside it
 (including a closure built inside it whose parameters take the default
