@@ -2044,10 +2044,19 @@ reserved-range ids (<code>Shape.error_to_string_hum</code>;
 <code>shape_error_full_sexp=true</code> prints the raw constraint
 sexp).</li>
 </ul>
-<p>To see a function’s scheme, trace it explicitly with
-<code>Tensor.Scheme.trace</code> (the same trace the closure ran) and
-print it with <code>Tensor.Scheme.to_string</code>. The newcomer
-tutorial <a href="./tensors_and_contexts.md#reusable-tensor-programs">Reusable
+<p>To see the scheme a closure uses, build it under
+<code>Tensor.Scheme.traced_by</code>, which returns the schemes the
+closures built while it ran traced – the ones their applications are
+checked against – and print one with
+<code>Tensor.Scheme.to_string</code> (gh-ocannl-1801). A scheme’s
+results are what the traced body returns: a tensor it made (or a copy of
+its record) or one of its arguments, or a tuple of them; any other value
+leaves the scheme without results, printed <code>_</code>. The checks
+relate the arguments only. <code>Tensor.Scheme.check_definition</code>
+returns the schemes of its trial the same way, and <a href="../test/operations/nn_blocks_definitions.expected"><code>nn_blocks_definitions.expected</code></a>
+prints those of every schemed <code>Nn_blocks</code> block, an inventory
+of the library’s block signatures. <code>Tensor.Scheme.trace</code>
+traces a function explicitly, again. The newcomer tutorial <a href="./tensors_and_contexts.md#reusable-tensor-programs">Reusable
 Tensor Programs</a> prints one, shows both kinds of report, and recovers
 a REPL session from a failed construction.</p>
 <p><strong>Which functions qualify.</strong> The returned function –
