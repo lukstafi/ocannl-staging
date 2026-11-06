@@ -1084,6 +1084,20 @@ a second <code>{ x }</code> for the same name is rejected with
 Declare the tensor in whichever arm reads most naturally – typically the
 one whose right-hand side carries the best label information – and refer
 to it by bare name in the others.</p>
+<ul>
+<li><strong><code>%cd</code> state that starts from zero</strong>:
+<code>{ tensor_name; zero_valid = true }</code> declares that
+allocation’s zero is a correct value of the tensor
+(<code>Tnode.mark_zero_valid</code>), for a routine that reads it before
+writing it. The rest of its behavior is unchanged, and without the
+declaration the routine still runs from that zero, but the
+<code>debug_fill_fresh_outputs</code> configuration key, on in the test
+suite, starts an undeclared tensor from NaN so that a dropped
+initialization shows. <code>{ sgd_momentum; zero_valid = true }</code>
+in <code>Train.sgd_one</code> is the pattern. The field goes with the
+other inline-declaration fields (<code>o</code>, <code>i</code>,
+<code>b</code>), at the one declaration site.</li>
+</ul>
 <p><code>Train.sgd_one</code> in <code>lib/train.ml</code> is the worked
 example: its <code>%cd</code> payload is written once, with
 <code>{ sgd_delta }</code> and <code>{ sgd_momentum }</code> each
