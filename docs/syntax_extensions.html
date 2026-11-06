@@ -1763,7 +1763,10 @@ row – after <code>2, 3</code>, an operand of <code>3, 2</code> or
 <code>6</code> is refused – and a dimension captured again has the row’s
 product. A reference whose last binding before the closure was a
 dimension carries only the number, so a row captured from it later is
-tied by product, as within one inference.</p>
+tied by product, as within one inference. That tie is not transitive
+(gh-ocannl-1969): row, dimension, row leaves two rows of one product,
+not one row, and identifying them takes an explicit
+<code>set_equal</code> of two row references.</p>
 <p><code>Shape.set_equal</code> on two row references equates the rows
 themselves, not their products, whatever either reference has been
 solved to so far (gh-ocannl-1617): rows <code>2, 3</code> and
@@ -1771,11 +1774,12 @@ solved to so far (gh-ocannl-1617): rows <code>2, 3</code> and
 dimension to a row (<code>set_equal</code> on a dimension and a row
 reference, or <code>Shape.set_dim</code> on a row reference). A row
 reference bound before a closure takes part in a Row-Row pair with the
-row it carried. A row holding a symbolic extent has no numeric product:
-after its closure it can be captured again as a row, or
-<code>set_equal</code>-ed with a row reference, but a capture as a
-dimension, <code>set_dim</code> or a dimension <code>set_equal</code> is
-refused, naming the closure (gh-ocannl-1655). And a reference made by
+row it carried, and two such references are compared at the call:
+different rows raise there, naming both. A row holding a symbolic extent
+has no numeric product: after its closure it can be captured again as a
+row, or <code>set_equal</code>-ed with a row reference, but a capture as
+a dimension, <code>set_dim</code> or a dimension <code>set_equal</code>
+is refused, naming the closure (gh-ocannl-1655). And a reference made by
 <code>Shape.get_variable_ref</code> that <code>set_equal</code> relates
 to a row reference before it is bound is a number, the row’s product:
 binding it to a row afterwards is refused, since the rows would be tied
