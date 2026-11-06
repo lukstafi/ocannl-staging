@@ -2124,14 +2124,21 @@ a callback, a configuration value – stays unschemed, and expands exactly
 as before: its parameter’s value does not exist yet when the closure is
 built, and the body may branch on it. So do <code>let%op rec</code> and
 <code>function</code>-case bodies. An unlabelled parameter that is not a
-tensor, against the convention, is a compile error; opt out. The
-<code>nn_blocks</code> stacks (<code>transformer_encoder</code>,
-<code>transformer_decoder</code>, <code>decoder_only</code>) stay plain
-functions on purpose: their layers are schemed, and a scheme of the
-whole stack would check every layer once more on top of its layers’ own
-checks (gh-ocannl-1814). Tracing a whole model is not the obstacle:
-<code>sokoban_cnn</code> and <code>mobile_cnn</code> are schemed, and <a href="./shape_inference.md#what-schemes-buy-measured">a whole stack’s
-trace costs a fraction of one build</a>.</p>
+tensor, against the convention, is a compile error; opt out.</p>
+<p><strong>Nested applications.</strong> A checked application vouches
+for the applications in its body (gh-ocannl-1814): its scheme holds
+their constraints, so they run without a check of their own, and an
+argument error in one is reported by the outer check, naming the outer
+function. A function’s first application still traces its other presence
+patterns, which that scheme does not hold. Under an opted-out or refused
+function, nothing vouches for them and they are checked as usual. That
+is why the <code>nn_blocks</code> stacks
+(<code>transformer_encoder</code>, <code>transformer_decoder</code>,
+<code>decoder_only</code>) are schemed like their layers: an application
+is one check, whose scheme gives the whole model’s signature, for <a href="./shape_inference.md#what-schemes-buy-measured">a trace per
+presence pattern, each a fraction of one build</a>.
+<code>sokoban_cnn</code> and <code>mobile_cnn</code> are schemed the
+same way.</p>
 <p><strong>Refused traces degrade, with a warning.</strong> A function
 whose trace a scheme cannot carry – random number generation inside it
 (including a closure built inside it whose parameters take the default
