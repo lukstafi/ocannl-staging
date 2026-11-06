@@ -1428,19 +1428,24 @@ one-operand spec the kernel label is captured and set,
 gradients included; unpadded (<code>&lt;+</code>) windows work the same
 way (gh-ocannl-1691). A padded window’s extents do not determine its
 kernel, so a padded kernel nothing sizes (not captured, or never set) is
-refused with a shape error naming it; an unpadded window’s kernel is
-solved from its extents like any other dimension. Solved, not refused,
-even when only the input size is known: one equation in two unknowns, so
-the solver’s least-commitment guess closes the output at 1 and the
-kernel takes the rest – an uncaptured
-<code>x ++ &quot;s, 2*o&lt;+k =&gt; s, o&quot;</code> over an input of 8 resolves
-to <code>o = 1</code>, <code>k = 8</code>, a full reduction rather than
-a pool. Size the kernel (capture <code>k</code> and
-<code>Shape.set_dim</code> it, or give the window a kernel operand of
-known extent) or the output (gh-ocannl-1741; pinned in the same test).
-The pooling layers’ constant kernel operand (<code>stretch 0.0</code> in
-<code>Nn_blocks.max_pool2d</code>) is the two-operand form of the same
-window. Executed in
+refused with a shape error naming it: an uncaptured one where the
+operation is built, naming the spec as well, the rest at the closure. So
+is one only an axis of the result carries,
+<code>x ++ &quot;s, 2*o=+k =&gt; s, o, k&quot;</code>, unless that axis is sized:
+a capture and <code>Shape.set_dim</code>, or an einsum consumer, but not
+a broadcast, which leaves the axis at 1 and cannot widen it
+(gh-ocannl-1983). An unpadded window’s kernel is solved from its extents
+like any other dimension. Solved, not refused, even when only the input
+size is known: one equation in two unknowns, so the solver’s
+least-commitment guess closes the output at 1 and the kernel takes the
+rest – an uncaptured <code>x ++ &quot;s, 2*o&lt;+k =&gt; s, o&quot;</code> over an
+input of 8 resolves to <code>o = 1</code>, <code>k = 8</code>, a full
+reduction rather than a pool. Size the kernel (capture <code>k</code>
+and <code>Shape.set_dim</code> it, or give the window a kernel operand
+of known extent) or the output (gh-ocannl-1741; pinned in the same
+test). The pooling layers’ constant kernel operand
+(<code>stretch 0.0</code> in <code>Nn_blocks.max_pool2d</code>) is the
+two-operand form of the same window. Executed in
 <code>test/einsum/padded_operand_offset_windows.ml</code>.</p></li>
 <li><p><strong>Offsets stay inside the axis</strong>: shape inference
 sizes an affine axis without its constant offset, so an offset must be
