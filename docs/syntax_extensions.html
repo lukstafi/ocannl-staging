@@ -1093,9 +1093,13 @@ writing it. The rest of its behavior is unchanged, and without the
 declaration the routine still runs from that zero, but the
 <code>debug_fill_fresh_outputs</code> configuration key, on in the test
 suite, starts an undeclared tensor from NaN so that a dropped
-initialization shows. <code>{ sgd_momentum; zero_valid = true }</code>
-in <code>Train.sgd_one</code> is the pattern. The field goes with the
-other inline-declaration fields (<code>o</code>, <code>i</code>,
+initialization shows. An accumulation opening with <code>=+</code>,
+<code>=-</code> or <code>=||</code> needs no declaration: zero is its
+neutral element, so the operator states the start. A statement reading
+the tensor any other way, such as <code>{ x } =: (0.9 *. x) + y</code>,
+does. <code>{ sgd_momentum; zero_valid = true }</code> in
+<code>Train.sgd_one</code> is the pattern. The field goes with the other
+inline-declaration fields (<code>o</code>, <code>i</code>,
 <code>b</code>), at the one declaration site.</li>
 </ul>
 <p><code>Train.sgd_one</code> in <code>lib/train.ml</code> is the worked
