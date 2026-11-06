@@ -147,6 +147,10 @@ the syntax extension %op</a>
 binding</a></li>
 <li><a href="#label-from-function-argument" id="toc-label-from-function-argument">Label from function
 argument</a></li>
+<li><a href="#the-label-parameter" id="toc-the-label-parameter">The
+<code>label</code> parameter</a></li>
+<li><a href="#parameters-that-need-a-unit-parameter-or-a-label" id="toc-parameters-that-need-a-unit-parameter-or-a-label">Parameters
+that need a unit parameter, or a label</a></li>
 <li><a href="#configuring-inline-declarations-inline-output-dimensions-initial-values" id="toc-configuring-inline-declarations-inline-output-dimensions-initial-values">Configuring
 inline declarations: inline output dimensions, initial values</a></li>
 <li><a href="#need-to-lift-the-applications-of-configuration-arguments-up-to-the-unit-parameter" id="toc-need-to-lift-the-applications-of-configuration-arguments-up-to-the-unit-parameter">Need
@@ -200,6 +204,10 @@ features of the syntax extension %op</a>
 <li><a href="#name-from-binding">Name from binding</a></li>
 <li><a href="#label-from-function-argument">Label from function
 argument</a></li>
+<li><a href="#the-label-parameter">The <code>label</code>
+parameter</a></li>
+<li><a href="#parameters-that-need-a-unit-parameter-or-a-label">Parameters that
+need a unit parameter, or a label</a></li>
 <li><a href="#configuring-inline-declarations-inline-output-dimensions-initial-values">Configuring
 inline declarations: inline output dimensions, initial values</a></li>
 <li><a href="#lifting-of-the-applications-of-config-arguments-if-an-error-refactor-your-code">Lifting
@@ -1939,9 +1947,9 @@ be in the last component of the sequence, other syntax constructs are
 handled analogously.</p>
 <p>The example
 <code>let%op mlp_layer ~label ~hid_dim () x = relu ({ w } * x + { b; o = [ hid_dim ] })</code>
-also illustrates providing additional string list to populate the label
-of the tensor: <code>label</code> must be of type
-<code>string list</code>.</p>
+also illustrates providing an additional string list to populate labels:
+<code>label</code> must be of type <code>string list</code> (see <a href="#the-label-parameter">The <code>label</code> parameter</a> for
+which tensors take it).</p>
 <h3 id="label-from-function-argument">Label from function argument</h3>
 <p>When the function directly under <code>%op</code> has no unit
 parameter <code>()</code>, the resulting (primary) tensor’s label also
@@ -1961,11 +1969,57 @@ annotated. An optional parameter (<code>?scale</code>,
 <code>?(stride = 2)</code>) is not a label source and may be anything
 (gh-ocannl-1787). If the function has a unit parameter <code>()</code>,
 like <code>mlp_layer</code> above, no parameter is a label source: the
-label comes from the binding’s name and the <code>~label</code>
-parameter.</p>
-<p>When there is the unit parameter, and a <code>~label</code> or
-<code>?label</code> parameter (specifically a parameter with label
-<code>label</code>), this label is also incorporated.</p>
+label comes from the binding’s name.</p>
+<h3 id="the-label-parameter">The <code>label</code> parameter</h3>
+<p>A parameter with the label <code>label</code> – <code>~label</code>,
+<code>?label</code> or <code>?(label = [ ... ])</code> – is a
+<code>string list</code> that <code>%op</code> puts into the labels of
+the tensors the function creates per application (gh-ocannl-1987):</p>
+<ul>
+<li>Before a unit parameter, as in
+<code>let%op mlp_layer ~label ~hid_dim () x = ...</code>, it enriches
+the inline declarations, which are created at the <code>()</code>
+application: <code>mlp_layer ~label:[ &quot;L1&quot; ] ~hid_dim:3 ()</code>
+creates <code>w</code> and <code>b</code> labelled with <code>L1</code>.
+The result’s label is not enriched.</li>
+<li>Without a unit parameter, as in
+<code>let%op scaled ~label x = { gamma } *. x</code>, the inline
+declarations are created once, when the function is defined, where
+<code>label</code> is not bound; instead it enriches the result’s label,
+at its position among the label sources of the previous section: the
+binding’s name, then <code>label</code> and the tensor parameters’
+labels in parameter order. An omitted <code>?label</code> contributes
+nothing.</li>
+</ul>
+<p><code>label</code> is not otherwise reserved: a <code>~label</code>
+that is a tensor by the evidence of the previous section (an operand
+use, a <code>Tensor.t</code> annotation) is a tensor, and an optional
+one with that evidence (<code>?(label = fallback)</code> used as an
+operand) is left alone like any other optional parameter.</p>
+<h3 id="parameters-that-need-a-unit-parameter-or-a-label">Parameters
+that need a unit parameter, or a label</h3>
+<p>Two uses of a parameter cannot work where a new user is likely to
+write them, and <code>%op</code> refuses them with an error naming the
+fix (gh-ocannl-1987):</p>
+<ul>
+<li>An inline declaration field that names a parameter bound after the
+declaration is created:
+<code>let%op layer ~hid_dim x = ({ w } * x) + { b; o = [ hid_dim ] }</code>
+creates <code>b</code> once, at definition, where <code>hid_dim</code>
+is not bound. Give the function a unit parameter, with the configuration
+before it: <code>let%op layer ~hid_dim () x = ...</code>. The same holds
+for a parameter after the <code>()</code> and for the parameters of a
+function nested in the body.</li>
+<li>An unlabelled parameter that the body uses as an integer or a float
+– a stride or dilation in a literal einsum spec
+(<code>&quot;stride*o+k&quot;</code>), the operand of <code>!.</code> or
+<code>!..</code>, the exponent of <code>**.</code>: an unlabelled
+parameter is taken for a tensor, both as a label source and as an
+argument of the function’s <a href="#automatic-shape-schemes">shape
+scheme</a>. Label it (<code>~stride</code>) or bind it before a unit
+parameter. Other non-tensor uses of an unlabelled parameter are not
+detected and remain type errors at the use.</li>
+</ul>
 <h3 id="configuring-inline-declarations-inline-output-dimensions-initial-values">Configuring
 inline declarations: inline output dimensions, initial values</h3>
 <p>In the <code>%op</code> syntax, inline declarations use record syntax
