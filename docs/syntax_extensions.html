@@ -280,6 +280,14 @@ are associated with infix operators, in addition to having alphabetic
 identifiers. This stems from the following restriction: in the
 <code>%cd</code> syntax, the assignment is always an infix operator, and
 it needs to pick the accumulation operation.</p>
+<p>In <code>%op</code>, the uncurried form <code>op (a, b)</code> or
+<code>op (a, b, c)</code> of a binary or ternary primitive operation is
+the curried call <code>op a b</code> or <code>op a b c</code>:
+<code>where (c, x, y)</code> is <code>where c x y</code>, and
+<code>( + ) (x, y)</code> is <code>x + y</code>. The operands are
+<code>%op</code> expressions, so they can hold inline declarations. The
+identifier must be one the DSL’s <code>O</code> module binds, as for the
+curried form.</p>
 <p>The unary primitive operations:</p>
 <table>
 <thead>
@@ -1697,8 +1705,10 @@ after it. (OCaml itself evaluates the elements of a list, array or tuple
 right to left; the expansion binds the components with <code>let</code>
 first.) This holds only for these literals. The operands of an operator
 or a function application keep OCaml’s order: <code>f x + g y</code>
-creates <code>g y</code> first, inside <code>%op</code> as outside
-it.</li>
+creates <code>g y</code> first, inside <code>%op</code> as outside it.
+This is a decision, not an omission (gh-ocannl-1986): the order changes
+no value, and creating operands left to right would shift tensor ids
+throughout existing code.</li>
 <li>Nested block tensors are supported at arbitrary depth, including
 three-way across all axis kinds: a nested literal reproduces the shape
 the corresponding nested ndarray literal would have. The delimiters nest
