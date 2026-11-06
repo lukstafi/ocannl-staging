@@ -632,6 +632,17 @@ as <code>Train.grad_update</code> of a loss over their sum; or compile
 <code>Train.grad_update ~accum_steps:1</code> per objective, neither of
 which zeroes the shared leaf: after the reset and both runs, its
 gradient is the sum’s.</p>
+<p>The first-constructed consumer is the first that can still run. One
+dropped and reclaimed by the GC with its backprop unconsumed – say a
+forward-only evaluation of a model – can never run, so it gives back the
+terms and parameters it absorbed, and the next loss constructed over
+them carries their zeroing (gh-ocannl-1804). The GC times this: a loss
+built after the drop but before the collection does not get the zeroing,
+and is refused at compile with the missing reset named. A compiled
+<code>Train.zero_params_grads ~params</code> works either way,
+<code>Gc.full_major ()</code> after the drop settles it, and the
+<code>~accum_steps:1</code> spelling above holds whether or not the
+zeroing came back.</p>
 <p>A routine that accumulates into a gradient without zeroing it sums
 every run’s contribution until something resets the gradient.
 <code>Context.run</code> therefore refuses its run once it has run as
