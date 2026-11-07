@@ -786,9 +786,14 @@ stands for any number of axes and is generalized: each application gets
 its own. <code>..&#39;_a..</code> is fixed, shared by every application
 (here, the input row of <code>w</code>), the way OCaml prints a weak
 type variable. The indented lines are the broadcasting relations,
-<code>r ⊑ o</code> reading “the result row <code>r</code> refines the
-operand row <code>o</code>”:</p>
-<p><code>text doc-excerpt=test/operations/reusable_tensor_programs.ml mlp_layer : ..&#39;a..|..&#39;b..-&gt;..&#39;c.. =&gt; ..&#39;d..|..&#39;e..-&gt;..&#39;f..,4   ..&#39;_a.. ⊑ ..&#39;c..   ..&#39;d.. ⊑ ..&#39;a..   ..&#39;e.. ⊑ ..&#39;_b..   ..&#39;e.. ⊑ ..&#39;b..</code></p>
+grouped by their left side, <code>r ⊑ o1, o2</code> reading “the result
+row <code>r</code> refines each operand row <code>o1</code>,
+<code>o2</code>”:</p>
+<p><code>text doc-excerpt=test/operations/reusable_tensor_programs.ml mlp_layer : ..&#39;a..|..&#39;b..-&gt;..&#39;c.. =&gt; ..&#39;d..|..&#39;e..-&gt;..&#39;f..,4   ..&#39;d.. ⊑ ..&#39;a..   ..&#39;e.. ⊑ ..&#39;b.., ..&#39;_a..   ..&#39;_b.. ⊑ ..&#39;c..</code></p>
+<p>Two arguments consumed together by a reduction, such as a loss’s
+logits and targets, are related through a row the result no longer
+carries: that prints as <code>_ ⊑ ..&#39;a.., ..&#39;d..</code>, an anonymous
+witness that the two rows broadcast together.</p>
 <p>The same <code>layer</code> then applies at batch shapes
 <code>2</code> and <code>5,7</code>, each application checked against
 the scheme before its body builds, giving results of shapes
