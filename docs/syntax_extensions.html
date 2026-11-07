@@ -1639,6 +1639,37 @@ and leaves the rest of <code>target</code> unchanged. The gradient of an
 extraction flows into the selected segment only. These forms are
 executed against oracles in
 <code>test/einsum/concat_extraction.ml</code>.</p>
+<p><strong>What a concatenated axis cannot say</strong>: a concatenated
+axis is one axis of alternatives, so a position lies in one segment.
+Three forms therefore have no meaning, and are refused with a shape
+error when the operation is built, whatever the sizes
+(gh-ocannl-2017):</p>
+<ul>
+<li>One tensor’s axes needing two components of the same concatenation:
+<code>p^q =&gt; p, q</code>, <code>a, b =&gt; a^b</code>,
+<code>a, b; c =&gt; a^b^c</code>. No position has both. Name one
+component per tensor.</li>
+<li>A result concatenation no component of which an operand names:
+<code>a =&gt; 2^3</code>, <code>c =&gt; a^b</code>,
+<code>p^q =&gt; r^s</code>, <code>2^3 =&gt; 2^3</code>. Nothing says
+what the segments hold, and integers are segments the spec skips. Name
+the segment to write part of the axis (<code>a =&gt; 2^a^3</code>); to
+repeat the reduced operand in every cell, use a plain axis and size it
+(<code>x ++ &quot;a =&gt; b&quot; [&quot;b&quot;]</code>, then
+<code>Shape.set_dim b 5</code>).</li>
+<li>A <code>++^</code> concatenation with its operands out of the order
+of the segments they fill: <code>(x, y) ++^ &quot;b; a =&gt; a^b&quot;</code>.
+Write <code>(y, x) ++^ &quot;a; b =&gt; a^b&quot;</code>.</li>
+</ul>
+<p>The same forms on an operand are defined where every cell has a
+reading: an operand concatenation no component of which the result names
+is a reduction over all its cells (<code>2^3 =&gt;</code>,
+<code>p^q =&gt; c</code>). When compiling, an operand that no segment
+reaches is refused too: in <code>a; b =&gt; a^b, b</code> the result’s
+plain <code>b</code> rules out the segment <code>a</code> that the first
+operand fills, and in <code>a^b, b =&gt; a</code> the result and the
+operand need different segments. The forms are executed in
+<code>test/einsum/concat_axis_consumers.ml</code>.</p>
 <p><strong>N-ary einsum for multiple tensors</strong>: The einsum parser
 supports any number of RHS tensors separated by semicolons. This enables
 operations like:</p>
