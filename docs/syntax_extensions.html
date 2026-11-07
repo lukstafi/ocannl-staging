@@ -1664,11 +1664,12 @@ Write <code>(y, x) ++^ &quot;a; b =&gt; a^b&quot;</code>.</li>
 <p>The same forms on an operand are defined where every cell has a
 reading: an operand concatenation no component of which the result names
 is a reduction over all its cells (<code>2^3 =&gt;</code>,
-<code>p^q =&gt; c</code>). When compiling, an operand that no segment
-reaches is refused too: in <code>a; b =&gt; a^b, b</code> the result’s
-plain <code>b</code> rules out the segment <code>a</code> that the first
-operand fills, and in <code>a^b, b =&gt; a</code> the result and the
-operand need different segments. The forms are executed in
+<code>p^q =&gt; c</code>), and every other access to that operand sees a
+plain axis of the summed size. When compiling, an operand that no
+segment reaches is refused too: in <code>a; b =&gt; a^b, b</code> the
+result’s plain <code>b</code> rules out the segment <code>a</code> that
+the first operand fills, and in <code>a^b, b =&gt; a</code> the result
+and the operand need different segments. The forms are executed in
 <code>test/einsum/concat_axis_consumers.ml</code>.</p>
 <p><strong>N-ary einsum for multiple tensors</strong>: The einsum parser
 supports any number of RHS tensors separated by semicolons. This enables
