@@ -108,14 +108,6 @@ let track_allocation (buffer : Me.Buffer.t) =
    [dev_error]. Buffers already queued may be waiting for a signal that will never come, and
    [commandBuffer] blocks once 64 are outstanding, so more work on that queue can wedge the host.
    Reporting once would also let a best-effort [await] in cleanup swallow the only report. *)
-(* Temporary #2082 diagnostic, adapted from h7-metal-cb-diagnostic.patch.
-   Keep the production failure polling; print completed buffer GPU time instead. *)
-let h7_trace (tracked : in_flight) status =
-  Stdio.eprintf "H7 cb %d %s status=%s err=%s gpu=%.6f\n%!" tracked.seq tracked.what status
-    (Option.value (Me.CommandBuffer.get_error tracked.buffer) ~default:"-")
-    (Me.CommandBuffer.get_gpu_end_time tracked.buffer
-    -. Me.CommandBuffer.get_gpu_start_time tracked.buffer)
-
 let commit_tracked runner ~what buffer =
   Me.CommandBuffer.commit buffer;
   let seq = runner.committed + 1 in
@@ -137,11 +129,8 @@ let rec reap ?deadline runner =
     List.filter runner.in_flight ~f:(fun tracked ->
         Me.CommandBuffer.Status.(
           match Me.CommandBuffer.get_status tracked.buffer with
-          | Completed ->
-              h7_trace tracked "Completed";
-              false
+          | Completed -> false
           | Error ->
-              h7_trace tracked "Error";
               oldest_failed := Some tracked;
               true
           | NotEnqueued | Enqueued | Committed | Scheduled -> true));
@@ -2383,24 +2372,19 @@ using namespace metal;|}
             work =
               (fun () ->
                 raise_on_failure dev.runner;
-                if Option.is_some (Sys.getenv "H7_METAL_SINGLE_SEGMENT") then
-                  List.iter tasks ~f:(fun task ->
-                      Task.run task;
-                      sync (all_work dev))
-                else
-                  let command_buffer = Me.CommandBuffer.on_queue dev.runner.queue in
-                  encode_wait_for_enqueued dev command_buffer;
-                  let encoder =
-                    Me.ComputeCommandEncoder.on_buffer_with_dispatch_type command_buffer
-                      Me.ComputeCommandEncoder.DispatchType.Serial
-                  in
-                  dev.runner.fused <- Some (command_buffer, encoder);
-                  Exn.protect
-                    ~f:(fun () -> List.iter tasks ~f:Task.run)
-                    ~finally:(fun () ->
-                      dev.runner.fused <- None;
-                      Me.ComputeCommandEncoder.end_encoding encoder;
-                      ignore (commit_tracked dev.runner ~what:segments command_buffer : int)));
+                let command_buffer = Me.CommandBuffer.on_queue dev.runner.queue in
+                encode_wait_for_enqueued dev command_buffer;
+                let encoder =
+                  Me.ComputeCommandEncoder.on_buffer_with_dispatch_type command_buffer
+                    Me.ComputeCommandEncoder.DispatchType.Serial
+                in
+                dev.runner.fused <- Some (command_buffer, encoder);
+                Exn.protect
+                  ~f:(fun () -> List.iter tasks ~f:Task.run)
+                  ~finally:(fun () ->
+                    dev.runner.fused <- None;
+                    Me.ComputeCommandEncoder.end_encoding encoder;
+                    ignore (commit_tracked dev.runner ~what:segments command_buffer : int)));
           },
         fun () -> () )
 end

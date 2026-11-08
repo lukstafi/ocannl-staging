@@ -141,8 +141,13 @@ let () =
   for epoch = 1 to epochs do
     let epoch_loss = ref 0. in
     Train.sequential_loop sgd_routine.Context.bindings ~f:(fun () ->
+        let t0 = Unix.gettimeofday () in
         Train.run ctx sgd_routine;
+        let t1 = Unix.gettimeofday () in
         epoch_loss := !epoch_loss +. (ctx, batch_loss).@[0];
+        Stdio.eprintf "H7 step %d at %.3f run %.4f read %.4f\n%!" !step_ref (Unix.gettimeofday ())
+          (t1 -. t0)
+          (Unix.gettimeofday () -. t1);
         Int.incr step_ref);
     if epoch % 10 = 0 then (
       let avg = !epoch_loss /. Float.of_int n_batches in
