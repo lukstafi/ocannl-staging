@@ -2252,7 +2252,8 @@ Where the application is evaluated inside a function application written
 in <code>%op</code> code, the message names the innermost such:
 <code>applying the shape scheme &lt;function&gt; to &lt;arguments&gt; in the %op application at &lt;file&gt;:&lt;line&gt;: ...</code>
 (gh-ocannl-2007). The expansion runs each such application (any but the
-DSL’s operators) under
+DSL’s operators and the named einsum forms that spell them, such as
+<code>einsum1</code>) under
 <code>Tensor.Scheme.For_ppx.at_site Stdlib.__POS__</code>, so in the
 usual <code>let%op logits = model x</code> the line is the application’s
 own; an application reached from it through a function written outside
