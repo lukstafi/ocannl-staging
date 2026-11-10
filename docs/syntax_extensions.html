@@ -1170,11 +1170,15 @@ binding to <code>tropical</code> and <code>+++</code> binding to
 <code>outer_sum</code>; unary <code>@^^</code> binding to
 <code>einmax1</code> (the operator-to-function tables are
 <code>einsum_binary_ops</code>/<code>einsum_unary_ops</code> in
-<code>tensor/ppx_shared.ml</code>). When the einsum specification is a
-literal string, we support two syntax patterns: the string can either
-directly follow the operator (infix-style notation), or the string can
-follow the second argument (mixfix-style notation). When the spec string
-is an identifier, it must directly follow the operator.</p>
+<code>tensor/ppx_shared.ml</code>). The ternary einsum has no operator:
+write the named form <code>einsum3 &quot;ij; jk; km =&gt; im&quot; a b c</code>
+(outside the syntax extensions, <code>TDSL.einsum3 spec a b c ()</code>
+or <code>NTDSL.einsum3 spec a b c ()</code>, as for the other named
+forms). When the einsum specification is a literal string, we support
+two syntax patterns: the string can either directly follow the operator
+(infix-style notation), or the string can follow the second argument
+(mixfix-style notation). When the spec string is an identifier, it must
+directly follow the operator.</p>
 <p><code>+*</code>, <code>+++</code> and <code>++</code> use addition
 for the accumulation operation; <code>@^+</code> and <code>@^^</code>
 use maximum. The pairwise operation combined with the accumulation:
@@ -1282,10 +1286,10 @@ e.g. <code>&quot;2*i+3*k&quot;</code>, but under the <code>%op</code> and
 integer value,
 e.g. <code>let stride = 2 and dilation = 3 in [%op &quot;input&quot; +* &quot;stride * a + dilation * b; b=&gt;a,&quot; &quot;kernel&quot;]</code>.
 The same holds for the literal spec of the named forms –
-<code>einsum</code>, <code>einsum1</code>, <code>outer_sum</code>,
-<code>tropical</code>, <code>einmax1</code>, <code>concat</code>,
-<code>concat_sum</code> (its first argument, unqualified;
-gh-ocannl-2060):
+<code>einsum</code>, <code>einsum1</code>, <code>einsum3</code>,
+<code>outer_sum</code>, <code>tropical</code>, <code>einmax1</code>,
+<code>concat</code>, <code>concat_sum</code> (its first argument,
+unqualified; gh-ocannl-2060):
 <code>einsum &quot;stride*o&lt;+dilation*k; k =&gt; o&quot; x w</code>. A
 named-form spec that reads no identifier is passed on as written.</li>
 <li>Note the comma above: <code>*</code> and <code>+</code> select the
