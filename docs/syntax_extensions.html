@@ -1821,7 +1821,10 @@ row – after <code>2, 3</code>, an operand of <code>3, 2</code> or
 <code>6</code> is refused – and a dimension captured again has the row’s
 product. A reference whose last binding before the closure was a
 dimension carries only the number, so a row captured from it later is
-tied by product, as within one inference. That tie is not transitive
+tied by product, as within one inference. The number keeps its basis
+(gh-ocannl-2033): a dimension of an <code>rgb</code> axis is captured
+again as <code>rgb</code>, and a free one, closed to the broadcast top
+<code>1_(bcast_if_1)</code>, as that top. That tie is not transitive
 (gh-ocannl-1969): row, dimension, row leaves two rows of one product,
 not one row, and identifying them takes an explicit
 <code>set_equal</code> of two row references.</p>
