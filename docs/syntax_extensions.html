@@ -2308,10 +2308,15 @@ no body to run, refuses a scheme with draws.</p>
 <p><strong>Side effects.</strong> The trace runs the body once more per
 closure (once per presence pattern with option-valued tensors). Under
 the rewind it leaves no shape state, no tensor and no session id behind
-(traces and checks allocate tensor ids, node uids and shape-variable ids
-from reserved ranges, so printed ids and shapes, compilation choices,
-generated code and random draws are the same with or without schemes),
-but OCaml side effects of the body (a counter, a print) happen.</p>
+(traces and checks allocate tensor ids and shape-variable ids from
+reserved ranges, so printed ids and shapes, compilation choices,
+generated code and random draws are the same with or without schemes;
+node uids come from the one session counter, so the trace’s discarded
+nodes shift later uids, which nothing but node identity and a few
+uid-spelled identifiers – MMA fragment registers,
+<code>recompute_&lt;uid&gt;</code> routine names – reads,
+gh-ocannl-2053), but OCaml side effects of the body (a counter, a print)
+happen.</p>
 <p><strong>Opting out.</strong> <code>[@@ocannl.no_scheme]</code> on the
 binding, or <code>[@ocannl.no_scheme]</code> on a <code>fun</code>
 expression, leaves a function unschemed: for a body whose constraints
