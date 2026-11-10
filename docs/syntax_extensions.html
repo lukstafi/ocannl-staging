@@ -2408,6 +2408,11 @@ labels of tensor expressions (creating new tensors) will typically be
 overly verbose.</li>
 <li>Filter out escaping variables (identifiers coming from nested
 function parameters).</li>
+<li>Filter out the declared tensor itself (gh-ocannl-2056).
+<code>{ x } =: x + 1</code> reads the tensor it declares, which the
+declaration’s non-recursive <code>let</code> has not bound yet where the
+label is computed, so <code>x</code> labels by its name alone; in
+<code>{ x } =: x + y</code>, <code>y</code> provides the label.</li>
 <li>Filter out embedded tensor expressions. In principle we could use
 them – we already introduce local bindings to avoid recomputing the
 expressions – but this would need pulling out these bindings together
