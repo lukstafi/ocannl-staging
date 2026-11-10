@@ -2078,8 +2078,16 @@ declaration is created:
 creates <code>b</code> once, at definition, where <code>hid_dim</code>
 is not bound. Give the function a unit parameter, with the configuration
 before it: <code>let%op layer ~hid_dim () x = ...</code>. The same holds
-for a parameter after the <code>()</code> and for the parameters of a
-function nested in the body.</li>
+for a parameter after the <code>()</code>, for the parameters of a
+function nested in the body, and for any name the body binds – a
+<code>let</code>, a <code>match</code> or <code>function</code> case, a
+<code>for</code> loop (gh-ocannl-2058):
+<code>let%op layer ~dims () x = let n = List.length dims in x + { b; o = [ n ] }</code>
+creates <code>b</code> above the <code>let</code>. Bind the name before
+the unit parameter, or outside <code>%op</code>. A body binding that
+shadows a parameter bound before the <code>()</code>
+(<code>let n = [%oc n + 1] in ... { b; o = [ n ] }</code>) is refused
+too: the lifted declaration would silently read the parameter.</li>
 <li>An unlabelled parameter that the body uses as an integer or a float
 – a stride or dilation in a literal einsum spec
 (<code>&quot;stride*o+k&quot;</code>), the operand of <code>!.</code> or
