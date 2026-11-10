@@ -1614,6 +1614,23 @@ the start and 5 at the end</p>
 <p>No other slot names an integer component, so it is skipped: an
 extraction does not read it, a replacement does not write it. An integer
 component must be positive.</p>
+<p><strong>Integer components carry the <code>default</code>
+basis</strong> (a short-term rule, gh-ocannl-2093): an integer is a size
+with no basis of its own, so a concatenation of integers alone sums to
+an unannotated axis, which does not fuse with a named one. On an operand
+<code>x</code> whose axis is <code>rgb</code> of size 5,
+<code>x ++ &quot;2^a =&gt; a&quot;</code> is accepted, the variable <code>a</code>
+taking the <code>rgb</code> claim (its binding records it, so it cannot
+take a second named basis later); <code>x ++ &quot;2^3 =&gt; &quot;</code> is
+refused with <code>solved dimensions for axis: different bases</code>. A
+fixed claim-free tag for integers would be unsound: a solved size that
+meets another records no basis, so a claim-free <code>5</code> could
+meet <code>rgb 5</code> and later <code>hsv 5</code>, merging the two
+silently. Workaround: name a segment, as in <code>2^a</code>. The
+principled answer, an integer component taking a slice of its partner’s
+basis, is the algebra of concatenation bases of gh-ocannl-2095. Pinned
+in <code>test/einsum/concat_integer_components.ml</code> and
+<code>test/operations/test_concat_dim_solver.ml</code>.</p>
 <p><strong>Sizing the components</strong>: every component must have a
 size. A component another slot names gets it from that tensor; the
 others take an integer, or a captured variable set with
