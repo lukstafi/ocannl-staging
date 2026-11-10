@@ -2238,11 +2238,25 @@ on the arguments raises when the closure is built, as
 <code>tracing the shape scheme &lt;function&gt;: ...</code>. One that
 does raises at the application, before the body runs, as
 <code>applying the shape scheme &lt;function&gt; to &lt;arguments&gt;: ...</code>.
-Printed (<code>Printexc.to_string</code>, as the toplevel prints it),
-the error lists the conflicting sizes, the failed constraint and the
-tensors it relates, with their axis kinds; the variables, and the
-tensors of the trace, are named by first appearance rather than by their
-reserved-range ids (<code>Shape.error_to_string_hum</code>;
+Where the application is evaluated inside a function application written
+in <code>%op</code> code, the message names the innermost such:
+<code>applying the shape scheme &lt;function&gt; to &lt;arguments&gt; in the %op application at &lt;file&gt;:&lt;line&gt;: ...</code>
+(gh-ocannl-2007). The expansion runs each such application (any but the
+DSL’s operators) under
+<code>Tensor.Scheme.For_ppx.at_site Stdlib.__POS__</code>, so in the
+usual <code>let%op logits = model x</code> the line is the application’s
+own; an application reached from it through a function written outside
+<code>%op</code> names the <code>%op</code> application it is inside. An
+application written in plain OCaml, outside any <code>%op</code>
+application, names no site: OCaml gives a function no caller location.
+An explicit <code>Tensor.Scheme.instantiate ~here:[%here]</code> names
+<code>at &lt;file&gt;:&lt;line&gt;</code>; <a href="../test/operations/scheme_application_site.ml"><code>scheme_application_site.ml</code></a>
+pins each case. Printed (<code>Printexc.to_string</code>, as the
+toplevel prints it), the error lists the conflicting sizes, the failed
+constraint and the tensors it relates, with their axis kinds; the
+variables, and the tensors of the trace, are named by first appearance
+rather than by their reserved-range ids
+(<code>Shape.error_to_string_hum</code>;
 <code>shape_error_full_sexp=true</code> prints the raw constraint
 sexp).</li>
 </ul>
