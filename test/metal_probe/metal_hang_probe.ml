@@ -15,8 +15,12 @@
      time and final status. For whether a long legitimate kernel is killed.
    - [plain]: one trivial kernel, waited for with a 60 s bound. Run after a stall cell, it says
      whether the GPU came back once the stalling process exited.
-   - [oob]: a one-thread kernel writing 256 MiB past the end of a 32-byte buffer. With
-     [MTL_SHADER_VALIDATION=1] in the environment, whether Metal fails its command buffer. *)
+   - [pulse SECS]: a trivial kernel every half second for SECS seconds, with its latency; run
+     beside a stall cell in another process, whether the stall starves other processes' work and
+     whether that contention is what makes the OS kill it.
+   - [oob]: a one-thread kernel writing 256 MiB past the end of a 32-byte buffer; [oob_small N]
+     writes N floats past its start; [far N] writes N GiB past it. With [MTL_SHADER_VALIDATION=1]
+     in the environment, or without, whether Metal fails the command buffer. *)
 
 module Me = Metal
 
@@ -45,6 +49,17 @@ kernel void plain(device float *x [[buffer(0)]], uint tid [[thread_position_in_g
 
 kernel void oob(device float *x [[buffer(0)]], uint tid [[thread_position_in_grid]]) {
   x[tid + (1u << 26)] = 1.0f;
+}
+
+kernel void oob_small(device float *x [[buffer(0)]], constant uint &n [[buffer(1)]],
+                      uint tid [[thread_position_in_grid]]) {
+  x[tid + n] = 1.0f;
+}
+
+kernel void far(device float *x [[buffer(0)]], constant uint &n [[buffer(1)]],
+                uint tid [[thread_position_in_grid]]) {
+  device float *p = x + ((ulong)n << 30);
+  p[tid] = 1.0f;
 }
 |}
 
@@ -166,13 +181,35 @@ let plain () =
   wait_bounded ~max_s:60. k;
   say "RESULT plain %s gpu=%.4fs error=%s %s" (status k) (gpu_time k) (error k) (recovery ())
 
-let oob () =
+(* Commits a trivial kernel every half second for [secs] seconds, each waited for with a bound of
+   the remaining time, and reports its latency: whether another process's stall starves this one. *)
+let pulse secs =
   let queue = Me.CommandQueue.on_device device in
   let x = buffer 32 in
-  say "MTL_SHADER_VALIDATION=%s"
-    (Option.value (Sys.getenv_opt "MTL_SHADER_VALIDATION") ~default:"unset");
   t0 := Unix.gettimeofday ();
-  let k = launch queue ~name:"oob" ~threads:1 x in
+  let stop = !t0 +. secs in
+  let pending = ref 0 in
+  while Unix.gettimeofday () < stop do
+    let start = Unix.gettimeofday () in
+    let k = launch queue ~name:"plain" ~threads:1 x in
+    wait_bounded ~max_s:(stop -. start) k;
+    if final k then
+      say "pulse %s latency=%.3fs error=%s" (status k) (Unix.gettimeofday () -. start) (error k)
+    else (
+      incr pending;
+      say "pulse NOT FINAL after %.1fs (%s)" (Unix.gettimeofday () -. start) (status k));
+    Unix.sleepf 0.5
+  done;
+  say "RESULT pulse unfinished=%d %s" !pending (recovery ())
+
+let oob ?(bytes = []) name =
+  let queue = Me.CommandQueue.on_device device in
+  let x = buffer 32 in
+  say "%s MTL_SHADER_VALIDATION=%s MTL_DEBUG_LAYER=%s" name
+    (Option.value (Sys.getenv_opt "MTL_SHADER_VALIDATION") ~default:"unset")
+    (Option.value (Sys.getenv_opt "MTL_DEBUG_LAYER") ~default:"unset");
+  t0 := Unix.gettimeofday ();
+  let k = launch queue ~bytes ~name ~threads:1 x in
   wait_bounded ~max_s:60. k;
   say "RESULT oob %s gpu=%.4fs error=%s" (status k) (gpu_time k) (error k)
 
@@ -182,5 +219,8 @@ let () =
   | "stall" -> stall (int_of_string (arg 2 "1")) (float_of_string (arg 3 "60"))
   | "spin" -> spin (int_of_string (arg 2 "1000000"))
   | "plain" -> plain ()
-  | "oob" -> oob ()
+  | "pulse" -> pulse (float_of_string (arg 2 "30"))
+  | "oob" -> oob "oob"
+  | "oob_small" -> oob ~bytes:[ int_of_string (arg 2 "64") ] "oob_small"
+  | "far" -> oob ~bytes:[ int_of_string (arg 2 "1024") ] "far"
   | other -> failwith ("unknown cell " ^ other)

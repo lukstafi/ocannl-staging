@@ -1,6 +1,7 @@
 #!/bin/sh
 # gh-ocannl-2082: builds metal_hang_probe and runs the cells named on the command line, one process
-# each, in order (a cell is its words joined by `:`, e.g. `stall:1:120`). Stalls the GPU: run it only
+# each, in order (a cell is its words joined by `:`, e.g. `stall:1:120`; `bg:<cell>` starts one in the
+# background, `sleep:N` waits N s, `waitbg` waits for the background cell). Stalls the GPU: run it only
 # on a Mac with the GPU to itself. Prints the platform first; every cell's lines go to stdout.
 set -u
 cd "$(dirname "$0")/../.." || exit 2
@@ -15,6 +16,13 @@ for c in "$@"; do
   # shellcheck disable=SC2086
   set -- $(echo "$c" | tr ':' ' ')
   echo "--- cell $* at $(date -u +%H:%M:%S)"
-  if [ "$1" = oob-validated ]; then shift; MTL_SHADER_VALIDATION=1 "$P" oob "$@"; else "$P" "$@"; fi
+  case "$1" in
+    validated) shift; MTL_SHADER_VALIDATION=1 "$P" "$@" ;;
+    validated-debug) shift; MTL_SHADER_VALIDATION=1 MTL_DEBUG_LAYER=1 "$P" "$@" ;;
+    bg) shift; "$P" "$@" & BG=$! ; echo "--- started in the background: pid $BG" ;;
+    sleep) sleep "$2" ;;
+    waitbg) wait "$BG" ;;
+    *) "$P" "$@" ;;
+  esac
   echo "--- cell exit=$? at $(date -u +%H:%M:%S)"
 done
