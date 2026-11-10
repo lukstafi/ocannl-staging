@@ -1,0 +1,11 @@
+; gh-ocannl-2082: a diagnostic probe of what macOS does to a Metal command buffer that never ends.
+; Built only, never run by any alias: it stalls the GPU, so it runs by hand on a Mac with the GPU to
+; itself. It links raw Metal, not OCANNL, so it reads no configuration.
+
+(executable
+ (name metal_hang_probe)
+ (optional)
+ (enabled_if
+  (= %{system} macosx))
+ (modules metal_hang_probe)
+ (libraries metal ctypes unix sexplib0))
