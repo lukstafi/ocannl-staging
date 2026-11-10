@@ -1280,7 +1280,14 @@ variable by a constant coefficient with the <code>*</code> sign.</li>
 e.g. <code>&quot;2*i+3*k&quot;</code>, but under the <code>%op</code> and
 <code>%cd</code> syntax extensions, it can also be an identifier of an
 integer value,
-e.g. <code>let stride = 2 and dilation = 3 in [%op &quot;input&quot; +* &quot;stride * a + dilation * b; b=&gt;a,&quot; &quot;kernel&quot;]</code>.</li>
+e.g. <code>let stride = 2 and dilation = 3 in [%op &quot;input&quot; +* &quot;stride * a + dilation * b; b=&gt;a,&quot; &quot;kernel&quot;]</code>.
+The same holds for the literal spec of the named forms –
+<code>einsum</code>, <code>einsum1</code>, <code>outer_sum</code>,
+<code>tropical</code>, <code>einmax1</code>, <code>concat</code>,
+<code>concat_sum</code> (its first argument, unqualified;
+gh-ocannl-2060):
+<code>einsum &quot;stride*o&lt;+dilation*k; k =&gt; o&quot; x w</code>. A
+named-form spec that reads no identifier is passed on as written.</li>
 <li>Note the comma above: <code>*</code> and <code>+</code> select the
 multichar mode, so a spec with a stride or a window always separates its
 axes by commas,
@@ -2128,13 +2135,16 @@ shadows a parameter bound before the <code>()</code>
 too: the lifted declaration would silently read the parameter.</li>
 <li>An unlabelled parameter that the body uses as an integer or a float
 – a stride or dilation in a literal einsum spec
-(<code>&quot;stride*o+k&quot;</code>), the operand of <code>!.</code> or
-<code>!..</code>, the exponent of <code>**.</code>: an unlabelled
-parameter is taken for a tensor, both as a label source and as an
-argument of the function’s <a href="#automatic-shape-schemes">shape
-scheme</a>. Label it (<code>~stride</code>) or bind it before a unit
-parameter. Other non-tensor uses of an unlabelled parameter are not
-detected and remain type errors at the use.</li>
+(<code>&quot;stride*o+k&quot;</code>) of an operator or of a named form
+(<code>einsum &quot;stride*o&lt;+k; k =&gt; o&quot; x w</code>, gh-ocannl-2060),
+the operand of <code>!.</code> or <code>!..</code>, the exponent of
+<code>**.</code>, the argument of <code>Float.of_int</code>,
+<code>float_of_int</code> or <code>Int.to_float</code> (spelled so): an
+unlabelled parameter is taken for a tensor, both as a label source and
+as an argument of the function’s <a href="#automatic-shape-schemes">shape scheme</a>. Label it
+(<code>~stride</code>) or bind it before a unit parameter. Other
+non-tensor uses of an unlabelled parameter are not detected and remain
+type errors at the use.</li>
 </ul>
 <h3 id="configuring-inline-declarations-inline-output-dimensions-initial-values">Configuring
 inline declarations: inline output dimensions, initial values</h3>
