@@ -1602,6 +1602,20 @@ of <code>b</code></td>
 <td>Replace middle: requires knowing sizes of <code>a</code> and
 <code>c</code></td>
 </tr>
+<tr>
+<td><code>a^b^c =&gt; a^c</code></td>
+<td>Drop a segment: the result is <code>a</code> then
+<code>c</code></td>
+</tr>
+<tr>
+<td><code>a^c =&gt; a^b^c</code></td>
+<td>Write around a segment: <code>b</code> is left unwritten (zero in a
+fresh result)</td>
+</tr>
+<tr>
+<td><code>a^b^c =&gt; c^b^a</code>, <code>a^b^c =&gt; c^a</code></td>
+<td>Reorder segments, dropping or not</td>
+</tr>
 </tbody>
 </table>
 <p><strong>Integer constants in concatenation</strong>: an integer
@@ -1656,11 +1670,27 @@ and leaves the rest of <code>target</code> unchanged. The gradient of an
 extraction flows into the selected segment only. These forms are
 executed against oracles in
 <code>test/einsum/concat_extraction.ml</code>.</p>
+<p><strong>Segments correspond by name</strong>: when two slots both
+concatenate components of one axis, each component is matched by its
+label, and each slot places it at its own offset. A segment one slot
+does not list is one that slot takes no part in, so the two sides may
+differ in order and in what they list: <code>a^b^c =&gt; c^b^a</code>
+reverses the segments, <code>a^b^c =&gt; a^c</code> drops
+<code>b</code>, <code>a^b^c =&gt; c^a</code> does both, and
+<code>a^c =&gt; a^b^c</code> writes <code>a</code> and <code>c</code>
+around a <code>b</code> no operand fills – zero under <code>++</code>,
+its prior contents under <code>%cd</code> <code>=:</code>. An integer
+component is matched by nothing, as everywhere:
+<code>a^2^c =&gt; a^c</code> drops two cells,
+<code>a^c =&gt; a^2^c</code> leaves two unwritten. Gradients follow the
+segments back, and a dropped segment gets none. These forms, binary ones
+(<code>a^b^c; a^c =&gt; a^c</code>) among them, are executed in
+<code>test/einsum/concat_segment_correspondence.ml</code>
+(gh-ocannl-2087).</p>
 <p><strong>What a concatenated axis cannot say</strong>: a concatenated
 axis is one axis of alternatives, so a position lies in one segment.
-Three forms therefore have no meaning, and are refused with a shape
-error when the operation is built, whatever the sizes
-(gh-ocannl-2017):</p>
+Four forms therefore have no meaning, and are refused with a shape error
+when the operation is built, whatever the sizes (gh-ocannl-2017):</p>
 <ul>
 <li>One tensor’s axes needing two components of the same concatenation:
 <code>p^q =&gt; p, q</code>, <code>a, b =&gt; a^b</code>,
@@ -1677,6 +1707,14 @@ repeat the reduced operand in every cell, use a plain axis and size it
 <li>A <code>++^</code> concatenation with its operands out of the order
 of the segments they fill: <code>(x, y) ++^ &quot;b; a =&gt; a^b&quot;</code>.
 Write <code>(y, x) ++^ &quot;a; b =&gt; a^b&quot;</code>.</li>
+<li>A concatenation listing one component twice:
+<code>a =&gt; a^a</code>, <code>a^b =&gt; a^b^a</code>,
+<code>a^b^a =&gt; a^b</code>, <code>a; a =&gt; a^a</code>. A segment is
+one range of positions with one index, so only one copy would be read or
+written (it was, silently, gh-ocannl-2087). To repeat a tensor along an
+axis, pass it once per copy under distinct components:
+<code>(x, x) ++^ &quot;a; b =&gt; a^b&quot;</code>. Integer components may repeat
+(<code>2^a^2 =&gt; a</code>): each is its own skipped segment.</li>
 </ul>
 <p>The same forms on an operand are defined where every cell has a
 reading: an operand concatenation no component of which the result names
