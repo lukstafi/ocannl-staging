@@ -2249,8 +2249,12 @@ which would not be cheaper (<a href="shape_inference.md#what-schemes-buy-measure
 inference</a>).</li>
 <li><strong>What it reports.</strong> A shape error that does not depend
 on the arguments raises when the closure is built, as
-<code>tracing the shape scheme &lt;function&gt;: ...</code>. One that
-does raises at the application, before the body runs, as
+<code>tracing the shape scheme &lt;function&gt;: ...</code>, or
+<code>tracing the shape scheme &lt;function&gt; in the %op application at &lt;file&gt;:&lt;line&gt;: ...</code>
+when constructed inside a <code>%op</code> application (gh-ocannl-2164).
+A function without <code>()</code> reports its trace error at its first
+application in the same form. One that does raises at the application,
+before the body runs, as
 <code>applying the shape scheme &lt;function&gt; to &lt;arguments&gt;: ...</code>.
 Where the application is evaluated inside a function application written
 in <code>%op</code> code, the message names the innermost such:
