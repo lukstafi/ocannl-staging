@@ -2104,8 +2104,9 @@ only hands to another function contributes its label only when
 annotated. An optional parameter (<code>?scale</code>,
 <code>?(stride = 2)</code>) is not a label source and may be anything
 (gh-ocannl-1787). If the function has a unit parameter <code>()</code>,
-like <code>mlp_layer</code> above, no parameter is a label source: the
-label comes from the binding’s name.</p>
+like <code>mlp_layer</code> above, no tensor parameter is a label
+source: the label comes from the binding’s name, followed by the
+<code>label</code> parameter before <code>()</code>, if present.</p>
 <h3 id="the-label-parameter">The <code>label</code> parameter</h3>
 <p>A parameter with the label <code>label</code> – <code>~label</code>,
 <code>?label</code> or <code>?(label = [ ... ])</code> – is a
@@ -2117,7 +2118,14 @@ the tensors the function creates per application (gh-ocannl-1987):</p>
 the inline declarations, which are created at the <code>()</code>
 application: <code>mlp_layer ~label:[ &quot;L1&quot; ] ~hid_dim:3 ()</code>
 creates <code>w</code> and <code>b</code> labelled with <code>L1</code>.
-The result’s label is not enriched.</li>
+It also enriches the result’s label after the binding’s name: a result
+of <code>mlp_layer ~label:[ &quot;L1&quot; ] ~hid_dim:3 () x</code> has label
+<code>[ &quot;relu&quot;; &quot;mlp_layer&quot;; &quot;L1&quot; ]</code>. Tensor parameters contribute
+no labels. An omitted <code>?label</code> contributes nothing;
+<code>?(label = [ ... ])</code> contributes its default when omitted. A
+non-tensor <code>label</code> now expects a string-list argument even
+when there are no inline declarations; use <code>~label:_</code> to opt
+out of result labeling.</li>
 <li>Without a unit parameter, as in
 <code>let%op scaled ~label x = { gamma } *. x</code>, the inline
 declarations are created once, when the function is defined, where
