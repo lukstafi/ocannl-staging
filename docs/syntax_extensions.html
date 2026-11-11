@@ -282,12 +282,19 @@ heuristic when needed - Preserving expressions in contexts without a
 unit parameter - Escaping from the DSL in <code>%cd</code> contexts
 (which don’t use the unit heuristic)</p>
 <h2 id="primitive-operations">Primitive operations</h2>
-<p>To accomodate stylistic preferences, OCANNL supports both curried and
-uncurried syntaxes for primitive operation application. Binary operators
-are associated with infix operators, in addition to having alphabetic
-identifiers. This stems from the following restriction: in the
-<code>%cd</code> syntax, the assignment is always an infix operator, and
-it needs to pick the accumulation operation.</p>
+<p>To accommodate stylistic preferences, OCANNL supports both curried
+and uncurried syntaxes for primitive operation application. Binary
+operators have infix and alphabetic identifiers. The infix forms stem
+from the following restriction: in the <code>%cd</code> syntax, the
+assignment is always an infix operator, and it needs to pick the
+accumulation operation. In <code>%op</code>, alphabetic names are
+available for the binary operations its <code>O</code> module provides:
+<code>add</code>, <code>sub</code>, <code>mul</code>, <code>div</code>,
+<code>lt</code>, <code>le</code>, <code>eq</code>, and <code>ne</code>
+(<code>mul</code> and <code>div</code> are pointwise). The remaining
+binary primitive names in the table below are <code>%cd</code>-only; in
+<code>%op</code>, those identifiers retain their ordinary OCaml
+meaning.</p>
 <p>In <code>%op</code>, the uncurried form <code>op (a, b)</code> or
 <code>op (a, b, c)</code> of a binary or ternary primitive operation is
 the curried call <code>op a b</code> or <code>op a b c</code>:
