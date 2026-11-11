@@ -974,6 +974,9 @@ bare type-constructor name is read as the basis (qualified,
 parameterised, tuple, arrow and variant types are ignored). These bases
 then propagate to specify bases of other dimensions in other tensors,
 via shape inference.</p>
+<p>Outside literal axis-basis syntax, <code>(relu x : Tensor.t)</code>
+preserves the type annotation and translates the application inside it
+as usual.</p>
 <p>As a convenience, the same annotation on a bare numeric literal
 labels the size-1 output axis of the resulting scalar:
 <code>(2.0 : q)</code> is shorthand for <code>([ 2.0 ] : q)</code>.</p>
@@ -2278,6 +2281,10 @@ against its arguments’ shapes, in a window that is always rewound, then
 runs the body, which builds and registers the graph as it always has.
 The scheme only checks; it never replaces the body’s own registration,
 which would not be cheaper (<a href="shape_inference.md#what-schemes-buy-measured">shape
+inference</a>). Because the body always runs, automatic schemes are
+unaffected by explicit <code>Tensor.Scheme.instantiate</code> skipping
+projection-time refusals: they get the body’s inline verdict at closure
+(gh-ocannl-2020, <a href="shape_inference.md#shape-schemes">shape
 inference</a>).</li>
 <li><strong>What it reports.</strong> A shape error that does not depend
 on the arguments raises when the closure is built, as
