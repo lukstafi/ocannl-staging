@@ -1900,6 +1900,17 @@ or its alias <code>Operation.TDSL.O.dim</code> to embed the solved
 dimension of the corresponding variable (as a number) into a tensor
 expression. For a row variable, the number will be the product of the
 dimensions it resolved into.</p>
+<p><code>%cd</code> assignments also accept a trailing capture list on a
+literal <code>~logic</code> specification, for unary, binary and ternary
+assignments. For example,
+<code>let%cd comp = tgt =: id x ~logic:&quot;a^c =&gt; a^b^c&quot; [&quot;a&quot;; &quot;b&quot;] in</code>
+binds <code>a</code> and <code>b</code> with the same per-call scope and
+label checks as operator captures.
+<code>Shape.set_dim a 2; Shape.set_dim b 1</code> sizes those concat
+segments before compilation. This assignment writes the <code>a</code>
+and <code>c</code> segments; the existing <code>b</code> cells of
+<code>tgt</code> retain their prior values. The capture references are
+passed in the assignment’s shape logic.</p>
 <p>The ppx never shares a capture between calls, but a reference made by
 hand with <code>Shape.get_variable_ref</code> can be passed through
 <code>~capture_dims</code> to several operations. It then names one
