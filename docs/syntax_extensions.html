@@ -1210,6 +1210,13 @@ not begin <code>=&gt;</code>;</li>
 <li>otherwise, it is the <em>single-char mode</em>: each alphanumeric
 character corresponds to an axis.</li>
 </ul>
+<p>A literal operator capture list is checked by the ppx: every captured
+name must occur as a label or a named row variable in the spec. For
+example, <code>&quot;ab =&gt; a&quot; [&quot;ab&quot;]</code> is refused at the capture
+literal: that spec names axes <code>a</code> and <code>b</code>. To name
+one axis <code>ab</code>, use multichar mode,
+e.g. <code>&quot;ab, =&gt; ab,&quot; [&quot;ab&quot;]</code>. Writing
+<code>&quot;a, b =&gt; a&quot;</code> still names two separate axes.</p>
 <p>Whitespace never separates axes. In single-char mode it is ignored
 (<code>s a</code> is the two axes <code>sa</code>); in multichar mode
 axes need commas between them, so <code>s a; s b =&gt; s a^b</code> is a
