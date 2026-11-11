@@ -1301,7 +1301,18 @@ The same holds for the literal spec of the named forms –
 <code>concat</code>, <code>concat_sum</code> (its first argument,
 unqualified; gh-ocannl-2060):
 <code>einsum &quot;stride*o&lt;+dilation*k; k =&gt; o&quot; x w</code>. A
-named-form spec that reads no identifier is passed on as written.</li>
+named-form spec that reads no identifier is passed on as written. Under
+the extensions a spec that reads a runtime value is rebuilt at run time
+from its parse, and the translator also passes the literal as
+<code>~spec_source</code>: Shape parses the evaluated spec and its
+refusals quote the source (with <code>stride = 0</code>:
+<code>affine axis `0*o&lt;+k` in einsum spec &quot;stride*o&lt;+k; k =&gt; o&quot; has stride 0</code>;
+gh-ocannl-2163). Every other literal reaches Shape as written, and a
+spec held in a variable, or passed to the functions directly, is quoted
+as passed. A local function shadowing one of the named forms receives
+<code>~spec_source</code> from a runtime spec, so it takes and forwards
+<code>?spec_source</code> (<code>lib/nn_blocks.ml</code>’s
+<code>max_pool2d</code>).</li>
 <li>Note the comma above: <code>*</code> and <code>+</code> select the
 multichar mode, so a spec with a stride or a window always separates its
 axes by commas,
