@@ -1700,7 +1700,7 @@ segments back, and a dropped segment gets none. These forms, binary ones
 (gh-ocannl-2087).</p>
 <p><strong>What a concatenated axis cannot say</strong>: a concatenated
 axis is one axis of alternatives, so a position lies in one segment.
-Four forms therefore have no meaning, and are refused with a shape error
+Five forms therefore have no meaning, and are refused with a shape error
 when the operation is built, whatever the sizes (gh-ocannl-2017):</p>
 <ul>
 <li>One tensor’s axes needing two components of the same concatenation:
@@ -1726,6 +1726,23 @@ written (it was, silently, gh-ocannl-2087). To repeat a tensor along an
 axis, pass it once per copy under distinct components:
 <code>(x, x) ++^ &quot;a; b =&gt; a^b&quot;</code>. Integer components may repeat
 (<code>2^a^2 =&gt; a</code>): each is its own skipped segment.</li>
+<li>One tensor’s concatenated axes sharing a component, unless they are
+the same concatenation: <code>a^b, a^c =&gt; a</code>,
+<code>a^b, b^a =&gt; a^b</code>, <code>a^b, a^b^c =&gt; a^b</code>,
+<code>2^a, 3^a =&gt; a</code>, <code>a =&gt; a^b, a^c</code>. The shared
+component fuses the two concatenations into one set of alternatives, so
+only the blocks where both axes are in its segment would be reached,
+their diagonal, and the others silently dropped (they were,
+gh-ocannl-2167). The same concatenation on two axes is that axis’s
+diagonal, like <code>aa =&gt; a</code>, and stays legal
+(<code>a^b, a^b =&gt; a^b</code>, <code>2^a, 2^a =&gt; a</code>), as
+does a component shared with a plain axis (<code>a^b, b =&gt; b</code>,
+the diagonal of a slice) or with another tensor
+(<code>a^b; a^c =&gt; a</code>). For the diagonal of two segments,
+extract them under distinct labels first:
+<code>x ++ &quot;a^b, d^c =&gt; a, d&quot;</code>, then
+<code>++ &quot;aa =&gt; a&quot;</code>. These are pinned in
+<code>test/einsum/concat_axis_consumers.ml</code>.</li>
 </ul>
 <p>The same forms on an operand are defined where every cell has a
 reading: an operand concatenation no component of which the result names
