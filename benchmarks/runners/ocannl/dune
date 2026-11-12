@@ -1,6 +1,13 @@
 ; The runners' JSON scalars and result line, a library rather than a module of the executables so
 ; that test/operations/bench_result_line can link it without the whole framework (gh-ocannl-676).
 
+(executable
+ (name wait_poll_probe)
+ (modules wait_poll_probe)
+ (libraries base ocannl stdio arrayjit.verdict mtime mtime.clock.os)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
 (library
  (name bench_json)
  ; Attached to a package (though never installed) because its dependants are: a private library
