@@ -1923,7 +1923,9 @@ literal <code>~logic</code> specification, for unary, binary and ternary
 assignments. For example,
 <code>let%cd comp = tgt =: id x ~logic:&quot;a^c =&gt; a^b^c&quot; [&quot;a&quot;; &quot;b&quot;] in</code>
 binds <code>a</code> and <code>b</code> with the same per-call scope and
-label checks as operator captures.
+label checks as operator captures. Captures apply to einsum specs only:
+the shortcuts <code>&quot;.&quot;</code>, <code>&quot;T&quot;</code> and <code>&quot;@&quot;</code>
+reject nonempty capture lists, but accept <code>[]</code>.
 <code>Shape.set_dim a 2; Shape.set_dim b 1</code> sizes those concat
 segments before compilation. This assignment writes the <code>a</code>
 and <code>c</code> segments; the existing <code>b</code> cells of
