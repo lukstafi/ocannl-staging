@@ -426,6 +426,9 @@ events = [
     finish('./smoke.exe', b + 'test/operations', 1, [act('bin-smoke')]),
     finish('./helper.exe', b + 'test/operations', 1, ['_build/default/test/config/generated']),
     finish('./untargeted.exe', b + 'test/operations', 1),
+    # Dune >= 3.25 names an alias action's target by its digest alone: placed by its program.
+    finish('./anon_gate.exe', b + 'test/operations', 1,
+           ['_build/.actions/default/test/operations/0123456789abcdef0123456789abcdef']),
     finish('./einsum_test.exe', b + 'test/einsum', 4, ['_build/default/test/einsum/einsum_test.exe.output']),
     finish('placement_store.exe', b + 'test/operations/sub', 0.4, [act('runtest-placement_store', 'test/operations/sub')]),
     sexp(['action', 'write-file', ['1', '2'], ['file', canary], ['size', '3']]),
@@ -450,14 +453,14 @@ canary_free() { # FILE...: no file carries the canary
 subject weigh "$TMP/trace" >"$TMP/weigh.out" 2>"$TMP/weigh.err"
 weigh_rc=$?
 printf '%s\n' 'sweep_components 9' 'operations_tutorials 8' 'online_softmax 7' '@rest 6' 'cc_march_census 6' \
-  'online_softmax_fp_licences 5' 'online_softmax_fast_math 3' 'cc_temp_ownership-success 2' 'untargeted 1' \
+  'online_softmax_fp_licences 5' 'online_softmax_fast_math 3' 'cc_temp_ownership-success 2' 'untargeted 1' 'anon_gate 1' \
   >"$TMP/weigh.expected"
 diff "$TMP/weigh.expected" "$TMP/weigh.out" >"$TMP/weigh.diff"
 report $? "weigh credits each unit the CPU seconds of the processes its targets name" \
   "exit $weigh_rc; $(cat "$TMP/weigh.diff" "$TMP/weigh.err")"
 subject weigh --wall "$TMP/trace" >"$TMP/weigh-wall.out" 2>"$TMP/weigh-wall.err"
 printf '%s\n' 'sweep_components 27' 'operations_tutorials 24' 'online_softmax 21' '@rest 19' 'cc_march_census 18' \
-  'online_softmax_fp_licences 15' 'online_softmax_fast_math 9' 'cc_temp_ownership-success 6' 'untargeted 3' \
+  'online_softmax_fp_licences 15' 'online_softmax_fast_math 9' 'cc_temp_ownership-success 6' 'untargeted 3' 'anon_gate 3' \
   >"$TMP/weigh-wall.expected"
 diff "$TMP/weigh-wall.expected" "$TMP/weigh-wall.out" >"$TMP/weigh-wall.diff" && [ ! -s "$TMP/weigh-wall.err" ] &&
   canary_free "$TMP/weigh-wall.out"

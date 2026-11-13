@@ -135,6 +135,11 @@ mark = sexp(['action', 'write-file', [str(T0 + 8 * S), '1000'], ['file', canary]
 # Malformed: a stray byte right after an atom that holds the canary.
 (root / 'malformed').write_bytes(config('_build') + b'(3:log4:info' + atom(canary) + b'!)')
 (root / 'no-process').write_bytes(b''.join([config('_build')] + others))
+# Dune >= 3.25 names an alias action's target by its digest alone, here and at the root.
+anon = (proc('_build', 41, 1, 2, './gate.exe', '/default/test/operations',
+             ['/.actions/default/test/operations/' + 'a' * 32])
+        + proc('_build', 42, 2, 1, './top.exe', '/default', ['/.actions/default/' + 'b' * 32]))
+(root / 'anonymous').write_bytes(b''.join([config('_build')] + anon))
 # Tampered: `prog`'s length prefix is enlarged to swallow a planted environment record
 # and the field's own close; still well-formed csexp, so the reader cannot see it.
 swallowed = b'tampered.exe)(3:env' + atom('FAKE_API_TOKEN=' + canary) + b')'
@@ -253,6 +258,14 @@ leg "--tsv --dirs leads each row with its directory under the build directory, a
   exact "$SUBJECT" tsv-dirs "$TMP/tsv-dirs.expected" --tsv --dirs "$TMP/trace"
 leg "--tsv --dirs reads a --build-dir trace alike" \
   exact "$SUBJECT" tsv-dirs-build-dir "$TMP/tsv-dirs.expected" --tsv --dirs "$TMP/trace-build-dir"
+{
+  printf '%s\t' 2.00 0 gate.exe "@test/operations/(anonymous-$(printf 'a%.0s' $(seq 32)))"
+  printf '%s\n' "@test/operations/(anonymous-$(printf 'a%.0s' $(seq 32)))"
+  printf '%s\t' 1.00 0 top.exe "@(anonymous-$(printf 'b%.0s' $(seq 32)))"
+  printf '%s\n' "@(anonymous-$(printf 'b%.0s' $(seq 32)))"
+} >"$TMP/anonymous.expected"
+leg "--tsv names an alias action dune names by its digest alone @DIR/(anonymous-DIGEST)" \
+  exact "$SUBJECT" anonymous "$TMP/anonymous.expected" --tsv "$TMP/anonymous"
 
 mkdir -p "$TMP/repo/tools" "$TMP/repo/_build"
 cp "$SUBJECT" "$TMP/repo/tools/"
