@@ -2,7 +2,7 @@
 r"""Replay a branch's merge history against merge-build input sets, to size the boundary.
 
 Usage: tools/merge-build-replay.py [--since DATE] [--until DATE] [--set NAME[=GLOB,...]]...
-                                   [--trigger same-input|any-input] [--top N] [--repo DIR]
+                                   [--trigger same-input|any-input|always] [--top N] [--repo DIR]
                                    [--verbose] [REV...]
 
 For every first-parent two-parent merge `git log --first-parent --merges REV...` lists (REV
@@ -15,7 +15,9 @@ header): both names of a rename (git's -M detection), a path a rename on either 
 counting by its other name too. Then, per input set, it decides whether the merge build would
 have run on that merge:
   same-input  a path BOTH sides changed matches one of the set's globs;
-  any-input   EACH side changed some path matching one (the same or not).
+  any-input   EACH side changed some path matching one (the same or not);
+  always      every merge, whatever either side changed (the forced build: the set's globs
+              decide nothing, and no path is listed as having triggered a merge).
 A glob matches the WHOLE repository path under Python's fnmatch.fnmatchcase -- case-sensitive,
 `*` crossing `/` -- the merge build's own matcher. The replay assumes every merge's base had
 moved since its head's CI run, so it bounds the real build count from above.
@@ -65,7 +67,7 @@ import sys
 ME = "merge-build-replay"
 CONFIG_PATH = ".github/ship-pr-merge-build"
 CHECK_PATH = "tools/merge-build-check.sh"
-TRIGGERS = ("same-input", "any-input")
+TRIGGERS = ("same-input", "any-input", "always")
 
 
 class Usage(Exception):
@@ -302,6 +304,9 @@ def main(argv: list[str]) -> int:
                 # The shell tier selects on paths BOTH sides changed, whatever the trigger.
                 hits = matching(base & head, globs, other)
                 builds_here = bool(hits)
+            elif trigger == "always":
+                # The forced build: every merge, whatever the two sides changed.
+                hits, builds_here = [], True
             else:
                 mine, theirs = matching(head, globs, other), matching(base, globs, other)
                 hits = sorted(set(mine) | set(theirs))

@@ -124,6 +124,19 @@ if harness_leg 'any-input builds on inputs each side changed, never on an empty 
   fi
 fi
 
+if harness_leg 'always builds every replayed merge, and the shell tier still selects by its glob #replay'; then
+  if [ -z "$FIXTURE" ]; then report 1 'always' 'no fixture'; else
+    replay --trigger always --set 'ml=*.ml' --set shell-tier --verbose main
+    # All six replayed merges build under the forced trigger, the one-sided m5 too; the shell tier
+    # is the script's own selection, so it still counts m3 and m7 alone.
+    if [ "$rc" = 0 ] && has 'merge-build-replay: trigger always (--trigger)' && [ "$(row ml)" = 66- ] &&
+       [ "$(row shell-tier)" = 620 ] && grep -qE '^  [0-9a-f]{10} m5: ml$' "$out" &&
+       grep -qE '^  [0-9a-f]{10} m3: ml shell-tier$' "$out"; then
+      report 0 'always builds all six merges; the shell tier stays at m3 and m7'
+    else report 1 'always builds all six merges; the shell tier stays at m3 and m7' "exit $rc; $(cat "$out")"; fi
+  fi
+fi
+
 if harness_leg 'since and until select merges by date #replay'; then
   if [ -z "$FIXTURE" ]; then report 1 'date window' 'no fixture'; else
     # m1 is committed on 2001-01-05, m2 on 2001-01-08: a window from 2001-01-06 starts at m2.
