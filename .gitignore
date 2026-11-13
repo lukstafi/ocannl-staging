@@ -10,6 +10,8 @@
 
 # ocamlbuild working directory
 _build/
+# tools/cuda-native-ptx-rerun.sh's own dune build directory
+_build-native-ptx/
 
 # ocamlbuild targets
 *.byte

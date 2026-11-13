@@ -122,7 +122,7 @@ case \$1 in var) exit 1 ;; esac
 if [ "\$1" = exec ] && [ "\$#" -ge 4 ] && [ "\$3" = sh ] && [ "\$4" = -c ]; then
   SWEEP_TEST_OPAM_SELF=\$0 exec "$fake_bin/opam" "\$@"
 fi
-lock=\$HOME/ocannl-staging-worktrees/sweep.lock
+lock=\$(pwd).lock
 # A fresh open must be refused: the real far-side lock remains held during
 # clean, suite, serial rerun and completion, rather than only during prep.
 perl -e 'use Fcntl ":flock"; open(my \$h, ">>", \$ARGV[0]) or exit 96; exit(flock(\$h, LOCK_EX | LOCK_NB) ? 96 : 0)' "\$lock" || exit 96
@@ -227,8 +227,15 @@ for boot in linux wsl; do
   grep -q '^exec -- dune build @arrayjit/test/runtest-test_hip_compile_options --force	' \
     "$remote_root/credentials"
   grep -q '^exec -- dune build -j 1 @runtest @train	' "$remote_root/credentials"
-  # Dirty reused worktree is reset, including untracked strays.
-  remote_wt=$remote_root/minix-amd-$boot/ocannl-staging-worktrees/sweep
+  # Dirty reused worktree is reset, including untracked strays. multidev_cc's environment is not
+  # hip's, so it has a worktree of its own beside hip's `sweep` (unit_worktree_name).
+  remote_wt=$remote_root/minix-amd-$boot/ocannl-staging-worktrees/sweep-multidev_cc
+  local_remote=$(SWEEP_TEST_HOSTS=$tmp/hosts-$boot.sh SWEEP_TEST_JOBS=3 \
+    remote_sweep --only multidev_cc --target remote-width)
+  grep -q '^  minix/multidev_cc: incremental-pass ' <<<"$local_remote"
+  awk -F '\t' -v host="minix-amd-$boot" -v cwd="$remote_wt" \
+    '$1 == host && $2 == "multidev_cc" {if ($3 != cwd) exit 1; seen++} END {if (!seen) exit 1}' \
+    "$remote_root/commands"
   echo dirty >"$remote_wt/fixture"
   echo stray >"$remote_wt/untracked"
   local_remote=$(SWEEP_TEST_HOSTS=$tmp/hosts-$boot.sh SWEEP_TEST_JOBS=3 \
@@ -446,7 +453,7 @@ grep -q 'the guest was REPLACED mid-unit' <<<"$local_replaced"
 # Real held remote worktree lock refuses prep before opam; release permits reuse.
 remote_reset
 mkdir -p "$remote_root/minix-amd-linux/ocannl-staging-worktrees"
-exec 8>"$remote_root/minix-amd-linux/ocannl-staging-worktrees/sweep.lock"
+exec 8>"$remote_root/minix-amd-linux/ocannl-staging-worktrees/sweep-multidev_cc.lock"
 perl -e 'use Fcntl ":flock"; exit(flock(STDIN, LOCK_EX | LOCK_NB) ? 0 : 1)' <&8
 local_busy=$(remote_sweep --only multidev_cc --target remote-busy)
 exec 8>&-

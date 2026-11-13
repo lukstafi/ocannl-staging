@@ -540,6 +540,34 @@ unit_takes_slow() { [ "$SLOW" = 1 ] && ! unit_is_variant "$1"; }
 # than the skip report's, so the skip aggregation neither counts it nor reads its records.
 unit_is_variant() { [ "$(unit_backend "$1")" != "$1" ]; }
 
+# The worktree a unit runs in, by name under the box's ~/ocannl-staging-worktrees: one per distinct
+# dune environment on the box (unit_dune_env), so a weekday incremental run is incremental. Every
+# test depends on the ambient configuration record and the resolved backend (test/config/dune), and
+# one `_build` keeps only the last environment's results: two units alternating in one tree
+# re-executed every test action of each other's suite every day, master moved or not (measured
+# 2026-11-13: the same alias twice rewrote 0 of test/einsum's 40 outputs, alternated with
+# cc-outlined's environment it rewrote all 40 both ways). Units with the SAME environment share a
+# tree: cc-oracle-widen runs in cc's, where a Sunday cc unit's @slow has already built its alias.
+# The box's first unit keeps the plain `sweep` (a single-unit box's tree is unchanged); every other
+# environment gets `sweep-<its first unit>`. The far-side lock, the verdict-records and test-cap
+# directories all key on the worktree path, so each tree carries its own; the run-wide local lock
+# ($LOCAL_WT.lock) still covers every local tree. The cost is one `_build` per environment
+# (about 16-24 GB each, 2026-11-13; the shared dune cache serves their compilation).
+unit_worktree_name() { # machine unit
+  local entry box name first= env
+  env=$(unit_dune_env "$2")
+  for entry in "${UNITS[@]}"; do
+    IFS=: read -r box name _ <<<"$entry"
+    [ "$box" = "$1" ] || continue
+    [ -n "$first" ] || first=$name
+    if [ "$(unit_dune_env "$name")" = "$env" ]; then
+      if [ "$name" = "$first" ]; then printf sweep; else printf 'sweep-%s' "$name"; fi
+      return 0
+    fi
+  done
+  printf 'sweep-%s' "$2"
+}
+
 # hip twice, on purpose (gh-ocannl-1035): minix's gfx1151 is an iGPU whose "device" memory IS host
 # memory, so a missing or misplaced host<->device transfer can read the right bytes there anyway,
 # and minix's green says nothing about it. tuf's RX 7700S (gfx1102) is the fleet's one discrete AMD
@@ -744,7 +772,7 @@ wanted() {
   return 1
 }
 
-# One sweep at a time. Every local unit reuses a single fixed worktree, so an
+# One sweep at a time. Every local unit reuses a fixed worktree (unit_worktree_name), so an
 # overlapping invocation -- a manual run started while the scheduled one is
 # going, which is exactly how these collide -- would reset and clean that tree
 # under a running dune. The earlier run's row would then describe a mixture of
@@ -1135,8 +1163,8 @@ test_cmd() { # backend wt [jobs [host]]
   printf 'cd "%s" || exit 127; ' "$wt"
   # Every Verdict-linked test action writes its machine records into a file of
   # its own here (verdict_records_env, gh-ocannl-1114), and this unit starts the
-  # directory empty: the local backends share one worktree, and what a previous
-  # unit's actions recorded is not this unit's evidence. A directory that cannot
+  # directory empty: units of one environment share a worktree (unit_worktree_name),
+  # and what a previous unit's actions recorded is not this unit's evidence. A directory that cannot
   # be reset is harness non-coverage, like the clean below.
   printf 'rm -rf "%s" && mkdir -p "%s" || exit 126; ' "$(verdict_records_dir "$wt")" \
     "$(verdict_records_dir "$wt")"
@@ -1145,8 +1173,11 @@ test_cmd() { # backend wt [jobs [host]]
   # A forced pass therefore starts from an empty build tree, under the worktree
   # lock already held on both local and remote paths. Failure to establish that
   # precondition is harness non-coverage, not a red suite.
+  # The native-PTX diagnostic leg's own build directory (tools/cuda-native-ptx-rerun.sh) starts
+  # empty too, so a forced sweep's leg executes every action as the unit's suite does.
   if [ "$FORCE" = 1 ]; then
     printf '%s clean; clean_rc=$?; [ $clean_rc -eq 0 ] || exit 126; ' "$(switch_dune_cmd)"
+    printf 'rm -rf _build-native-ptx || exit 126; '
   fi
   # A full-suite unit also builds @train, the training-integration tier that
   # lives off the runtest path (test/training/dune says why); one dune call, so
@@ -2372,7 +2403,7 @@ run_unit() { # machine backend host
     # runs. The end bound rounds outward for the mirror-image reason, so the
     # window is closed on both sides against its neighbours.
     [ -n "$remote_started" ] && remote_started=$(( remote_started + 1 ))
-    wt="$remote_home/ocannl-staging-worktrees/sweep"
+    wt="$remote_home/ocannl-staging-worktrees/$(unit_worktree_name "$machine" "$backend")"
     # rog's WSL guest needs the CUDA and WSL lib dirs on PATH; harmless elsewhere. The suffix is a
     # reliable reading of the boot kind because a remote host is always the `-linux` or `-wsl`
     # alias on its box's endpoint-map row -- the override accepts nothing else (lab_dest), and
@@ -2463,7 +2494,7 @@ run_unit() { # machine backend host
       "$host" "$remote" >"$log" 2>&1
     rc=$?
   else
-    wt=$LOCAL_WT
+    wt=$(dirname "$LOCAL_WT")/$(unit_worktree_name "$machine" "$backend")
     # Checked, and fatal for this UNIT rather than the run. The worktree is
     # reused, so a checkout that fails -- a conflicting edit, a half-removed
     # worktree -- leaves the previous revision's tree on disk; running the suite
@@ -2866,9 +2897,9 @@ sleep_gated_box() { # box
   return 0
 }
 
-# One machine's units, in table order, one at a time: the local units share one
-# worktree (and fd 9's lock), a remote box's units share its far-side worktree
-# and flock, and on every box they compete for the same CPU or GPU. Run as a
+# One machine's units, in table order, one at a time: the local units run under fd 9's lock,
+# a remote box's units each under its own worktree's far-side flock (one worktree per
+# environment, unit_worktree_name), and on every box they compete for the same CPU or GPU. Run as a
 # background subshell per machine, so a lane owns its copies of the per-unit
 # globals (UNIT_PID, WRITTEN_FINGERPRINT) outright.
 #

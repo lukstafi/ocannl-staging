@@ -247,6 +247,10 @@ if [ -n "${SWEEP_TEST_ENV_CALLS:-}" ]; then
   printf '%s|%s|%s|%s\t%s\n' "${OCANNL_BACKEND-}" "${OCANNL_CC_KERNEL_PART_WEIGHT-}" \
     "${OCANNL_CC_COMPILE_UNIT_MIN_BYTES-}" "${OCANNL_DEBUG_GC_BACKPROP_ROOTS-}" "$*" >>"$SWEEP_TEST_ENV_CALLS"
 fi
+# Which worktree a call ran in (unit_worktree_name; the per-environment worktree case reads it).
+if [ -n "${SWEEP_TEST_CWD_CALLS:-}" ]; then
+  printf '%s\t%s\n' "$PWD" "$*" >>"$SWEEP_TEST_CWD_CALLS"
+fi
 # Which credential fixtures reached this call (gh-ocannl-1280; credential_free reads it): names only.
 if [ -n "${SWEEP_TEST_CREDENTIALS:-}" ]; then
   printf '%s\t%s\n' "$*" "${GH_TOKEN+GH_TOKEN }${FOO_API_KEY+FOO_API_KEY }${SWEEP_TEST_CREDENTIAL_PLAIN+plain}" \
@@ -986,6 +990,21 @@ gc_run=$(SWEEP_TEST_ENV_CALLS=$gc_env run_sweep_backend cc-gc-backprop --slow)
 grep -q 'm4-max/cc-gc-backprop: incremental-pass ' <<<"$gc_run"
 [ "$(cat "$gc_env")" = "$(printf 'cc|||true\texec -- dune build @runtest')" ]
 [ "$(awk -F '\t' '$3 == "cc-gc-backprop" { n++ } END { print n }' "$state/history.tsv")" = 1 ]
+
+# One worktree per unit environment on a box (unit_worktree_name): a `_build` keeps only the last
+# environment's test results, so two environments sharing one re-executed each other's suite on
+# every incremental run. The box's first unit keeps `sweep`; cc-oracle-widen, cc's environment
+# exactly, shares it (its alias is one cc's Sunday @slow builds); each other variant gets its own.
+wt_root=$tmp/home/ocannl-staging-worktrees
+for wt_case in cc:sweep cc-oracle-widen:sweep cc-outlined:sweep-cc-outlined \
+  cc-gc-backprop:sweep-cc-gc-backprop; do
+  wt_calls=$tmp/opam.cwd-calls-${wt_case%%:*}
+  wt_run=$(SWEEP_TEST_CWD_CALLS=$wt_calls run_sweep_backend "${wt_case%%:*}")
+  grep -q "m4-max/${wt_case%%:*}: incremental-pass " <<<"$wt_run"
+  awk -F '\t' -v cwd="$wt_root/${wt_case#*:}" '$1 != cwd {exit 1} {n++} END {if (!n) exit 1}' \
+    "$wt_calls"
+  [ -z "$(git -C "$wt_root/${wt_case#*:}" status --porcelain)" ]
+done
 
 # Per-unit state distinguishes a standing red from two transitions that need an
 # operator's attention: red after green, and red after the failing golden was

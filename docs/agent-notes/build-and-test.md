@@ -5051,8 +5051,8 @@ replacement for the fleet reservation or `tools/test-run.sh` wrapper.
   left out of the skip aggregation, which covers backends. The sweep harness pins each variant's
   one dune call (`sweep_harness.sh`, the `gh-ocannl-1778`, `gh-ocannl-2062` and `gh-ocannl-1964`
   cases) and the run record's backend map.
-  Each machine's units form a lane — sequential within the box, which shares one worktree, lock and
-  device, concurrent with the other boxes' lanes (gh-ocannl-976) — so wall-clock is the longest lane
+  Each machine's units form a lane — sequential within the box, which shares its lock and device
+  (and a worktree among units of one environment), concurrent with the other boxes' lanes (gh-ocannl-976) — so wall-clock is the longest lane
   (the local one, metal's suite), and the remote units start while the routine's freshly woken WSL
   VMs are still up. The CPU pair is split across boxes on purpose: it takes a unit off that longest
   lane, and runs a CPU backend's goldens under Linux as well as macOS every day. Rows reach the
@@ -5194,8 +5194,9 @@ replacement for the fleet reservation or `tools/test-run.sh` wrapper.
   parity on cifar_resnet's materialize-all step under `tf32_matmuls`, the box's main-checkout
   fixture; about 40 s) and, after a GREEN suite only, `cuda-native-ptx-rerun.sh` (the unit's own
   targets again, `@slow` too on a `--slow` sweep, under `OCANNL_CUDA_PTX_TARGET=native` and the
-  unit's per-test cap, a hang said as `timeout` naming the test; in the same `_build`, so every test
-  action re-executes and the next floor unit re-executes them back). The `gpu` legs (parity, native) take a
+  unit's per-test cap, a hang said as `timeout` naming the test; in a build directory of its own,
+  `_build-native-ptx`, so it neither re-executes the floor `_build`'s actions nor leaves the next floor
+  unit to re-execute them; a forced unit empties it too). The `gpu` legs (parity, native) take a
   GPU token where the unit does; the scripts that run dune go through `opam exec` and scrub the
   credential variables themselves. A ref without a leg's script is said `not at <sha>` from the
   local clone, before any transport or token. The verdict is the box's, like the box check's: said
@@ -6043,7 +6044,14 @@ replacement for the fleet reservation or `tools/test-run.sh` wrapper.
   fingerprint deliberately no longer carries enough source relationship to recover this provenance.
 - The per-machine worktrees are reused, not recreated, so a sweep is incremental against an
   existing `_build` — seconds rather than minutes when little changed. That is what makes a daily
-  cadence affordable. `--force` is the explicit from-scratch unit; a fresh CI run is the other
+  cadence affordable. A box keeps one worktree per distinct unit environment (`unit_worktree_name`:
+  the box's first unit in `sweep`, any other environment in `sweep-<unit>`), because every test
+  action depends on the ambient configuration record and the resolved backend (`test/config/dune`)
+  and a `_build` holds only the last environment's results: before that, two units alternating in
+  one tree re-executed each other's whole suite every day with master unmoved (2026-11-13: cc 661 s
+  incremental against 635 s the day before, every `test/operations` output rewritten). The native-PTX
+  leg builds in `_build-native-ptx` for the same reason. The price is a `_build` per environment
+  (16–24 GB each); a forced unit cleans its own. `--force` is the explicit from-scratch unit; a fresh CI run is the other
   path to a clean compilation check.
 
 ### Bisecting a regression
