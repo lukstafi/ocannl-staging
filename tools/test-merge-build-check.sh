@@ -1,13 +1,17 @@
 #!/usr/bin/env bash
-# Hermetic fixtures for tools/merge-build-check.sh: which tiers a merge commit selects (a script
+# Hermetic fixtures for tools/merge-build-check.sh: the order of its tiers (format, compile, tests,
+# shell) and where each stops the run; what the tests tier builds (the list prepush prints for the
+# head side's revisions, never printed; a cross-cutting change's first tier, or nothing, with the
+# rest OWED; an incomplete list's members; no list read fails the tier); which merges select the
+# shell tier (a script
 # both sides changed, by either name of a rename; a one-parent HEAD, --all and a quoted path run
-# every tier), what the shell tier narrows to (the overlap's reach, the whole tier on a failed ask,
+# the whole tier), what the shell tier narrows to (the overlap's reach, the whole tier on a failed ask,
 # an unrecognized line or an unmapped script), the toolchain fallback through opam env, the exit
 # statuses, stable tier lines across different run durations, that the build of the base alone
 # narrows as the merge does, that this repository's mapping gives shared support the whole tier
 # and a manifest edit less, and that
-# .github/ship-pr-merge-build runs the script with every tracked path an input. Fake dune, opam
-# and harness tier: no build runs.
+# .github/ship-pr-merge-build runs the script with every tracked path an input. Fake dune, opam,
+# formatter gate, pre-push list and harness tier: no build runs.
 # Usage: tools/test-merge-build-check.sh [--keep] [--only REGEX]
 set -u
 . "$(cd "$(dirname "$0")/../scripts" && pwd)/harness-support.sh"
@@ -25,10 +29,12 @@ SYS_PATH=/usr/bin:/bin
 GIT=$(command -v git)
 
 mkdir -p "$TMP/dunebin" "$TMP/opambin" "$TMP/emptyopam"
+# The tests tier's build is the one that names a width (-j); FAKE_TESTS_RC fails it alone.
 cat >"$TMP/dunebin/dune" <<'FAKE'
 #!/bin/sh
 printf '%s\n' "$*" >>"$FAKE_RECORD"
 sleep "${FAKE_TIER_DELAY:-0}"
+case " $* " in *' -j '*) exit "${FAKE_TESTS_RC:-${FAKE_DUNE_RC:-0}}" ;; esac
 exit "${FAKE_DUNE_RC:-0}"
 FAKE
 # `opam env --shell=sh` puts the fake dune on PATH, as a switch's does.
@@ -72,6 +78,32 @@ case " $* " in *' --affected '*) exit "${FAKE_SCOPED_RC:-0}" ;; esac
 exit "${FAKE_SHELL_RC:-0}"
 FAKE
   chmod +x "$R/tools/test-harnesses.sh"
+  # The formatter gate and the pre-push list, recorded apart from dune and the harness tier
+  # ($FAKE_RECORD.tiers), so the records the selection legs compare stay what they were. The list
+  # is FAKE_LIST under the verdict FAKE_VERDICT and the status FAKE_PREPUSH_RC; the first tier is
+  # FAKE_TIER_LIST under FAKE_TIER_VERDICT and FAKE_TIER_RC (its ask repeats the list's trailer
+  # first, as prepush's does). By default the change reaches no per-test alias.
+  cat >"$R/tools/fmt-check.sh" <<'FAKE'
+#!/bin/sh
+printf 'fmt scans=%s\n' "${OCANNL_TOOL_FMT_CHECK_SCANS-unset}" >>"$FAKE_RECORD.tiers"
+exit "${FAKE_FMT_RC:-0}"
+FAKE
+  cat >"$R/tools/test-run.sh" <<'FAKE'
+#!/bin/sh
+printf '%s\n' "$*" >>"$FAKE_RECORD.tiers"
+case " $* " in
+  *' --referenced-only '*)
+    cat "${FAKE_TIER_LIST:-/dev/null}"
+    printf 'affected: verdict=cross-cutting\n' >&2
+    [ "${FAKE_TIER_VERDICT-ok}" = none ] || printf 'affected: verdict=%s\n' "${FAKE_TIER_VERDICT-ok}" >&2
+    exit "${FAKE_TIER_RC:-0}" ;;
+esac
+cat "${FAKE_LIST:-/dev/null}"
+printf 'affected: 7 alias(es) from 2 changed path(s)\n' >&2
+[ "${FAKE_VERDICT-ok}" = none ] || printf 'affected: verdict=%s\n' "${FAKE_VERDICT-ok}" >&2
+exit "${FAKE_PREPUSH_RC:-0}"
+FAKE
+  chmod +x "$R/tools/fmt-check.sh" "$R/tools/test-run.sh"
   for f in tools/sub/a.sh b.sh x.ml r.txt m.txt; do printf '1\n2\n3\n4\n5\n6\n' >"$R/$f"; done
   git -C "$R" init -q && git -C "$R" checkout -q -b base && git -C "$R" add -A &&
     git -C "$R" commit -q -m init && git -C "$R" branch side
@@ -94,6 +126,7 @@ run() { # PATH_PREFIX [ARG...]: a full run on R's HEAD under a PATH of the prefi
   shift
   rc=0
   : >"$TMP/record"
+  : >"$TMP/record.tiers"
   (cd "$R" && PATH=$prefix:$TMP/gitbin:$SYS_PATH FAKE_RECORD=$TMP/record "$BASH" tools/merge-build-check.sh "$@") \
     >"$TMP/out" 2>&1 || rc=$?
 }
@@ -148,24 +181,24 @@ if harness_leg 'a rename counts by its other name, and only a script name select
   else report 1 'a rename on the head counts too' "exit $rc; $(cat "$TMP/out")"; fi
 fi
 
-if harness_leg 'what cannot be read runs every tier #select'; then
+if harness_leg 'what cannot be read runs the whole shell tier #select'; then
   fixture one-parent
   plan
-  if [ "$rc" = 0 ] && has 'shell tier: SELECTED -- HEAD is not a two-parent merge, so every tier runs'; then
-    report 0 'a one-parent HEAD runs every tier'
-  else report 1 'a one-parent HEAD runs every tier' "exit $rc; $(cat "$TMP/out")"; fi
+  if [ "$rc" = 0 ] && has 'shell tier: SELECTED -- HEAD is not a two-parent merge, so the whole shell tier runs'; then
+    report 0 'a one-parent HEAD runs the whole shell tier'
+  else report 1 'a one-parent HEAD runs the whole shell tier' "exit $rc; $(cat "$TMP/out")"; fi
   # A name git quotes is one this script does not decode, so it cannot rule the path out.
   fixture quoted
   first x.ml && printf 'x\n' >"$R/q\"uote.txt" && commit_on base
   git -C "$R" checkout -q side && last x.ml && commit_on side && merge_side
   plan
-  if [ "$rc" = 0 ] && has 'shell tier: SELECTED -- git quoted a path one side changed, so every tier runs'; then
-    report 0 'a path git quotes runs every tier'
-  else report 1 'a path git quotes runs every tier' "exit $rc; $(cat "$TMP/out")"; fi
+  if [ "$rc" = 0 ] && has 'shell tier: SELECTED -- git quoted a path one side changed, so the whole shell tier runs'; then
+    report 0 'a path git quotes runs the whole shell tier'
+  else report 1 'a path git quotes runs the whole shell tier' "exit $rc; $(cat "$TMP/out")"; fi
   R=$APART plan --all
   if [ "$rc" = 0 ] && has 'shell tier: SELECTED -- --all'; then
-    report 0 '--all runs every tier on a merge that would skip one'
-  else report 1 '--all runs every tier on a merge that would skip one' "exit $rc; $(cat "$TMP/out")"; fi
+    report 0 '--all runs the whole shell tier on a merge that would skip it'
+  else report 1 '--all runs the whole shell tier on a merge that would skip it' "exit $rc; $(cat "$TMP/out")"; fi
 fi
 
 if harness_leg 'a run builds the selected tiers in order and stops at the first failure #run'; then
@@ -187,6 +220,145 @@ shell --shell --jobs 4" ] && has 'merge-build-check: passed'; then
   if [ "$rc" = 1 ] && has 'shell tier FAILED (tools/test-harnesses.sh exit 1)' && ! has 'merge-build-check: passed'; then
     report 0 'a failing shell tier exits 1'
   else report 1 'a failing shell tier exits 1' "exit $rc; $(cat "$TMP/out")"; fi
+fi
+
+COMPILE='build --root . @check @test/operations/scans'
+# The format tier and the tests tier (the local merge gate: what the per-PR `Formatting` job and
+# the affected part of the `Build` shards read). Their fakes record in $TMP/record.tiers.
+range_of() { # the head side's change, as the script asks it: MERGE_BASE..HEAD_SIDE of R's HEAD
+  local b h
+  b=$(git -C "$R" rev-parse 'HEAD^1') && h=$(git -C "$R" rev-parse 'HEAD^2') &&
+    printf '%s..%s' "$(git -C "$R" merge-base "$b" "$h")" "$h"
+}
+tiers() { cat "$TMP/record.tiers"; }
+if harness_leg 'the format tier runs first, its scans off, and a red one ends the run #tiers'; then
+  R=$APART run "$TMP/dunebin"
+  if [ "$rc" = 0 ] && [ "$(tiers | sed -n 1p)" = 'fmt scans=0' ] && has 'merge-build-check: format tier passed' &&
+     [ "$(grep -n 'tier passed' "$TMP/out" | sed -n 1p)" = "$(grep -n 'format tier passed' "$TMP/out")" ]; then
+    report 0 'the formatter gate runs before the compile tier, with its scans off'
+  else report 1 'the formatter gate runs before the compile tier, with its scans off' "exit $rc; $(tiers); $(cat "$TMP/out")"; fi
+  FAKE_FMT_RC=1 R=$APART run "$TMP/dunebin"
+  if [ "$rc" = 1 ] && [ ! -s "$TMP/record" ] && [ "$(tiers)" = 'fmt scans=0' ] &&
+     has 'format tier FAILED (tools/fmt-check.sh exit 1)' && ! has 'merge-build-check: passed'; then
+    report 0 'a failing format tier exits 1 before dune or the list is asked'
+  else report 1 'a failing format tier exits 1 before dune or the list is asked' "exit $rc; $(cat "$TMP/record"); $(tiers); $(cat "$TMP/out")"; fi
+fi
+
+if harness_leg 'the tests tier builds the list prepush prints for the head side #tiers'; then
+  printf '%s\n' '@a/runtest-x' '@@runtest-root' >"$TMP/list"
+  want_ask="prepush --since $(R=$BOTH_SCRIPT range_of) --list"
+  FAKE_LIST=$TMP/list R=$BOTH_SCRIPT run "$TMP/dunebin"
+  if [ "$rc" = 0 ] && [ "$(cat "$TMP/record")" = "$COMPILE
+build --root . -j 4 @a/runtest-x @@runtest-root
+shell --shell --jobs 4" ] && [ "$(tiers | sed -n 2p)" = "$want_ask" ] && has 'merge-build-check: tests tier passed'; then
+    report 0 'the list is asked of the two revisions and built -j 4, after the compile tier and before the shell tier'
+  else report 1 'the list is asked of the two revisions and built -j 4, after the compile tier and before the shell tier' \
+    "exit $rc; record: $(cat "$TMP/record"); tiers: $(tiers) (want $want_ask); $(cat "$TMP/out")"; fi
+  # A merge that adds a test lists one alias more than its base alone: neither the list nor a
+  # count may reach the log, or ship-pr reads a shared failure as the merge's own.
+  if ! has '@a/runtest-x' && ! has 'alias(es)'; then
+    report 0 'neither the list nor the ask'"'"'s counts are printed'
+  else report 1 'neither the list nor the ask'"'"'s counts are printed' "$(cat "$TMP/out")"; fi
+  R=$BOTH_SCRIPT run "$TMP/dunebin"
+  if [ "$rc" = 0 ] && [ "$(cat "$TMP/record")" = "$COMPILE
+shell --shell --jobs 4" ] && has 'tests tier: the change reaches no per-test alias' && has 'merge-build-check: tests tier passed'; then
+    report 0 'a change reaching no per-test alias builds nothing and passes the tier'
+  else report 1 'a change reaching no per-test alias builds nothing and passes the tier' "exit $rc; $(cat "$TMP/record"); $(cat "$TMP/out")"; fi
+  FAKE_LIST=$TMP/list FAKE_TESTS_RC=5 R=$BOTH_SCRIPT run "$TMP/dunebin"
+  if [ "$rc" = 1 ] && has 'tests tier FAILED (dune exit 5)' && ! grep -q '^shell ' "$TMP/record" &&
+     ! has 'merge-build-check: passed'; then
+    report 0 'a failing tests tier exits 1 before the shell tier'
+  else report 1 'a failing tests tier exits 1 before the shell tier' "exit $rc; $(cat "$TMP/record"); $(cat "$TMP/out")"; fi
+  # The build of the base alone asks about the same change: the same two revisions.
+  sha=$(git -C "$BOTH_SCRIPT" commit-tree 'HEAD^1^{tree}' -p 'HEAD^1' -p 'HEAD^2' -m 'the base alone') &&
+    git -C "$BOTH_SCRIPT" checkout -q --detach "$sha"
+  FAKE_LIST=$TMP/list R=$BOTH_SCRIPT run "$TMP/dunebin"
+  if [ "$rc" = 0 ] && [ "$(tiers | sed -n 2p)" = "$want_ask" ]; then
+    report 0 'the build of the base alone asks the list of the same two revisions'
+  else report 1 'the build of the base alone asks the list of the same two revisions' "exit $rc; tiers: $(tiers) (want $want_ask)"; fi
+  git -C "$BOTH_SCRIPT" checkout -q base
+fi
+
+if harness_leg 'a list that is not the whole pre-push list says what is OWED; one not read fails #tiers'; then
+  printf '%s\n' '@a/runtest-x' >"$TMP/list"
+  printf '%s\n' '@a/runtest-first' >"$TMP/tier-list"
+  ask="prepush --since $(R=$APART range_of) --list"
+  first_ask="prepush --referenced-only --since $(R=$APART range_of) --list"
+  FAKE_PREPUSH_RC=2 FAKE_VERDICT=cross-cutting FAKE_TIER_LIST=$TMP/tier-list R=$APART run "$TMP/dunebin"
+  if [ "$rc" = 0 ] && [ "$(cat "$TMP/record")" = "$COMPILE
+build --root . -j 4 @a/runtest-first" ] && [ "$(tiers | sed -n 2,3p)" = "$ask
+$first_ask" ] && has 'tests tier: OWED -- the change is CROSS-CUTTING, so every per-test alias past its first tier did not run here'; then
+    report 0 'a cross-cutting change builds its first tier and says the rest is owed'
+  else report 1 'a cross-cutting change builds its first tier and says the rest is owed' "exit $rc; $(cat "$TMP/record"); $(tiers); $(cat "$TMP/out")"; fi
+  FAKE_PREPUSH_RC=2 FAKE_VERDICT=cross-cutting FAKE_TIER_LIST=$TMP/tier-list FAKE_TIER_RC=2 FAKE_TIER_VERDICT=cross-cutting R=$APART run "$TMP/dunebin"
+  if [ "$rc" = 0 ] && [ "$(cat "$TMP/record")" = "$COMPILE" ] &&
+     has 'tests tier: OWED -- the change is CROSS-CUTTING with no narrow first tier, so the whole list did not run here' &&
+     has 'merge-build-check: tests tier passed'; then
+    report 0 'a cross-cutting change with a wide first tier builds nothing and says the list is owed'
+  else report 1 'a cross-cutting change with a wide first tier builds nothing and says the list is owed' "exit $rc; $(cat "$TMP/record"); $(cat "$TMP/out")"; fi
+  FAKE_LIST=$TMP/list FAKE_PREPUSH_RC=3 FAKE_VERDICT=incomplete R=$APART run "$TMP/dunebin"
+  if [ "$rc" = 0 ] && [ "$(cat "$TMP/record")" = "$COMPILE
+build --root . -j 4 @a/runtest-x" ] && has 'tests tier: OWED -- the list is INCOMPLETE (a changed path is UNMAPPED)'; then
+    report 0 'an incomplete list builds what it holds and says the gap is owed'
+  else report 1 'an incomplete list builds what it holds and says the gap is owed' "exit $rc; $(cat "$TMP/record"); $(cat "$TMP/out")"; fi
+  # The bound's share: 200 aliases build, 201 do not, from the list or from a first tier.
+  for n in 200 201; do
+    i=0; : >"$TMP/long-list"
+    while [ "$i" -lt "$n" ]; do i=$((i + 1)); printf '@a/runtest-t%s\n' "$i" >>"$TMP/long-list"; done
+    FAKE_LIST=$TMP/long-list R=$APART run "$TMP/dunebin"
+    built=$(sed -n 2p "$TMP/record" | tr ' ' '\n' | grep -c '^@a/runtest-t')
+    case $n in
+      200) [ "$rc" = 0 ] && [ "$built" = 200 ] && ! has 'OWED' ;;
+      201) [ "$rc" = 0 ] && [ "$(cat "$TMP/record")" = "$COMPILE" ] &&
+             has 'tests tier: OWED -- the list is longer than the 200 aliases this build runs, so the whole list did not run here' ;;
+    esac && report 0 "a list of $n aliases: $([ "$n" = 200 ] && echo built || echo 'owed, nothing built')" ||
+      report 1 "a list of $n aliases: $([ "$n" = 200 ] && echo built || echo 'owed, nothing built')" "exit $rc; built $built; $(grep 'tests tier' "$TMP/out")"
+  done
+  FAKE_PREPUSH_RC=2 FAKE_VERDICT=cross-cutting FAKE_TIER_LIST=$TMP/long-list R=$APART run "$TMP/dunebin"
+  if [ "$rc" = 0 ] && [ "$(cat "$TMP/record")" = "$COMPILE" ] &&
+     has 'tests tier: OWED -- the change is CROSS-CUTTING and its first tier is longer than the 200 aliases this build runs, so the whole list did not run here'; then
+    report 0 'a cross-cutting change whose first tier is 201 aliases builds nothing and says so'
+  else report 1 'a cross-cutting change whose first tier is 201 aliases builds nothing and says so' "exit $rc; $(cat "$TMP/record" | cut -c1-200); $(grep 'tests tier' "$TMP/out")"; fi
+  FAKE_PREPUSH_RC=2 FAKE_VERDICT=cross-cutting FAKE_TIER_LIST=$TMP/tier-list FAKE_TIER_RC=3 FAKE_TIER_VERDICT=incomplete R=$APART run "$TMP/dunebin"
+  if [ "$rc" = 0 ] && [ "$(cat "$TMP/record")" = "$COMPILE
+build --root . -j 4 @a/runtest-first" ] && has 'tests tier: OWED -- the change is CROSS-CUTTING and its first tier INCOMPLETE'; then
+    report 0 'an incomplete first tier builds what it holds and says the rest is owed'
+  else report 1 'an incomplete first tier builds what it holds and says the rest is owed' "exit $rc; $(cat "$TMP/record"); $(grep 'tests tier' "$TMP/out")"; fi
+  # A first tier that was not read is not a wide one: a failed query, a status and a verdict at
+  # odds, no trailer of its own each fail the tier and show the ask.
+  bad=
+  for probe in '1 ok' '2 ok' '0 cross-cutting' '3 ok' '0 none' '75 ok'; do
+    # shellcheck disable=SC2086 # the probe's two words
+    set -- $probe
+    FAKE_PREPUSH_RC=2 FAKE_VERDICT=cross-cutting FAKE_TIER_LIST=$TMP/tier-list FAKE_TIER_RC=$1 FAKE_TIER_VERDICT=$2 \
+      R=$APART run "$TMP/dunebin"
+    { [ "$rc" = 1 ] && [ "$(cat "$TMP/record")" = "$COMPILE" ] && ! has 'OWED' && ! has 'tests tier passed' &&
+      has "tests tier FAILED (tools/test-run.sh prepush --referenced-only --since" &&
+      has "--list exited $1 with no verdict this script reads)"; } || bad+=" [$probe: exit $rc; $(grep 'tests tier' "$TMP/out" | tr '\n' ' ')]"
+  done
+  if [ -z "$bad" ]; then
+    report 0 'a first tier that was not read fails the tier, never reading as a wide one'
+  else report 1 'a first tier that was not read fails the tier, never reading as a wide one' "$bad"; fi
+  # Fail closed: a status and a verdict that do not belong together, no verdict, no two sides.
+  bad=
+  for probe in '2 ok' '0 cross-cutting' '3 ok' '0 none' '1 ok'; do
+    # shellcheck disable=SC2086 # the probe's two words
+    set -- $probe
+    FAKE_LIST=$TMP/list FAKE_PREPUSH_RC=$1 FAKE_VERDICT=$2 R=$APART run "$TMP/dunebin"
+    { [ "$rc" = 1 ] && [ "$(cat "$TMP/record")" = "$COMPILE" ] &&
+      has "tests tier FAILED (tools/test-run.sh prepush --since" && has "--list exited $1 with no verdict this script reads)" &&
+      has 'affected: 7 alias(es) from 2 changed path(s)'; } || bad+=" [$probe: exit $rc; $(cat "$TMP/record")]"
+  done
+  if [ -z "$bad" ]; then
+    report 0 'a list read with no verdict, or one at odds with its status, fails the tier and shows the ask'
+  else report 1 'a list read with no verdict, or one at odds with its status, fails the tier and shows the ask' "$bad"; fi
+  fixture no-sides
+  FAKE_LIST=$TMP/list run "$TMP/dunebin"
+  if [ "$rc" = 1 ] && [ "$(cat "$TMP/record")" = "$COMPILE" ] && [ "$(tiers)" = 'fmt scans=0' ] &&
+     has 'tests tier: UNREAD -- HEAD has no two sides with a merge base, so the tier fails' &&
+     has 'tests tier FAILED (HEAD has no two sides with a merge base, so what the change reaches cannot be asked)'; then
+    report 0 'a HEAD with no two sides fails the tests tier, asking nothing'
+  else report 1 'a HEAD with no two sides fails the tests tier, asking nothing' "exit $rc; $(cat "$TMP/record"); $(tiers); $(cat "$TMP/out")"; fi
 fi
 
 # Use the same tree twice, but force each tier across a different whole-second duration.
@@ -219,7 +391,6 @@ reach_of() { # PATH...: each PATH reaches tools/test-one.sh
   for p do printf '%s\ttools/test-one.sh\n' "$p"; done >"$TMP/reach"
 }
 export FAKE_REACH=$TMP/reach
-COMPILE='build --root . @check @test/operations/scans'
 : >"$TMP/reach"
 if harness_leg 'an overlap reaching one member runs that member, and no more #scope'; then
   reach_of tools/sub/a.sh

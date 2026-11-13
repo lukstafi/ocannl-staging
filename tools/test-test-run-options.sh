@@ -120,6 +120,10 @@
 #      decides nothing either way, and a stderr with no trailer, two, one that
 #      is not last, an unknown one, or one at odds with the exit status runs
 #      nothing; a mutant reading the prose instead turns those probes red.
+#      A range, `--since OLD..NEW`, reaches affected as its own positional
+#      range, for the list and for the harness ask alike, and the closing
+#      line names no `--since` command; a mutant handing the range over as
+#      `--since` loses that oracle.
 #      The harness commands `affected --harnesses --since BASE` prints
 #      (gh-ocannl-1929) are named as the last lines of stderr and never run,
 #      the very last naming the one command that runs them for this BASE:
@@ -2794,6 +2798,39 @@ if [ -z "$pp_detail" ]; then
     grep -qF '@train-dir/runtest-q' "$argv_dir/cmd"; } ||
     pp_detail="options: exit $argv_rc; dune calls: ${argv_calls:-<none>} (want $pp_want); cap: $(cat "$argv_dir/cap" 2>/dev/null); stderr: $argv_err"
 fi
+# A range OLD..NEW is asked of affected positionally, its own range form, never
+# as --since (which would take the merge-base of HEAD and a revision no range
+# is), and of `affected --harnesses` the same way; the list is filtered as a
+# base's is, and the closing harness line names no --since command.
+pp_range_check() {
+  pp_range_detail=
+  : >"$TMP/pp-range.affected.harnesses"
+  printf '%s\n' 'tools/test-x.sh' >"$TMP/pp-range-harness.out"
+  PP_HARNESS_OUT=$TMP/pp-range-harness.out pp_probe pp-range 0 --since old..new --list
+  { [ "$argv_rc" = 0 ] && [ "$pp_asked" = 'old..new' ] &&
+    [ "$(cat "$TMP/pp-range.affected.harnesses")" = '--harnesses old..new' ] &&
+    [ "$argv_out" = "$(printf '%s\n' '@a/runtest-x' '@@runtest-root' '@a/runtest-slow-ish' '@train-dir/runtest-q')" ] &&
+    [ -z "$argv_calls" ] &&
+    grep -qF 'prepush: 4 of the 7 alias(es) affected old..new lists; left off: 1 train-' <<<"$argv_err" &&
+    grep -qxF 'test-run: prepush: harness: tools/test-x.sh' <<<"$argv_err" &&
+    ! grep -qF -- ' --affected --since ' <<<"$argv_err" &&
+    [ -z "$(pp_left)" ]; } ||
+    pp_range_detail="exit $argv_rc; affected asked: $pp_asked; harnesses asked: $(cat "$TMP/pp-range.affected.harnesses"); stdout: $argv_out; dune calls: ${argv_calls:-<none>}; stderr: $argv_err"
+}
+pp_range_check
+if [ -z "$pp_range_detail" ]; then report 0 "prepush --since OLD..NEW: affected is asked the range itself, and --list prints its filtered list";
+else report 1 "prepush --since OLD..NEW: affected is asked the range itself, and --list prints its filtered list" "$pp_range_detail"; fi
+# Negative control: a range handed to affected as --since must lose the oracle.
+perl -pe 's/^    \*\.\.\*\) pp_since=\("\$pp_base"\) /    *..*) pp_since=(--since "\$pp_base") /' "$SRC" >"$repeat_root/tools/test-run.sh"
+if cmp -s "$SRC" "$repeat_root/tools/test-run.sh"; then
+  report 1 "prepush --since OLD..NEW: a mutant asking --since OLD..NEW loses the oracle" "mutant was not made"
+else
+  pp_range_check
+  if [ -n "$pp_range_detail" ]; then report 0 "prepush --since OLD..NEW: a mutant asking --since OLD..NEW loses the oracle";
+  else report 1 "prepush --since OLD..NEW: a mutant asking --since OLD..NEW loses the oracle" "mutant survived"; fi
+fi
+cp "$SRC" "$repeat_root/tools/test-run.sh"
+
 # First-tier mode must pass the flag to affected, preserve filtering, and
 # label the result even after the shared launcher's green verdict.
 pp_tier_full_out=$TMP/pp-tier-full.out pp_tier_full_err=$TMP/pp-tier-full.err
@@ -3003,7 +3040,7 @@ for probe in "usage|0|build -j 2|--since BASE is required" \
              "usage|0|--since base runtest|only dune's build takes" \
              "usage|0|--since base --cpu|fleet-worker.sh execution slot --" \
              "usage|0|--since base --list=1|is a flag and takes no value" \
-             "usage|0|--since base build @w --cap 9|tools/test-run.sh prepush --since BASE [--referenced-only] [--list |" \
+             "usage|0|--since base build @w --cap 9|OLD..NEW [--referenced-only] [--list |" \
              "asked|2|--since base|exited 2" \
              "asked|3|--since base|the list is INCOMPLETE"; do
   IFS='|' read -r kind rc args want <<<"$probe"
@@ -3193,8 +3230,10 @@ pp_harness_control() { # LABEL FROM TO WANT: the cases WANT alone hold under the
 pp_harness_control 'a prepush that names no harness command turns every case with one to name red' \
   '[ -z "$pp_line" ] || pp_harness+=("$pp_line")' ':' ' 1 3 8'
 pp_harness_control 'a closing line naming another base than the run'\''s turns every case with one to name red' \
-  '"$pp_base"
-      } >&2' '"master"
+  '"$pp_base" ;;
+        esac
+      } >&2' '"master" ;;
+        esac
       } >&2' ' 1 3 8'
 cp "$SRC" "$repeat_root/tools/test-run.sh"
 rm -f "$pp_stub"

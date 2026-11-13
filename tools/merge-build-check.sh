@@ -5,11 +5,36 @@
 # Usage: tools/merge-build-check.sh [--plan] [--all]
 #
 # HEAD is read as the merge to judge: first parent the base, second parent the PR head (the
-# order `git merge` and ship-pr's `commit-tree -p <base tip> -p <head>` give). Two tiers:
-#   compile  always: `dune build @check @test/operations/scans` (about 100 s from a fresh tree
+# order `git merge` and ship-pr's `commit-tree -p <base tip> -p <head>` give). Four tiers, run in
+# this order, the first failure ending the run:
+#   format   always: `tools/fmt-check.sh` with its scans off (the compile tier runs them): the
+#            formatter and the invalid-odoc check CI's `Formatting` job makes.
+#   compile  always: `dune build @check @test/operations/scans` (about 140 s from a fresh tree
 #            on mac-studio: the compile and the repository scans, which read the repository
 #            itself -- dune stanzas, sources, scripts, Markdown notes and docs, goldens -- so
 #            the config makes every shared path an input).
+#   tests    always: the per-test aliases the PR's change reaches, as the pre-push run lists them
+#            (`tools/test-run.sh prepush --since MERGE_BASE..HEAD_SIDE --list`: affected's default
+#            list without its `slow-` and `train-` members), built by `dune build -j 4`. The
+#            change is read from the two REVISIONS, never from the tree, and the reach from the
+#            tree: so ship-pr's build of the base alone (below) asks about the same change and
+#            runs the base's own copies of those tests. Three answers run less than the list:
+#              - no per-test alias reached: nothing to run, the tier passes;
+#              - CROSS-CUTTING (the list is most of the suite): its first tier runs
+#                (`prepush --referenced-only`) when that is narrow, nothing when it is wide too.
+#                The rest is OWED, said on a line of its own: the suite is longer than this
+#                build's bound, so a cross-cutting change runs it before the merge on a CPU-only
+#                box and names the run in the PR body (AGENTS.md), and the nightly CI run and the
+#                integration loop read the merged tip;
+#              - INCOMPLETE (a changed path is UNMAPPED): what the list holds runs, and the gap
+#                is OWED the same way. A mapping gap is `affected`'s to close, not a reason to
+#                refuse the merge that met it;
+#              - a list of more than TESTS_MAX aliases (200, sized below): it does not run, and
+#                is OWED: such a build would not fit the bound. A cross-cutting change's first
+#                tier is held to the same length.
+#            A list that cannot be read at all (prepush refusing for another reason, a failed
+#            or unanswered ask of either list, a HEAD with no two sides) fails the tier: nothing
+#            here guesses what to run.
 #   shell    only when a path BOTH sides changed since their merge base matches `*.sh`: the
 #            whole path, `*` crossing `/`, as the config's `input` globs read, a path a rename on
 #            either side touched (git's -M detection) counting by its other name too -- the merge
@@ -22,23 +47,26 @@
 #            (measured in docs/agent-notes/build-and-test.md) and needs nothing the whole tier
 #            does not. The members run four at once (SHELL_JOBS, gh-ocannl-2002): the slow ones
 #            wait on their fixtures more than they compute.
-# The selection is a fail-closed allowlist: the shell tier is skipped only when HEAD is a
+# The shell tier's selection is a fail-closed allowlist: it is skipped only when HEAD is a
 # two-parent merge, its merge base and both sides' changes were read, git listed every changed
 # path unquoted, and no path both sides changed matches `*.sh` by either name. Anything else --
-# a one-parent HEAD, a failed git read, a path git had to quote -- runs every tier. The scope is
-# one too: the tier narrows only when each matching path, asked alone, reaches a member of the
-# tier, and the ask for them all answers. An ask that fails (test-harnesses.sh refuses a line of
-# `affected --harnesses` it does not recognize, a path reading as an option, a failed `affected`),
-# a matching path no member reaches, or a scoped run refused before any member started (exit 2)
-# runs the whole tier, never less.
+# a one-parent HEAD, a failed git read, a path git had to quote -- runs the whole shell tier. The
+# scope is one too: the tier narrows only when each matching path, asked alone, reaches a member
+# of the tier, and the ask for them all answers. An ask that fails (test-harnesses.sh refuses a
+# line of `affected --harnesses` it does not recognize, a path reading as an option, a failed
+# `affected`), a matching path no member reaches, or a scoped run refused before any member
+# started (exit 2) runs the whole tier, never less.
 # The shared-red comparison (ship-pr's build of the base alone) stays like with like: that build
-# carries the merge's two parents on the base's tree, so it reads the same two sides here and
-# narrows to the same paths, the reach read from the base's text. A reach the two trees answer
-# differently prints lines the base's log lacks, which ship-pr reads as the merge's own failure:
-# a refusal, never a red waved through as shared. Tier pass lines omit elapsed time so
-# different run durations do not create a difference in that comparison (gh-ocannl-1950).
-# --all runs every tier whatever HEAD is. --plan prints the selection, asking what it reaches
-# (no slot, no dune), and runs nothing.
+# carries the merge's two parents on the base's tree, so it reads the same two sides here, asks
+# about the same change and narrows to the same paths, the reach read from the base's text. A
+# reach the two trees answer differently prints lines the base's log lacks, which ship-pr reads
+# as the merge's own failure: a refusal, never a red waved through as shared. So what this
+# script prints of a run is the same for the same failure: tier lines omit elapsed time
+# (gh-ocannl-1950), and the tests tier prints neither its list nor a count (a PR that adds a
+# test lists one alias more than the base alone does); `--plan` shows the command that lists it.
+# --all runs the whole shell tier whatever HEAD is. --plan prints the selection, asking what the
+# shell tier reaches (no slot, no dune), and runs nothing; the tests tier's list needs dune, so
+# --plan names the command that asks for it instead of running it.
 #
 # Toolchain: a non-interactive shell can lack the profile that puts the opam switch on PATH
 # (on mac-studio `zsh -c` resolves opam but not dune). When `dune` does not resolve, this sources
@@ -63,6 +91,13 @@ SHELL_GLOB='*.sh'
 # The shell tier's members run this many at once (tools/test-harnesses.sh --jobs): the width
 # of the `-j 4` build the slot this runs in is sized for, and what the bound was measured at.
 SHELL_JOBS=4
+# The tests tier's build width: the same `-j 4`.
+TEST_JOBS=4
+# The longest list the tests tier builds. Sized on 2026-11-13 from a fresh clone at `-j 4`: the
+# 411 aliases of `arrayjit/lib/low_level.ml`'s first tier, the widest list `affected` still calls
+# narrow, took 661 s on mac-studio and 731 s on minix-amd-linux, about 1.7 s an alias, which alone
+# is most of a 30-minute bound. 200 aliases is under six minutes, and a longer list is OWED.
+TESTS_MAX=200
 
 # read_side FROM TO sets side_names (every path the diff names, both names of a rename, one per
 # line) and side_pairs (each rename as OLD<TAB>NEW, one per line). Status 1: git did not answer;
@@ -116,22 +151,21 @@ scope_tier() {
 # `scoped`, `reach` and `asked` (or `scope_why`), and prints what it read.
 select_tiers() {
   shell=1 scoped=0 scope_why= reach= asked=() scripts=()
-  if [ "$all" = 1 ]; then why='--all'; return; fi
-  local base head mb base_names base_pairs both p old new other n=0 rc=0 hit=
-  if ! base=$(git -C "$root" rev-parse --verify --quiet 'HEAD^1^{commit}') ||
-     ! head=$(git -C "$root" rev-parse --verify --quiet 'HEAD^2^{commit}'); then
-    why='HEAD is not a two-parent merge, so every tier runs'
+  local base_names base_pairs both p old new other n=0 rc=0 hit=
+  if [ -z "$base" ]; then
+    [ "$all" = 0 ] || { why='--all'; return; }
+    why='HEAD is not a two-parent merge, so the whole shell tier runs'
     return
   fi
-  echo "$me: HEAD merges ${head:0:8} into ${base:0:8}"
-  mb=$(git -C "$root" merge-base "$base" "$head") || rc=1
+  if [ "$all" = 1 ]; then why='--all'; return; fi
+  [ -n "$mb" ] || rc=1
   [ "$rc" != 0 ] || read_side "$mb" "$base" || rc=$?
   base_names=${side_names-} base_pairs=${side_pairs-}
   [ "$rc" != 0 ] || read_side "$mb" "$head" || rc=$?
   case $rc in
     0) ;;
-    3) why='git quoted a path one side changed, so every tier runs'; return ;;
-    *) why='the paths each side changed could not be read, so every tier runs'; return ;;
+    3) why='git quoted a path one side changed, so the whole shell tier runs'; return ;;
+    *) why='the paths each side changed could not be read, so the whole shell tier runs'; return ;;
   esac
   both=$(LC_ALL=C comm -12 <(printf '%s' "$base_names" | LC_ALL=C sort -u) \
     <(printf '%s' "$side_names" | LC_ALL=C sort -u))
@@ -169,8 +203,72 @@ EOF
   why="none of the $n path(s) changed on both sides matches $SHELL_GLOB, by either name of a rename"
 }
 
+# read_parents sets `base` and `head`, the merge's two parents, and `mb`, their merge base; each is
+# empty when it could not be read (`mb` alone: git did not answer).
+read_parents() {
+  base= head= mb=
+  base=$(git -C "$root" rev-parse --verify --quiet 'HEAD^1^{commit}') &&
+    head=$(git -C "$root" rev-parse --verify --quiet 'HEAD^2^{commit}') || { base= head=; return; }
+  echo "$me: HEAD merges ${head:0:8} into ${base:0:8}"
+  mb=$(git -C "$root" merge-base "$base" "$head") || mb=
+}
+
+# ask_tests asks the pre-push list of the head's change and sets `tests`: `list` (run
+# $tests_dir/list, with `tests_owed` saying what it leaves out, if anything), `owed` (nothing to
+# run here), or `unread`, with `tests_why`. The change is the two revisions' (MERGE_BASE..HEAD_SIDE),
+# so the build of the base alone asks about the same one. The ask's own output is kept in
+# $tests_dir/ask: it names the list and its size, which differ between a merge and its base.
+ask_tests() {
+  local rc=0 verdict
+  tests= tests_owed= tests_why=
+  if [ -z "$mb" ]; then
+    tests=unread tests_why='HEAD has no two sides with a merge base, so what the change reaches cannot be asked'
+    return
+  fi
+  "${BASH:-bash}" "$root/tools/test-run.sh" prepush --since "$mb..$head" --list \
+    >"$tests_dir/list" 2>"$tests_dir/ask" </dev/null || rc=$?
+  verdict=$(sed -n 's/^affected: verdict=//p' "$tests_dir/ask" | tail -n 1)
+  case $rc/$verdict in
+    0/ok) tests=list ;;
+    3/incomplete) tests=list tests_owed='the list is INCOMPLETE (a changed path is UNMAPPED), so what that path reaches' ;;
+    2/cross-cutting | 2/cross-cutting,incomplete)
+      rc=0
+      "${BASH:-bash}" "$root/tools/test-run.sh" prepush --referenced-only --since "$mb..$head" --list \
+        >"$tests_dir/list" 2>"$tests_dir/ask-first" </dev/null || rc=$?
+      # The first tier's own verdict, the last trailer of this ask: narrow (ok), incomplete, or
+      # wide (cross-cutting again, which prepush refuses with 2). Any other answer -- a failed
+      # query, a lock refusal, no trailer -- is no reading of the tier and fails it.
+      verdict=$(sed -n 's/^affected: verdict=//p' "$tests_dir/ask-first" | tail -n 1)
+      case $rc/$verdict in
+        0/ok) tests=list tests_owed='the change is CROSS-CUTTING, so every per-test alias past its first tier' ;;
+        3/incomplete) tests=list tests_owed='the change is CROSS-CUTTING and its first tier INCOMPLETE (a changed path is UNMAPPED), so every per-test alias past what that tier holds' ;;
+        2/cross-cutting | 2/cross-cutting,incomplete)
+          tests=owed tests_owed='the change is CROSS-CUTTING with no narrow first tier, so the whole list' ;;
+        *)
+          cat "$tests_dir/ask-first" >>"$tests_dir/ask"
+          tests=unread tests_why="tools/test-run.sh prepush --referenced-only --since ${mb:0:8}..${head:0:8} --list exited $rc with no verdict this script reads" ;;
+      esac ;;
+    *) tests=unread tests_why="tools/test-run.sh prepush --since ${mb:0:8}..${head:0:8} --list exited $rc with no verdict this script reads" ;;
+  esac
+  # The bound's share: a list longer than TESTS_MAX does not run, whichever answer it came from.
+  if [ "$tests" = list ] && [ "$(grep -c . "$tests_dir/list")" -gt "$TESTS_MAX" ]; then
+    case $tests_owed in
+      *CROSS-CUTTING*) tests_owed="the change is CROSS-CUTTING and its first tier is longer than the $TESTS_MAX aliases this build runs, so the whole list" ;;
+      *) tests_owed="the list is longer than the $TESTS_MAX aliases this build runs, so the whole list" ;;
+    esac
+    tests=owed
+  fi
+}
+
+read_parents
 select_tiers
+echo "$me: format tier: tools/fmt-check.sh, its scans off (always)"
 echo "$me: compile tier: dune build @check @test/operations/scans (always)"
+if [ -n "$mb" ]; then
+  echo "$me: tests tier: the per-test aliases the head's change reaches, by tools/test-run.sh prepush --since ${mb:0:8}..${head:0:8} --list (always)"
+else
+  echo "$me: tests tier: UNREAD -- HEAD has no two sides with a merge base, so the tier fails"
+fi
 if [ "$shell" = 1 ]; then
   echo "$me: shell tier: SELECTED -- $why"
   if [ "$scoped" = 1 ]; then
@@ -198,12 +296,43 @@ if ! command -v dune >/dev/null 2>&1; then
   command -v dune >/dev/null 2>&1 || { echo "$me: no dune on PATH even after opam env" >&2; exit 1; }
 fi
 cd "$root" || exit 1
+OCANNL_TOOL_FMT_CHECK_SCANS=0 tools/fmt-check.sh </dev/null || {
+  rc=$?
+  echo "$me: format tier FAILED (tools/fmt-check.sh exit $rc)" >&2
+  exit 1
+}
+echo "$me: format tier passed"
 dune build --root . @check @test/operations/scans || {
   rc=$?
   echo "$me: compile tier FAILED (dune exit $rc)" >&2
   exit 1
 }
 echo "$me: compile tier passed"
+tests_dir=$(mktemp -d "${TMPDIR:-/tmp}/merge-build-check.XXXXXX") || {
+  echo "$me: tests tier FAILED (cannot make a scratch directory)" >&2
+  exit 1
+}
+trap 'rm -rf "$tests_dir"' EXIT
+ask_tests
+if [ "$tests" = unread ]; then
+  [ ! -s "$tests_dir/ask" ] || cat "$tests_dir/ask" >&2
+  echo "$me: tests tier FAILED ($tests_why)" >&2
+  exit 1
+fi
+[ -z "$tests_owed" ] ||
+  echo "$me: tests tier: OWED -- $tests_owed did not run here: a CPU-only box's run before the merge, named in the PR body, the nightly CI run and the integration loop cover it"
+if [ "$tests" = list ] && [ -s "$tests_dir/list" ]; then
+  targets=()
+  while IFS= read -r line; do [ -z "$line" ] || targets+=("$line"); done <"$tests_dir/list"
+  dune build --root . -j "$TEST_JOBS" "${targets[@]}" || {
+    rc=$?
+    echo "$me: tests tier FAILED (dune exit $rc)" >&2
+    exit 1
+  }
+elif [ "$tests" = list ]; then
+  echo "$me: tests tier: the change reaches no per-test alias"
+fi
+echo "$me: tests tier passed"
 if [ "$shell" = 1 ]; then
   rc=0
   if [ "$scoped" = 1 ]; then

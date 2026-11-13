@@ -262,8 +262,9 @@ in the `tools/*.sh` scripts (gh-ocannl-1111) and in the string literals of the O
   with staging#1172 broke `tools/test-test-run.sh`'s repeat leg. `.github/ship-pr-merge-build`
   therefore has ship-pr's `merge` build the PR head merged with master's tip before the merge call,
   whenever ANY path changed on both sides since their merge base, and refuse the merge when
-  `tools/merge-build-check.sh` fails there. That script always runs
-  `dune build @check @test/operations/scans`, about 100 s from a fresh tree on mac-studio, and adds
+  `tools/merge-build-check.sh` fails there. That script always runs the formatter gate, then
+  `dune build @check @test/operations/scans`, about 140 s from a fresh tree on mac-studio, then
+  the per-test aliases the PR's change reaches (the item after next), and adds
   the shell harness tier only when a shared path is a `*.sh`, narrowed to what the shared paths
   reach (the next item). Every path is an input
   because the scans read the repository itself: two notes edits that merge cleanly can still break
@@ -290,8 +291,9 @@ in the `tools/*.sh` scripts (gh-ocannl-1111) and in the string literals of the O
   the tier's `--jobs 4` (`SHELL_JOBS` in `tools/merge-build-check.sh`, `tools/test-harnesses.sh
   --jobs`, gh-ocannl-2002), `tools/merge-build-check.sh --all` took 404 s and 403 s: compile 105 s
   and 107 s, shell 299 s and 295 s. Shared-box numbers, at load about 5 peaking at 14 and 17.
-  `timeout` in `.github/ship-pr-merge-build` is 1200 s, three times that, sized from what load
-  does. `merge` records each build's duration in
+  `timeout` in `.github/ship-pr-merge-build` was 1200 s then, three times that, sized from what
+  load does; it is 1800 s since the format and tests tiers joined (the next item). `merge`
+  records each build's duration in
   `~/.local/state/ship-pr/merge-builds/<owner>--<name>.jsonl`; the wave before, all 26 were the
   compile tier alone and ran from 99 s to 204 s, and a third `--all` run with `DUNE_CACHE=disabled`
   still compiled in 102 s (396 s whole), so that spread is the box's and not a cold tree's. Twice
@@ -326,6 +328,44 @@ in the `tools/*.sh` scripts (gh-ocannl-1111) and in the string literals of the O
 
 ### Scan corpora, goldens and floors
 
+- The merge build also runs what the per-PR `Formatting` job and the affected part of the `Build`
+  shards read, so that it can become the merge gate (in wave-20261111 every head move waited
+  25 to 40 minutes on remote CI). Its format tier is `tools/fmt-check.sh` with the scans off, since
+  the compile tier runs them. Its tests tier builds, at `-j 4`, the list
+  `tools/test-run.sh prepush --since MERGE_BASE..HEAD_SIDE --list` prints: `affected`'s default
+  list for the head side's change, without its `slow-` and `train-` members. The range form is why
+  `prepush --since` takes `OLD..NEW`: `--since BASE` reads the change off HEAD and the tree, and
+  ship-pr's build of the base alone carries the merge's two parents on the BASE's tree, where
+  that change is empty. Asked by the two revisions, both builds list the same change and each
+  runs its own tree's copies of those tests, so a test already red on the base fails both the
+  same way and reads as the base's. For the same reason the tier prints neither its list nor a
+  count (a PR that adds a test lists one alias more than its base), and it calls dune directly:
+  `tools/test-run.sh run`'s digest carries a log path, a time and tallies no base-alone log
+  repeats. Three answers run less than the list, each saying so on an `OWED` line. A CROSS-CUTTING
+  change runs its first tier when that is narrow and nothing when it is wide too: the full suite
+  is longer than the build's bound, so such a change runs it before the merge on a CPU-only box
+  and names the run in the PR body, and the nightly CI run and the integration loop read the
+  merged tip. An INCOMPLETE list (a changed path UNMAPPED) runs what it holds: the gap is
+  `affected`'s to close, not a reason to refuse the merge that met it. A list that cannot be read
+  (a status and a verdict that do not belong together, no verdict line, a HEAD with no two sides)
+  fails the tier. A list of more than 200 aliases (`TESTS_MAX`) does not run either and is OWED,
+  a cross-cutting change's first tier included: that is the bound's share. Timed on 2026-11-13,
+  each tier from a fresh clone under a `--cpu` slot, on mac-studio at load 5 to 8 and on an idle
+  minix-amd-linux: format 4 s and 3 s, compile 136 s and 137 s, the whole shell tier 422 s and
+  344 s, and the tests tier on `low_level.ml`'s first tier, 411 aliases and the widest list
+  `affected` calls narrow, 661 s and 731 s, about 1.6 s and 1.8 s an alias. Uncapped that is
+  over 1200 s on both boxes, so the cap holds the slowest honest run near 990 s and 940 s (with
+  two asks of `affected`, about 50 s each), and `timeout` is 1800 s: 1.8 times that, nine times
+  an ordinary run (200 s and 179 s whole for a change reaching 96 aliases and no shell tier),
+  and the 30 minutes no CI job's cap passes. To re-time a tier, run it alone in a fresh clone:
+  `OCANNL_TOOL_FMT_CHECK_SCANS=0 tools/fmt-check.sh`, `dune build @check @test/operations/scans`,
+  `tools/test-run.sh run --targets-file LIST build -j 4` on the list
+  `tools/test-run.sh affected --referenced-only --files arrayjit/lib/low_level.ml` prints, and
+  `tools/test-harnesses.sh --shell --jobs 4`. To try a config or a change to the script before
+  it merges, ship-pr's dry run builds a pair of revisions as `merge` would:
+  `pr-review.sh merge-build --base REV --head REV --config FILE`. Under the default trigger it
+  builds only when both sides changed an input, so give the base side an edit of a path the
+  head side also changed.
 - Repository scans derive source membership through `Test_scan.Source_inventory` (gh-ocannl-871):
   the Dune rule declares `(sandbox always)` plus `(source_tree ../..)`, then calls
   `of_dune_sandbox ~workspace_root ~generated` with its executable, redirected target, and copied
