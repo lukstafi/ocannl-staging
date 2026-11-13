@@ -1,7 +1,8 @@
 # The checks that ship-pr's `pr-review.sh checks` and `merge` treat as advisory on this
 # repository's PRs, one ERE per line; a name any line matches is advisory. The lines replace the
 # script's default list, so the first spells the default names in. The second matches the macOS
-# legs of `ci` (per PR, `Build (macos-latest, 5.5.x, main)`): the maintainer's decision
+# legs of `ci` (`Build (macos-latest, 5.5.x, main)`; on a PR head only when someone dispatches
+# the matrix there, since `Build` left `pull_request` on 2026-11-13): the maintainer's decision
 # (lukstafi/ludics-lite#720, 2026-10-20) is that a PR merges without waiting for the macOS runner
 # queue, and the wave gate's interim no longer holds behind an older merge's run going only on
 # them. The ubuntu legs already run every test the macOS leg runs (the `main` shards together build

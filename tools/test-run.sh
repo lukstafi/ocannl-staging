@@ -79,10 +79,10 @@
 # (the same verdict, digest and exit status). `--start` uses `start` instead;
 # follow a successful launch with `wait last` or `wait DIR`. An empty kept
 # list exits 2: nothing started, so there is no run to wait for. It cannot be
-# combined with `--list`. `train-` members run in CI's `@train` shards on
-# every PR; no CI job runs `@slow`, so the `slow-` members left off are named
-# on stderr, each on a `prepush: slow:` line, for the caller to run those the
-# change exercises. `--list` prints the list instead (a valid --targets-file,
+# combined with `--list`. No per-PR CI job runs either family: the nightly
+# run builds `@train`, and no CI job runs `@slow`. So the `slow-` members left
+# off are named on stderr, each on a `prepush: slow:` line, and the `train-`
+# ones counted, for the caller to run those the change exercises. `--list` prints the list instead (a valid --targets-file,
 # empty when nothing is left) and runs nothing: the form for a
 # fleet leg, whose runner is one plain command line, `... execution leg ...
 # --file LIST -- env OCANNL_BACKEND=B tools/test-run.sh run --expect-backend B
@@ -93,8 +93,8 @@
 # cross-cutting|incomplete|cross-cutting,incomplete`, gh-ocannl-1921), never
 # from its prose: a stderr without that line, or one disagreeing with its exit
 # status, refuses too (exit 2). Nothing runs when `affected`
-# fails (exit 2) or says cross-cutting (exit 2: the PR's CI run owns the list
-# then, AGENTS.md), nor when its list is incomplete (exit 3: a changed path is
+# fails (exit 2) or says cross-cutting (exit 2: a full-suite run on a CPU-only
+# box owns the list then, AGENTS.md), nor when its list is incomplete (exit 3: a changed path is
 # UNMAPPED); `--list` then still prints what it found and exits 3. A list with
 # no `runtest-` alias runs nothing and exits 0. `--targets-file` is refused
 # (the list is affected's): name any further alias after `build`.
@@ -4233,7 +4233,7 @@ if [ "$sub" = prepush ]; then
   pp_harness=()
   pp_close() {
     if [ -n "$pp_scope" ]; then
-      echo "test-run: prepush: FIRST TIER ONLY (--referenced-only): any batch verdict covers only this tier; the full reach belongs to PR CI. Also run the tests exercising the change and its slow- aliases, named in the PR body." >&2
+      echo "test-run: prepush: FIRST TIER ONLY (--referenced-only): any batch verdict covers only this tier; the full reach belongs to a full-suite run on a CPU-only box before the merge. Also run the tests exercising the change and its slow- aliases, named in the PR body." >&2
     fi
     if [ ${#pp_harness[@]} -gt 0 ]; then
       {
@@ -4315,7 +4315,7 @@ if [ "$sub" = prepush ]; then
   if [ "$pp_tier" = 1 ]; then
     [ "$pp_verdict" = cross-cutting ] ||
       die "prepush: --referenced-only requires a complete CROSS-CUTTING default list; not cross-cutting: the pre-push run is plain prepush --since $pp_base; nothing run"
-    pp_scope="FIRST TIER ONLY (--referenced-only; full reach belongs to PR CI)"
+    pp_scope="FIRST TIER ONLY (--referenced-only; full reach belongs to a full-suite run on a CPU-only box)"
     pp_collect
     pp_full_slow=(${pp_slow[@]+"${pp_slow[@]}"})
     pp_full_train=(${pp_train[@]+"${pp_train[@]}"})
@@ -4323,7 +4323,7 @@ if [ "$sub" = prepush ]; then
     pp_query --referenced-only
   fi
   [ "$pp_cross" = 0 ] ||
-    die "prepush: this change is CROSS-CUTTING (above), so the pre-push run is not this list: the PR's CI run owns it but its slow- aliases; run those and the tests that exercise the change, named in the PR body, then dune build @check (AGENTS.md, gh-ocannl-1765); nothing run"
+    die "prepush: this change is CROSS-CUTTING (above), so the pre-push run is not this list: a full-suite run on a CPU-only box before the merge owns it but its slow- aliases; run those and the tests that exercise the change, named in the PR body with that run, then dune build @check (AGENTS.md, gh-ocannl-1765); nothing run"
   pp_collect
   if [ "$pp_tier" = 1 ]; then
     # CI runs no slow alias, including those ranked link-only in the full list.
@@ -4332,7 +4332,7 @@ if [ "$sub" = prepush ]; then
     pp_all=$pp_full_all
   fi
   {
-    printf 'test-run: prepush: %d of the %d alias(es) %s lists; left off: %d train- (CI'\''s @train shards run them on every PR) and %d slow-' \
+    printf 'test-run: prepush: %d of the %d alias(es) %s lists; left off: %d train- (the nightly CI run'\''s: run those the change exercises) and %d slow-' \
       "${#pp_keep[@]}" "$pp_all" "$pp_asked" "${#pp_train[@]}" "${#pp_slow[@]}"
     if [ ${#pp_slow[@]} -gt 0 ]; then
       printf ' (no CI job runs @slow: run those the change exercises, named in the PR body):\n'

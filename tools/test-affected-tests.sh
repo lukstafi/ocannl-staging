@@ -345,7 +345,7 @@ if harness_leg 'dune-project'; then
   # A first tier spanning most of the suite says so (gh-ocannl-1765), keeping the slow- aliases
   # no CI job runs local (slow-gen, slow-usesh); a narrow one does not.
   cross_label='a first tier over half the per-test aliases is called cross-cutting, a narrow one is not'
-  if [ "$rc" = 0 ] && grep -q '^affected: CROSS-CUTTING: 31 of the 31 per-test aliases rank first, so this change is cross-cutting: the PR'"'"'s CI run owns the full list but its 2 slow- alias(es), which no CI job runs: run those locally too;' "$err"; then
+  if [ "$rc" = 0 ] && grep -q '^affected: CROSS-CUTTING: 31 of the 31 per-test aliases rank first, so this change is cross-cutting: a full-suite run on a CPU-only box before the merge owns the full list but its 2 slow- alias(es), which no CI job runs: run those locally too;' "$err"; then
     affected --files lib/leaf.ml
     if [ "$rc" = 0 ] && [ -s "$out" ] && ! grep -q 'CROSS-CUTTING' "$err"; then report 0 "$cross_label"
     else report 1 "$cross_label" "a narrow change: exit $rc; $(tr '\n' '|' <"$err")"; fi
@@ -607,7 +607,7 @@ if harness_leg 'verdict trailer'; then
   affected --files lib/core.ml lib/leaf.ml lib/stubbed.ml lib/myppx.ml
   trailer
   if [ "$rc" = 0 ] && [ "$verdict" = cross-cutting ] && [ "$(wc -l <"$out" | tr -d ' ')" = 16 ] &&
-     grep -q '^affected: CROSS-CUTTING: 16 of the 31 per-test aliases are listed, 6 of them link-only, so this change is cross-cutting by its list, though only 10 rank first: the PR'"'"'s CI run owns the full list but its 2 slow- alias(es), which no CI job runs: run those locally too; locally run the tests that exercise the change, named in the PR body -- the 10 that rank first (--referenced-only) are where to start -- and `dune build @check`$' "$err"; then
+     grep -q '^affected: CROSS-CUTTING: 16 of the 31 per-test aliases are listed, 6 of them link-only, so this change is cross-cutting by its list, though only 10 rank first: a full-suite run on a CPU-only box before the merge owns the full list but its 2 slow- alias(es), which no CI job runs: run those locally too; locally run the tests that exercise the change, named in the PR body with that run -- the 10 that rank first (--referenced-only) are where to start -- and `dune build @check`$' "$err"; then
     report 0 "$vt_label"
   else report 1 "$vt_label" "exit $rc, trailer $verdict; $(tr '\n' '|' <"$err")"; fi
   # Without the list's threshold that change reads ok, as it did before it.

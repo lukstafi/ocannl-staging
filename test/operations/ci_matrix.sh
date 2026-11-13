@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Evaluate ci.yml's actual matrix expressions and execute its commit guard, and
-# read both workflows' triggers: the full matrix per PR and never on a master
-# push, ci-env.yml on both (gh-ocannl-1816).
+# read both workflows' triggers and guards: which jobs a pull request runs (two,
+# the build matrix not among them), never a master push; ci-env.yml on every
+# master push and per PR only for the opam inputs (gh-ocannl-1816).
 # Also run the three depext-listing steps against hermetic opam/dpkg stubs.
 # Requires only python3 and bash; run in CI's shell harness tier before opam setup.
 # ocannl-harness: standalone
@@ -93,7 +94,8 @@ def unfiltered_triggers(text, events, absent=()):
 
 
 def documentation_triggers(text):
-    # The full matrix gates PRs and never runs on a master push: a merge's
+    # The workflow runs per PR unfiltered (its two per-PR jobs are cheap, and
+    # Markdown holds compiled examples) and never on a master push: a merge's
     # verdict is ci-env.yml's (gh-ocannl-1816).
     unfiltered_triggers(text, ('pull_request',), absent=('push',))
 
@@ -129,6 +131,13 @@ def raw_jobs(text, event, windows=False, compiler=''):
 
 def matrix(text, event, windows=False, compiler=''):
     jobs = raw_jobs(text, event, windows, compiler)
+    # The build matrix carries a guard of its own: off the per-PR path, where
+    # ship-pr's local merge build is the gate. Where the guard does not select
+    # it, no job of the matrix runs, whatever its expressions name.
+    build = re.search(r'^  run:\n    if: (.*)$', text, re.M)
+    assert build, 'the build matrix has no guard, so it runs per PR'
+    if not expression(build[1], event, windows, compiler):
+        jobs = []
     # Every job but the matrix itself and the triage notifier (which runs
     # after all of them) is a side job the Windows fallback must skip: read
     # them from the workflow, so a new job that lacks the guard is refused.
@@ -187,7 +196,8 @@ def unshard(jobs):
     return sorted(collapsed), counts
 
 
-# Per PR: ubuntu carries both suites, macOS only `main` -- ONE
+# An ordinary dispatch (the matrix's default; per PR too, until the matrix
+# left `pull_request`): ubuntu carries both suites, macOS only `main` -- ONE
 # job on the scarce runners (gh-ocannl-1422). The schedule adds macOS `train`.
 normal = sorted([('ubuntu-latest', '5.5.x', 'main'), ('ubuntu-latest', '5.5.x', 'train'),
                  ('macos-latest', '5.5.x', 'main')])
@@ -253,8 +263,28 @@ def compiler_input(text):
     return options, default[0]
 
 
-def controls(text):
+# Which jobs a pull request runs is a decision, so it is a list: the Dune
+# floor and a torch install are what a developer box does not have. Every
+# other job reads on the schedule what ship-pr's merge build read at the merge.
+def per_pr_jobs(text):
+    selected = []
+    for job in job_keys(text):
+        if job == 'notify-triage-routine':
+            continue
+        guard = re.search(r'^  ' + re.escape(job) + r':\n    if: (.*)$', text, re.M)
+        assert guard, job + ' selection missing'
+        if expression(guard[1], 'pull_request'):
+            selected.append(job)
+    return sorted(selected)
+
+
+PER_PR = ['promotion-floor', 'torch-runner']
+
+
+def controls(text, extra=()):
     documentation_triggers(text)
+    # EXTRA: a job a control adds on purpose, carrying the per-PR guard.
+    assert per_pr_jobs(text) == sorted(PER_PR + list(extra)), 'a pull request runs %s' % per_pr_jobs(text)
     # Opt-in stays false in the actual dispatch schema, not just this evaluator.
     option = text.split('      windows_only:\n', 1)[1].split('      expected_sha:', 1)[0]
     assert 'default: false' in option, 'fallback must be opt-in'
@@ -262,7 +292,8 @@ def controls(text):
     # Inputs are empty on every other event; no value of either may narrow them.
     for option in (False, True):
         for compiler in [''] + compilers:
-            assert matrix(text, 'pull_request', option, compiler) == (normal, True), 'pull_request'
+            assert matrix(text, 'pull_request', option, compiler) == ([], True), \
+                'pull_request: no build matrix, and the ordinary side jobs'
             assert matrix(text, 'schedule', option, compiler) == (full, True), 'scheduled full coverage'
     assert matrix(text, 'workflow_dispatch', False, ordinary) == (normal, True), 'ordinary manual run'
     # The input's default IS the compiler of the ordinary matrix, read from it.
@@ -293,12 +324,15 @@ def extra_job(name, guard=''):
 controls(source)
 # The side-job list is read, not restated: a new job carrying the fallback
 # guard joins the selection unremarked (its unguarded twin is a mutant below).
-fallback_guard = re.search(r'^  fmt:\n(    if: .*\n)', source, re.M)[1]
-controls(extra_job('new-side-job', fallback_guard))
+fallback_guard = re.search(r'^  promotion-floor:\n(    if: .*\n)', source, re.M)[1]
+controls(extra_job('new-side-job', fallback_guard), extra=('new-side-job',))
 # A scheduled side job: the schedule, or a dispatch the fallback guard admits.
 scheduled_guard = re.search(r'^  harness-legs-alone:\n(    if: .*\n)', source, re.M)[1]
 assert scheduled_guard.startswith('    if: ' + SCHEDULED_GUARD), 'scheduled side-job guard moved'
 controls(extra_job('new-scheduled-job', scheduled_guard))
+
+
+print('PASS per PR ci.yml runs the Dune-floor promotion harnesses and the CPU-torch tests, and nothing else')
 print('PASS ci.yml runs per PR, unfiltered, and has no push trigger')
 print('PASS normal, scheduled and explicit Windows fallback matrix selections')
 print('PASS every ocaml_compiler option: the default is the ordinary matrix, another is one ubuntu job')
@@ -306,7 +340,7 @@ print('PASS every scheduled-only compiler dispatches as exactly its scheduled jo
 print('PASS side jobs are read from ci.yml: a new guarded job joins the selection')
 print('PASS a scheduled side job runs on the schedule and an ordinary dispatch, never per PR or in the fallback')
 print('PASS ubuntu main and train shards are exactly 1/N..N/N, over the aliases ci-shard.sh shards')
-print('PASS per PR macOS runs one job, main; the schedule adds its train job')
+print('PASS an ordinary dispatch runs one macOS job, main; the schedule adds its train job')
 print('PASS every build step piping into tee has pipefail; the PowerShell one exits with dune\'s status')
 second = '{"os": "ubuntu-latest", "ocaml-compiler": "5.5.x", "suite": "main", "shard": "2/2"},'
 train_second = '{"os": "ubuntu-latest", "ocaml-compiler": "5.5.x", "suite": "train", "shard": "2/2"},'
@@ -314,7 +348,11 @@ train_last = train_second.rstrip(',') + "]'"
 assert source.count(train_second) == 1 and source.count(',\n               ' + train_last) == 1, \
     'train 2/2 entries moved; update the mutants below'
 side_guard = "github.event_name != 'workflow_dispatch' || !inputs.windows_only && inputs.ocaml_compiler == '5.5.x'"
-assert source.count(side_guard) == 5, 'side-job guard text moved; update the mutants below'
+assert source.count(side_guard) == 2, 'side-job guard text moved; update the mutants below'
+scheduled_text = scheduled_guard.strip().removeprefix('if: ')
+assert source.count(scheduled_text) == 4, 'scheduled side-job guard text moved; update the mutants below'
+build_guard = "  run:\n    if: github.event_name != 'pull_request'\n"
+assert source.count(build_guard) == 1, 'build matrix guard moved; update the mutants below'
 compiler_axis = "&& format('[\"{0}\"]', inputs.ocaml_compiler)"
 assert compiler_axis in source, 'compiler axis text moved; update the mutants below'
 for label, mutant in (
@@ -327,12 +365,17 @@ for label, mutant in (
     ('schedule loses coverage', source.replace("github.event_name == 'schedule'", "github.event_name == 'never'")),
     ('schedule narrowed by dispatch input', source.replace("github.event_name == 'workflow_dispatch' && inputs.windows_only", 'inputs.windows_only')),
     ('schedule narrowed by compiler input', source.replace("github.event_name == 'workflow_dispatch' && inputs.ocaml_compiler", 'inputs.ocaml_compiler')),
-    ('duplicate formatting job', source.replace(side_guard, "github.event_name != 'never'", 1)),
-    ('harnesses in the Windows fallback', source.replace("  harnesses:\n    if: " + side_guard, "  harnesses:\n    if: github.event_name != 'never'")),
-    ('real-dune shell harnesses in the Windows fallback', source.replace("  harness-real-dune:\n    if: " + side_guard, "  harness-real-dune:\n    if: github.event_name != 'never'")),
+    ('the build matrix back on pull requests', source.replace(build_guard, '  run:\n', 1)),
+    ('the build matrix on pull requests through a guard that selects them',
+     source.replace(build_guard, "  run:\n    if: github.event_name != 'never'\n", 1)),
+    ('the build matrix off the schedule',
+     source.replace(build_guard, "  run:\n    if: github.event_name == 'workflow_dispatch'\n", 1)),
+    ('formatting in the Windows fallback', source.replace("  fmt:\n    if: " + scheduled_text, "  fmt:\n    if: github.event_name != 'never'")),
+    ('harnesses in the Windows fallback', source.replace("  harnesses:\n    if: " + scheduled_text, "  harnesses:\n    if: github.event_name != 'never'")),
+    ('real-dune shell harnesses in the Windows fallback', source.replace("  harness-real-dune:\n    if: " + scheduled_text, "  harness-real-dune:\n    if: github.event_name != 'never'")),
     ('Dune-floor promotion harnesses in the Windows fallback', source.replace("  promotion-floor:\n    if: " + side_guard, "  promotion-floor:\n    if: github.event_name != 'never'")),
     ('CPU-torch benchmark tests in the Windows fallback', source.replace("  torch-runner:\n    if: " + side_guard, "  torch-runner:\n    if: github.event_name != 'never'")),
-    ('formatting in the compiler dispatch', source.replace(side_guard, "github.event_name != 'workflow_dispatch' || !inputs.windows_only", 1)),
+    ('a per-PR side job in the compiler dispatch', source.replace(side_guard, "github.event_name != 'workflow_dispatch' || !inputs.windows_only", 1)),
     ('compiler dispatch builds the ordinary compiler', source.replace(compiler_axis, "&& '[\"5.5.x\"]'")),
     ('compiler dispatch keeps macOS', source.replace("&& '[\"ubuntu-latest\"]'", "&& '[\"ubuntu-latest\", \"macos-latest\"]'")),
     ('compiler dispatch keeps the 5.5 shards and train', source.replace("inputs.ocaml_compiler != '5.5.x'\n          && '[]'", "inputs.ocaml_compiler == 'never'\n          && '[]'")),
@@ -347,7 +390,7 @@ for label, mutant in (
      extra_job('new-scheduled-job', "    if: github.event_name == 'schedule' || github.event_name != 'never'\n")),
     ('a scheduled side job off the schedule',
      extra_job('new-scheduled-job', "    if: github.event_name == 'schedule' || github.event_name == 'never'\n")),
-    ('per-PR shard dropped', source[:source.rindex(second)] + source[source.rindex(second) + len(second):]),
+    ('ordinary-dispatch shard dropped', source[:source.rindex(second)] + source[source.rindex(second) + len(second):]),
     ('scheduled shard dropped', source.replace(second, '', 1)),
     ('shard renumbered', source.replace('"shard": "2/2"', '"shard": "2/3"', 1)),
     ('floor job sharded', source.replace('"ocaml-compiler": "5.3.x", "suite": "main"}', '"ocaml-compiler": "5.3.x", "suite": "main", "shard": "1/1"}')),
@@ -360,9 +403,9 @@ for label, mutant in (
     ('PowerShell build exits with the pipe status', source.replace('        exit $LASTEXITCODE\n', '', 1)),
     ('PowerShell build names its aliases as literals',
      source.replace("@($env:SUITE_TARGETS -split ' ')", '@default @runtest @bin-smoke', 1)),
-    ('per-PR train shard dropped', source.replace(',\n               ' + train_last, "]'", 1)),
+    ('ordinary-dispatch train shard dropped', source.replace(',\n               ' + train_last, "]'", 1)),
     ('scheduled train shard dropped', source.replace(train_second, '', 1)),
-    ('train back on macOS per PR', source[:source.rindex(train_last)] + train_second
+    ('train back on macOS in the ordinary dispatch', source[:source.rindex(train_last)] + train_second
      + ' {"os": "macos-latest", "ocaml-compiler": "5.5.x", "suite": "train"}]\'' + source[source.rindex(train_last) + len(train_last):]),
     ('scheduled macOS train dropped', source.replace('               {"os": "macos-latest", "ocaml-compiler": "5.5.x", "suite": "train"},\n', '', 1)),
     ('an unsharded ubuntu train beside its shards', source.replace(train_second, train_second + ' {"os": "ubuntu-latest", "ocaml-compiler": "5.5.x", "suite": "train"},', 1)),
@@ -379,24 +422,47 @@ for label, mutant in (
         raise AssertionError('accepted mutant: ' + label)
 
 
-# ci-env.yml, master's per-merge verdict (gh-ocannl-1816): on every master push
-# and every PR, unfiltered, never cancelling a push run.
+# ci-env.yml, master's per-merge verdict (gh-ocannl-1816): on every master
+# push, unfiltered, never cancelling a push run; per PR only where the change
+# is to what the clean room's switch is solved from, or to the workflow.
 env_source = (Path(sys.argv[1]).parent / 'ci-env.yml').read_text()
 
 
+ENV_PR_PATHS = ['*.opam', '*.opam.template', 'dune-project', '.github/workflows/ci-env.yml']
+
+
 def env_controls(text):
-    unfiltered_triggers(text, ('push', 'pull_request'))
+    unfiltered_triggers(text, ('push',))
+    trigger = text.split('\non:\n', 1)[1].split('\nconcurrency:', 1)[0]
+    blocks = re.findall(r'^  pull_request: *\n(.*?)(?=^  [a-z_]+:|\Z)', trigger, re.M | re.S)
+    assert len(blocks) == 1, 'pull_request trigger absent, repeated or unsupported'
+    lines = [line for line in blocks[0].splitlines() if line.strip() and not line.lstrip().startswith('#')]
+    # Only this shape is read: a `paths:` list of double-quoted patterns. Anything else (a
+    # paths-ignore, an unquoted or negated pattern) fails rather than being taken for a filter.
+    assert lines[:1] == ['    paths:'], 'ci-env.yml per PR is not filtered by a paths list: %s' % lines[:1]
+    assert all(re.fullmatch(r'      - "[^"!]+"', line) for line in lines[1:]), 'unsupported paths entry'
+    paths = [line.strip()[3:-1] for line in lines[1:]]
+    assert paths == ENV_PR_PATHS, 'ci-env.yml runs per PR for %s' % paths
     concurrency = text.split('\nconcurrency:\n', 1)[1].split('\njobs:', 1)[0] + '\n'
     assert "  cancel-in-progress: ${{ github.event_name == 'pull_request' }}\n" in concurrency, \
         'ci-env.yml cancels more than superseded PR runs'
 
 
 env_controls(env_source)
-print('PASS ci-env.yml runs on master push and per PR, unfiltered, cancelling only superseded PR runs')
+# GitHub's `*` does not cross `/`: the patterns reach the opam files only while
+# every one of them sits at the root.
+nested = subprocess.run(['git', '-C', str(Path(sys.argv[1]).resolve().parents[2]), 'ls-files', '--',
+                         '*/*.opam', '*/*.opam.template', '*/dune-project'],
+                        capture_output=True, text=True, check=True).stdout.split()
+assert not nested, 'opam inputs below the root, which the per-PR paths filter does not match: %s' % nested
+print('PASS ci-env.yml runs on every master push, and per PR only for the opam inputs and itself, cancelling only superseded PR runs')
 for label, mutant in (
     ('ci-env.yml without push', env_source.replace('  push:\n    branches:\n      - master\n', '', 1)),
     ('ci-env.yml push off master', env_source.replace('      - master\n', '      - main\n', 1)),
-    ('ci-env.yml PR skips documentation', env_source.replace('  pull_request:\n', '  pull_request:\n    paths-ignore:\n      - "docs/**"\n', 1)),
+    ('ci-env.yml back on every PR', env_source.replace('  pull_request:\n    paths:\n' + ''.join('      - "%s"\n' % p for p in ENV_PR_PATHS), '  pull_request:\n', 1)),
+    ('ci-env.yml per PR without dune-project', env_source.replace('      - "dune-project"\n', '', 1)),
+    ('ci-env.yml per PR by a paths-ignore', env_source.replace('  pull_request:\n    paths:\n', '  pull_request:\n    paths-ignore:\n', 1)),
+    ('ci-env.yml push filtered by paths', env_source.replace('    branches:\n      - master\n', '    branches:\n      - master\n    paths:\n      - "*.opam"\n', 1)),
     ('ci-env.yml cancels push runs', env_source.replace("cancel-in-progress: ${{ github.event_name == 'pull_request' }}", 'cancel-in-progress: true', 1)),
 ):
     assert mutant != env_source, label
@@ -443,8 +509,9 @@ def partitions(shards, whole):
 
 
 group = ('ubuntu-latest', '5.5.x', 'train')
-for event in ('pull_request', 'schedule'):
-    counts = unshard(sorted(raw_jobs(source, event)))[1]
+for event in ('workflow_dispatch', 'schedule'):
+    # The ordinary dispatch: the input's default compiler, not the empty input of another event.
+    counts = unshard(sorted(raw_jobs(source, event, False, compiler_input(source)[1])))[1]
     assert group in counts, '%s runs no ubuntu train shards' % event
     shards = train_shards(counts[group])
     assert partitions(shards, tier), '%s: the %d train shards %s are not a partition of %s' % (
