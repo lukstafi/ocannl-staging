@@ -40,7 +40,9 @@
 # `run` replays the plan into DIR. Each run starts in the environment dune
 # gives an action -- read afresh from `dune exec --no-build` (the build
 # context's PATH, OCAMLPATH, INSIDE_DUNE, DUNE_SOURCEROOT, ... over the
-# caller's environment), plus what dune adds per action and `exec` does not:
+# caller's environment; from dune 3.25 on, less the install staging area
+# `exec` adds and an action does not see, STAGED below), plus what dune adds
+# per action and `exec` does not:
 # a TMPDIR of its own (removed afterwards) and the build context in
 # BUILD_PATH_PREFIX_MAP; dune's per-action DUNE_ACTION_TRACE_DIR is not set.
 # Standard input is /dev/null unless the rule redirects it, as under dune, and
@@ -75,6 +77,7 @@ command -v python3 >/dev/null 2>&1 || { echo "replay-rules: python3 is required"
 exec python3 - "$@" <<'PY'
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -457,6 +460,40 @@ def interp(a, cwd, env, stdin, out, err, pred):
 # would add its own locale coercion (LC_CTYPE) to what it reports.
 DUMP = 'print map { "$_=$ENV{$_}\\0" } keys %ENV'
 
+# What `dune exec` adds to the build context's environment and, from dune 3.25 on, an action no
+# longer sees (gh-ocannl-2216): the shared install staging area `<build>/install/<ctx>`, consed
+# in front of each of these variables (dune's Install.Roots.add_to_env, which its bin/exec.ml
+# applies to exec's own environment only). An action declaring `(deps (package P))` sees a
+# staging area of that package's instead, which the replay does not make: the comparison with
+# dune's own run reads such a replay as REPLAY DIVERGED.
+STAGED = {'PATH': 'bin', 'CAML_LD_LIBRARY_PATH': 'lib/stublibs', 'OCAMLPATH': 'lib',
+          'OCAMLTOP_INCLUDE_PATH': 'lib/toplevel', 'OCAMLFIND_IGNORE_DUPS_IN': 'lib', 'MANPATH': 'man'}
+
+
+def stages_actions_apart(dune):
+    # Whether this dune keeps the install staging area out of its actions: 3.25 and later.
+    q = subprocess.run(dune_cmd(dune) + ['--version'], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                       stdin=subprocess.DEVNULL)
+    m = re.match(r'\s*(\d+)\.(\d+)', q.stdout.decode('utf8', 'replace'))
+    return bool(m) and (int(m.group(1)), int(m.group(2))) >= (3, 25)
+
+
+def unstage(env, staging):
+    # Takes the staging area's entry back off the front of each variable exec consed it onto,
+    # and unsets one that held only it.
+    same = lambda a, b: os.path.normcase(os.path.realpath(a)) == os.path.normcase(os.path.realpath(b))
+    for var, sub in STAGED.items():
+        v = env.get(var)
+        if not v:
+            continue
+        sep = ';' if os.name == 'nt' or ';' in v else ':'
+        first, _, rest = v.partition(sep)
+        if same(first, os.path.join(staging, *sub.split('/'))):
+            if rest or sep in v:
+                env[var] = rest
+            else:
+                del env[var]
+
 
 def record_outputs(fh, rule):
     for path, rel in zip(rule['targets'], rule['rel']):
@@ -506,6 +543,8 @@ def run(argv):
         sys.stderr.write(q.stderr.decode('utf8', 'replace')[-2000:])
         die(126, '`dune exec --no-build` did not give the action environment (exit %d)' % q.returncode)
     base.pop('DUNE_ACTION_TRACE_DIR', None)
+    if stages_actions_apart(p['dune']):
+        unstage(base, os.path.join(p['build_dir'], 'install', 'default'))
     # The shell that starts dune names the program it runs in `_`, and dune passes that on to
     # every action; the dune `exec` above was started from python, which sets none.
     if '_' not in base:
