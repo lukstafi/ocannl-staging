@@ -107,7 +107,7 @@ absent 'exec --no-build' "$leg_calls"
 LEG_DUNE_RC=0 run_leg cuda-native-ptx-rerun.sh
 [ "$leg_rc" -eq 0 ]
 [ "$(leg_verdict)" = 'cuda-native-ptx: verdict: holds (dune build @runtest @train: the suite passes at the native PTX target)' ]
-grep -qx 'build @runtest @train | backend=cuda ptx=native tf32= parity= materialize= fixture= credentials=' \
+grep -qx 'build --build-dir _build-native-ptx @runtest @train | backend=cuda ptx=native tf32= parity= materialize= fixture= credentials=' \
   "$leg_calls"
 # The shape of the 2026-11-06 rog-nv log (gh-ocannl-2005): two failing rules in one dune file and a
 # golden between them, each named, the header dune repeated for the golden counted once.
@@ -132,7 +132,7 @@ FAIL: bs_where_zero: no conditional branch on the select'"'"'s lines: false' LEG
   run_leg cuda-native-ptx-rerun.sh -j 3 @test/operations/runtest
 [ "$leg_rc" -eq 1 ]
 [ "$(leg_verdict)" = 'cuda-native-ptx: verdict: NATIVE TARGET RED (dune exited 1; 3 failed rules: branchless_select, cache_key_agreement.expected, branchless_select-no_hip_fast_math)' ]
-grep -q '^build -j 3 @test/operations/runtest | backend=cuda ptx=native ' "$leg_calls"
+grep -q '^build --build-dir _build-native-ptx -j 3 @test/operations/runtest | backend=cuda ptx=native ' "$leg_calls"
 LEG_DUNE_OUT='File "a.ml", line 1, characters 0-1:
 Error: Unbound value a
 File "b.ml", line 1, characters 0-1:

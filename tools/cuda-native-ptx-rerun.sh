@@ -6,8 +6,10 @@
 # reference of its own (lukstafi/ocannl-staging#1430's lane-0 transfer was wrong at compute_80 to
 # compute_90 and right at compute_120; gh-ocannl-1674's ptx_target_parity compares the two targets
 # on a few seeds in one process, this compares them on everything). tools/sweep.sh runs this after
-# each CUDA unit whose suite was green (its diagnostic legs), in the unit's own worktree and _build:
-# the ambient key re-executes every test action, and the next unit's floor run re-executes them back.
+# each CUDA unit whose suite was green (its diagnostic legs), in the unit's own worktree but in a
+# build directory of its own, `_build-native-ptx` (ignored by git, and by dune as a `_` directory):
+# the ambient key is part of every test action's dependencies, so in the unit's `_build` this run
+# re-executed every test action and left the next day's floor run nothing to reuse.
 #
 # Usage: tools/cuda-native-ptx-rerun.sh [dune build arguments...]   (from any directory; default
 #                                                                    `@runtest @train`, the
@@ -44,7 +46,8 @@ work=$(mktemp -d "${TMPDIR:-/tmp}/cuda-native-ptx.XXXXXX") ||
   verdict 2 "unavailable: no temporary directory"
 trap 'rm -rf "$work"' EXIT
 echo "=== cuda-native-ptx: dune build $* ==="
-OCANNL_BACKEND=cuda OCANNL_CUDA_PTX_TARGET=native dune build "$@" >"$work/out" 2>&1
+OCANNL_BACKEND=cuda OCANNL_CUDA_PTX_TARGET=native dune build --build-dir _build-native-ptx "$@" \
+  >"$work/out" 2>&1
 rc=$?
 cat "$work/out"
 [ "$rc" != 0 ] || verdict 0 "holds (dune build $*: the suite passes at the native PTX target)"
