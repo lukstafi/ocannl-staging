@@ -225,6 +225,25 @@ let raw_entries =
         "[scanner-refusal:a02da6b10b325cc5503fe4adf61da286] reaches the scanner-defect";
         "[scanner-refusal:01eec44b44e6e6a758bc7e95ef545443] Generated.init";
       ] );
+    ( "stanza_order.ml",
+      [
+        "[scanner-refusal:486695c03657d82f7e086a00621b636c] file whose tests";
+        "[scanner-refusal:61d738fcc3d650e8f79cf987b0379b72] test appended at";
+        "[scanner-refusal:1e198bd028e8a39c5c3977cc813d9834] place is accepted";
+        "[scanner-refusal:3d1333cd18c39cb238aab1d16996ce50] executable its variant";
+        "[scanner-refusal:8dd0857386f3de0a537872e7aa705a1c] under another test's";
+        "[scanner-refusal:3a563b87be6f7e65724b94db7fedf3a8] stanzas above the";
+        "[scanner-refusal:53db316fd2aa6169c9425879ad300d0c] marker that names";
+        "[scanner-refusal:0badf3981a0bc3b5bec0e55af1399e02] aggregate alias whose";
+        "[scanner-refusal:c554043991ab4078c3fcc6d153cad7e5] aggregate alias listing";
+        "[scanner-refusal:dd4065465913518a0ea00aab99fccf7b] without the marker";
+        "[scanner-refusal:d3dfdb8fb0682b0cfbabc46d11b2263f] carry the marker";
+        "[scanner-refusal:f9cc533c8648cd034b0c007802ee79ec] carrying the marker";
+        "[scanner-refusal:dc68d51c63f61fc901eeda55b3f33b53] at nothing else";
+        "[scanner-refusal:ae504ed146c49a8bb38aed572a735ab8] marker was handed";
+        "[scanner-refusal:1ce540048aa8e8e8011e29317c3c6002] read holds hundreds";
+        "[scanner-refusal:4b1c66381f4f192275a615d13f00d9eb] aggregate alias lists";
+      ] );
     ( "vendor_stub_arms_scan.ml",
       [
         "[scanner-refusal:99b67dac359b15961fd222795ccfdc9b] does not read";
