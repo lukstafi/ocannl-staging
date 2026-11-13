@@ -67,10 +67,10 @@
 #                                                      # (tools/affected-tests.sh)
 #   tools/test-run.sh aliases PATH...                 # a test's per-test aliases, by family;
 #                                                      # runs none
-#   tools/test-run.sh prepush --since BASE [--referenced-only] [--start] [--cap N] [--test-cap N] [--expect-backend B]...
+#   tools/test-run.sh prepush --since BASE|OLD..NEW [--referenced-only] [--start] [--cap N] [--test-cap N] [--expect-backend B]...
 #                             [build [DUNE OPTIONS...]] # the pre-push run: affected's default
 #                                                      # list without slow-/train-, as `run`
-#   tools/test-run.sh prepush --since BASE --list      # that list, one alias per line; runs none
+#   tools/test-run.sh prepush --since BASE|OLD..NEW --list  # that list, one alias per line; runs none
 #
 # `prepush --since BASE` (gh-ocannl-1829) is the pre-push run as one command:
 # `affected --since BASE`'s default list (link-only aliases included) without
@@ -108,6 +108,15 @@
 # refusal alike, for the caller to run before pushing. They change no exit
 # status. A change reaching no harness (most `.ml`-only ones) prints no such
 # line; an `affected --harnesses` that fails runs nothing (exit 2).
+#
+# `prepush --since OLD..NEW` asks `affected OLD..NEW` instead, its range form:
+# the change between two revisions, whatever HEAD and the tree are, with the
+# reach still read from the tree. It is for a caller whose change no branch
+# names: tools/merge-build-check.sh asks MERGE_BASE..HEAD_SIDE of a merge
+# commit, and of the base alone under the same two parents, so both builds
+# list the same change. Everything else is as for a base; the closing harness
+# line names no one command, since tools/test-harnesses.sh --affected takes a
+# base or paths.
 #
 # `prepush --referenced-only` (gh-ocannl-2072) requires a complete default
 # CROSS-CUTTING verdict, then asks affected for its first tier:
@@ -4178,7 +4187,7 @@ shift
 # verdict stands for a list that was not the pre-push one without saying
 # FIRST TIER ONLY.
 if [ "$sub" = prepush ]; then
-  pp_usage='prepush --since BASE [--referenced-only] [--list | [--start] [--cap N] [--test-cap N] [--expect-backend B]... [build [DUNE OPTIONS...]]]'
+  pp_usage='prepush --since BASE|OLD..NEW [--referenced-only] [--list | [--start] [--cap N] [--test-cap N] [--expect-backend B]... [build [DUNE OPTIONS...]]]'
   pp_base= pp_print=0 pp_mode=run pp_run_opts=() pp_tier=0
   while [ $# -gt 0 ]; do
     case $1 in
@@ -4200,6 +4209,15 @@ if [ "$sub" = prepush ]; then
   done
   [ -n "$pp_base" ] || die "prepush: --since BASE is required (the base branch, e.g. the staging remote's master)
   usage: tools/test-run.sh $pp_usage"
+  # What affected is asked. A base branch is its `--since BASE`: the change
+  # from where HEAD left BASE. A range OLD..NEW is its own positional form:
+  # the change between two revisions, whatever HEAD and the tree are, for a
+  # caller whose change no branch names (tools/merge-build-check.sh: the head
+  # side of a merge, asked the same way of the merged tree and of the base's).
+  case $pp_base in
+    *..*) pp_since=("$pp_base") pp_asked="affected $pp_base" ;;
+    *) pp_since=(--since "$pp_base") pp_asked="affected --since $pp_base" ;;
+  esac
   if [ "$pp_print" = 1 ] && { [ $# -gt 0 ] || [ ${#pp_run_opts[@]} -gt 0 ] || [ "$pp_mode" = start ]; }; then
     die "prepush: --list prints the list and runs nothing, so it takes no run option or dune argument
   usage: tools/test-run.sh $pp_usage"
@@ -4222,8 +4240,11 @@ if [ "$sub" = prepush ]; then
         printf 'test-run: prepush: %d harness command(s) this change reaches, named here and NOT run (they are no dune aliases, so no part of prepush'\''s list):\n' \
           "${#pp_harness[@]}"
         printf 'test-run: prepush: harness: %s\n' "${pp_harness[@]}"
-        printf 'test-run: prepush: run them before pushing, as one command that takes its own --cpu slot: tools/test-harnesses.sh --affected --since %s\n' \
-          "$pp_base"
+        case $pp_base in
+          *..*) printf 'test-run: prepush: run them before pushing: each line above is a command; tools/test-harnesses.sh --affected runs a base'"'"'s or named paths'"'"', not a range'"'"'s\n' ;;
+          *) printf 'test-run: prepush: run them before pushing, as one command that takes its own --cpu slot: tools/test-harnesses.sh --affected --since %s\n' \
+               "$pp_base" ;;
+        esac
       } >&2
     fi
     rm -rf "$pp_dir"
@@ -4231,12 +4252,12 @@ if [ "$sub" = prepush ]; then
   trap pp_close EXIT
   pp_query() {
     pp_rc=0
-    bash "$runner_root/tools/test-run.sh" affected "$@" --since "$pp_base" >"$pp_dir/affected" 2>"$pp_dir/affected.err" ||
+    bash "$runner_root/tools/test-run.sh" affected "$@" "${pp_since[@]}" >"$pp_dir/affected" 2>"$pp_dir/affected.err" ||
       pp_rc=$?
     cat "$pp_dir/affected.err" >&2
     case $pp_rc in
       0 | 3) ;;
-      *) die "prepush: affected --since $pp_base exited $pp_rc (above); nothing run" ;;
+      *) die "prepush: $pp_asked exited $pp_rc (above); nothing run" ;;
     esac
     # The verdict is affected's trailer (gh-ocannl-1921; tools/affected-tests.sh
     # states it), never its prose: the one `affected: verdict=` line, which is
@@ -4245,17 +4266,17 @@ if [ "$sub" = prepush ]; then
     # verdict to run on.
     pp_verdict=$(sed -n 's/^affected: verdict=//p' "$pp_dir/affected.err")
     [ "$(tail -n 1 "$pp_dir/affected.err")" = "affected: verdict=$pp_verdict" ] ||
-      die "prepush: affected --since $pp_base printed no verdict trailer (one 'affected: verdict=...' line, the last of its stderr, above); nothing run"
+      die "prepush: $pp_asked printed no verdict trailer (one 'affected: verdict=...' line, the last of its stderr, above); nothing run"
     pp_cross=0 pp_incomplete=0
     case $pp_verdict in
       ok) ;;
       cross-cutting) pp_cross=1 ;;
       incomplete) pp_incomplete=1 ;;
       cross-cutting,incomplete) pp_cross=1 pp_incomplete=1 ;;
-      *) die "prepush: affected --since $pp_base printed a verdict this runner does not know: '$pp_verdict' (ok, cross-cutting, incomplete or cross-cutting,incomplete); nothing run" ;;
+      *) die "prepush: $pp_asked printed a verdict this runner does not know: '$pp_verdict' (ok, cross-cutting, incomplete or cross-cutting,incomplete); nothing run" ;;
     esac
     [ "$pp_rc" = $((pp_incomplete * 3)) ] ||
-      die "prepush: affected --since $pp_base exited $pp_rc with the verdict '$pp_verdict' (incomplete is exit 3, and only it); nothing run"
+      die "prepush: $pp_asked exited $pp_rc with the verdict '$pp_verdict' (incomplete is exit 3, and only it); nothing run"
   }
   pp_query
   # The harness legs the change reaches (gh-ocannl-1929) are asked of
@@ -4264,11 +4285,11 @@ if [ "$sub" = prepush ]; then
   # named as this command ends (pp_close), whatever it then does: a refusal
   # below names them too, since they are the caller's to run either way.
   pp_hrc=0
-  bash "$runner_root/tools/test-run.sh" affected --harnesses --since "$pp_base" >"$pp_dir/harnesses" 2>"$pp_dir/harnesses.err" ||
+  bash "$runner_root/tools/test-run.sh" affected --harnesses "${pp_since[@]}" >"$pp_dir/harnesses" 2>"$pp_dir/harnesses.err" ||
     pp_hrc=$?
   if [ "$pp_hrc" != 0 ]; then
     cat "$pp_dir/harnesses.err" >&2
-    die "prepush: affected --harnesses --since $pp_base exited $pp_hrc (above), so the harness commands this change reaches are not known; nothing run"
+    die "prepush: $pp_asked --harnesses exited $pp_hrc (above), so the harness commands this change reaches are not known; nothing run"
   fi
   while IFS= read -r pp_line || [ -n "$pp_line" ]; do
     [ -z "$pp_line" ] || pp_harness+=("$pp_line")
@@ -4311,8 +4332,8 @@ if [ "$sub" = prepush ]; then
     pp_all=$pp_full_all
   fi
   {
-    printf 'test-run: prepush: %d of the %d alias(es) affected --since %s lists; left off: %d train- (CI'\''s @train shards run them on every PR) and %d slow-' \
-      "${#pp_keep[@]}" "$pp_all" "$pp_base" "${#pp_train[@]}" "${#pp_slow[@]}"
+    printf 'test-run: prepush: %d of the %d alias(es) %s lists; left off: %d train- (CI'\''s @train shards run them on every PR) and %d slow-' \
+      "${#pp_keep[@]}" "$pp_all" "$pp_asked" "${#pp_train[@]}" "${#pp_slow[@]}"
     if [ ${#pp_slow[@]} -gt 0 ]; then
       printf ' (no CI job runs @slow: run those the change exercises, named in the PR body):\n'
       printf 'test-run: prepush: slow: %s\n' "${pp_slow[@]}"
