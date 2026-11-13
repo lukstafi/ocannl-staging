@@ -143,6 +143,7 @@ The mechanics, traps and authoring recipes behind every rule here are in `docs/a
 - A **commit is one move toward the goal**, not one slice by artifact type: the logic change, its tests, its `.expected` goldens and the doc or agent-note it justifies belong in one commit. A goal usually takes several moves, merged with a merge commit that preserves the series
 - **Do NOT touch `CHANGES.md` in feature work** (gh-ocannl-807): the changelog is written in editorial passes from the durable records the work leaves (merge commits, PR bodies, issue comments); conventions in `docs/agent-notes/conventions.md`
 - When you notice unrelated code smells or design problems, file separate issues
+- A design decision taken without the maintainer is a comment on its issue, labelled `design-joint`, with a row in `docs/design/decisions.md`
 - Follow-up fixing commits are fine, and test-expectation promotions that span several topics can land in a final tests/promotions commit
 - When creating commits, include the work summary in the commit message and credit yourself as a co-author
 - Each commit should at least compile: loop `git checkout <rev> && dune build @check` over `git rev-list --reverse master..HEAD`
