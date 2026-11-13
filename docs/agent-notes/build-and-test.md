@@ -260,9 +260,14 @@ in the `tools/*.sh` scripts (gh-ocannl-1111) and in the string literals of the O
 - The merge itself builds the interactions that are cheap to catch. Two green PRs broke master
   together twice on 2026-10-15: staging#1139 with staging#1142 did not compile, and staging#1171
   with staging#1172 broke `tools/test-test-run.sh`'s repeat leg. `.github/ship-pr-merge-build`
-  therefore has ship-pr's `merge` build the PR head merged with master's tip before the merge call,
-  whenever ANY path changed on both sides since their merge base, and refuse the merge when
-  `tools/merge-build-check.sh` fails there. That script always runs the formatter gate, then
+  therefore has ship-pr's `merge` build the PR head merged with master's tip before the merge call
+  and refuse the merge when `tools/merge-build-check.sh` fails there. Since 2026-11-13 it does so
+  on EVERY merge (`trigger always`), a master that has not moved included, which makes it the
+  merge gate. Until then it built only when a path changed on both sides since their merge base
+  (the counts below are that trigger's). An older ship-pr reader does not know the word and merges
+  unbuilt where one side changed nothing (lukstafi/ludics#936), so a box whose skills checkout
+  predates lukstafi/ludics#1118 must not merge here: `git -C ~/ludics merge-base --is-ancestor
+  4cb442be HEAD` says whether it does. That script always runs the formatter gate, then
   `dune build @check @test/operations/scans`, about 140 s from a fresh tree on mac-studio, then
   the per-test aliases the PR's change reaches (the item after next), and adds
   the shell harness tier only when a shared path is a `*.sh`, narrowed to what the shared paths

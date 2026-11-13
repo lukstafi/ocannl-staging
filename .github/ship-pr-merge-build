@@ -1,9 +1,18 @@
 # ship-pr's build of the would-be merge commit (lukstafi/ludics-lite#611, landed by
-# lukstafi/ludics-lite#630). `pr-review.sh merge` reads this file from master: when master has
-# moved since the PR's merge base and a path BOTH sides changed is an input below, it builds the
-# PR head merged with master's tip in a scratch repository, runs `command` at its root inside the
-# box's run-time slot, and refuses the merge (exit 1, no waiver) when that fails. Without this
-# file a merge builds nothing.
+# lukstafi/ludics-lite#630). `pr-review.sh merge` reads this file from master: on EVERY merge
+# (`trigger always`, below) it builds the PR head merged with master's tip in a scratch
+# repository, runs `command` at its root inside the box's run-time slot, and refuses the merge
+# (exit 1, no waiver) when that fails. Without this file a merge builds nothing.
+#
+# Trigger. `always` makes this build the merge gate: it runs whatever the two sides changed, a
+# master that has not moved included, where the default (`same-input`) built only when a path
+# both sides changed was an input. Wave-20261111 paid a 25 to 40 minute remote CI cycle for every
+# head move; what this build reads locally, in about three minutes, is what lets those jobs leave
+# `pull_request`. A reader older than lukstafi/ludics#1118 does not know the word: it refuses the
+# config where both sides changed something and merges UNBUILT where one side changed nothing
+# (lukstafi/ludics#936). Every fleet box's skills checkout carried that reader on 2026-11-13,
+# when this line was added (b09b945f on mac-studio, macbook-pro, rog-nv-linux, minix-amd-linux
+# and tuf-amd-linux). A box set up later must carry it before it merges here.
 #
 # What it builds. tools/merge-build-check.sh runs four tiers on the merged tree, the first failure
 # refusing the merge: the formatter gate (CI's `Formatting` job), `dune build @check
@@ -12,7 +21,10 @@
 # harness tier that script reaches. The script's header says what each tier reads and what a
 # cross-cutting change is owed instead.
 #
-# Inputs -- the boundary. A path is an input when one glob matches the WHOLE repository path
+# Inputs. Under `trigger always` no input decides a build. The line stays for the trigger a
+# narrower future might name, and tools/merge-build-replay.py reads it to size one. What it
+# meant under `same-input`, and still says about the command's reach: a path is an input when
+# one glob matches the WHOLE repository path
 # (fnmatch, case-sensitive, `*` crossing `/`); a shared path renamed on either side counts by its
 # other name too. The one glob below makes EVERY path an input (gh-ocannl-1382): the command's
 # compile tier runs `@test/operations/scans`, which read the repository itself -- Markdown notes
@@ -22,9 +34,10 @@
 # both sides change one. Replayed over the 474 first-parent merges on master from 2026-09-19 to
 # 2026-10-19, the OCaml-and-scripts list this replaced built 166 of them, adding `*.md` would
 # build 238 and every path builds 245, at about 100 s each (tools/merge-build-replay.py replays a
-# history against any glob sets, these lines by default). What stays outside: a clash across
-# paths only ONE side changed, and one the compile tier cannot see (a runtime test's verdict);
-# both are the integration loop's, on master.
+# history against any glob sets, these lines by default). What stays outside the build under any
+# trigger: what the command does not run -- a test the change does not reach, a `slow-` or
+# `train-` alias, a GPU backend; those are the nightly CI run's and the integration loop's, on
+# master.
 #
 # Bound. `timeout` covers the command's slowest honest run: the format and compile tiers, the
 # widest list the tests tier can be handed, and the WHOLE shell tier, which every fail-closed
@@ -50,4 +63,5 @@
 # cost and how it finds dune when that environment lacks the opam switch.
 command tools/merge-build-check.sh
 input *
+trigger always
 timeout 1800

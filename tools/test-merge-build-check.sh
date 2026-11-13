@@ -596,9 +596,13 @@ if harness_leg 'the merge-build config runs this script, and every tracked path 
       [ "$hit" = 1 ] || { unmatched=$p; break; }
     done < <(git -C "$HERE/.." ls-files -z)
   fi
-  label="the config's command is this script, and its inputs match every tracked path"
+  label="the config's command is this script, it builds every merge, and its inputs match every tracked path"
   if ! grep -qxF "command tools/merge-build-check.sh" "$config"; then
     report 1 "$label" "no \`command tools/merge-build-check.sh\` line: $(cat "$config" 2>&1)"
+  elif ! grep -qxF "trigger always" "$config"; then
+    # The build is the merge gate only while it runs on every merge: under the default trigger a
+    # merge whose base did not move, or whose sides share no path, lands unbuilt.
+    report 1 "$label" "no \`trigger always\` line, so a merge whose two sides share no path would land unbuilt"
   elif [ ${#globs[@]} = 0 ] || [ "$n" = 0 ]; then
     report 1 "$label" "read ${#globs[@]} input glob(s) and $n tracked path(s): nothing was checked"
   elif [ -n "$unmatched" ]; then
