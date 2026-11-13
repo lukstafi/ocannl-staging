@@ -117,7 +117,7 @@ in the `tools/*.sh` scripts (gh-ocannl-1111) and in the string literals of the O
   (that ends the table and renders every row below it as pipe-delimited prose), no file unreachable
   from the index, and no bullet promoted into two files. Three of those were review findings on the
   split that created the files, each caught by a human reading carefully. What it costs when you
-  append here: end the bullet with punctuation, indent continuations exactly two spaces past their
+  add a note here: end the bullet with punctuation, indent continuations exactly two spaces past their
   bullet, keep one nesting level, keep every index row on one physical line, and give a new file its
   index row the day it appears. It also reads AGENTS.md for its pointers into these files: every
   `<note>.md#<anchor>` there must name a notes file and a heading that file has, since a rule whose
@@ -6298,12 +6298,28 @@ box.
   `let` -- is refused. A new decision on a node's role takes a set the pass fills, keyed by uid; one
   on a backend's kind reads `Context.backend_facts`.
 
-- Insert a new stanza in `test/operations/dune` beside its topical neighbours, never at the end of
-  the file. The file is grouped by subsystem rather than alphabetized, and the end is where every
-  concurrent branch appends, so two unrelated PRs that both append conflict on rebase. The same
-  holds for a member line in an aggregate alias (`slow`, `scans`): put it among related members,
-  not last, since the last line also carries the list's closing parentheses and every appender
-  edits it.
+- A new stanza in `test/operations/dune` goes where its test's name sorts, never at the end of the
+  file (gh-ocannl-2193). Below the marker comment `; ==== Tests, sorted by name` the stanzas are in
+  order of test name, and `stanza_order` (in `@test/operations/scans`) refuses one out of place,
+  naming where it belongs. The end of the file is where every concurrent branch appended, so two
+  unrelated PRs conflicted textually, GitHub built no merge-ref jobs for the conflicting one, and
+  the branch that lost the race paid a rebase and a whole verification cycle: 14 of the 46 workers
+  of wave-20261111 did. The rule this replaces, to place a stanza beside its topical neighbours,
+  was right and unchecked, and did not hold. Sorted, two additions conflict only when their names
+  are neighbours. The name a stanza sorts under is its test's: the `(name ...)` of a `(test)`,
+  `(executable)` or `(library)` stanza (the first of `(names ...)`), a rule's `runtest-`, `slow-`
+  or `train-` alias without that prefix, else its first target, and an alias stanza's own name or
+  first member likewise. Each is cut at its first `-` or `.`, so `foo`, its `foo-variant` rules
+  and `foo.actual` are one group, in any order inside it. A rule that serves another test's
+  executable under a name of its own sorts under its own name. The directory's machinery (the
+  config copy, the ambient gate, the aggregate aliases with their explanations) sits above the
+  marker and is not ordered. The members of every aggregate alias (`slow`, `scans`, the
+  hand-written `runtest` lists) are sorted as well, above the marker and below it, each member
+  once: the last line of such a list carries its closing parentheses, which every appender
+  edited. Since stanzas no longer sit beside their topical neighbours, a comment names the test
+  it refers to instead of saying `above` or `below`. Another directory opts in by carrying the
+  marker in its dune file; `required` in `stanza_order.ml` lists the files that must carry it, so
+  a marker lost in a merge does not turn the check off.
 
 - A mechanism a GPU policy gates gets a cc-runnable structural leg whenever its premise can be
   synthesized, beside the executed GPU legs (gh-ocannl-1275). Per-PR CI runs cc, and on cc a

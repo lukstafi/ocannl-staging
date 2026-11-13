@@ -14,9 +14,13 @@ timed, shipped or released, never from the transform or branch that intended to 
 
 **This file is an index.** The notes live in `docs/agent-notes/`, one file per subsystem, so that
 looking one trap up costs one file rather than all of them. Read the line below that matches what
-you are about to touch, then open that file. When promoting new knowledge, append to the matching
+you are about to touch, then open that file. When promoting new knowledge, add it to the matching
 file (2–6 lines, with file pointers) rather than here — the index only needs a new line if a file
-grows a topic its hooks do not already name. A fact another entry already owns gets a pointer to
+grows a topic its hooks do not already name. Place it by topic: extend the bullet that already owns
+the subject, or put a new bullet directly after the one it is closest to, under the heading it
+belongs to. Never add it as the last bullet of a file or a section merely because that is the end:
+the end is where every concurrent branch writes, so two unrelated notes there conflict textually
+and one of the two PRs pays a rebase and a verification cycle (gh-ocannl-2193). A fact another entry already owns gets a pointer to
 it, not a second statement (the one-owner rule, in conventions.md). The structure below is checked, by
 `agent_notes_structure` (gh-ocannl-691): a bullet ends in punctuation and its continuations sit two
 spaces in, every row of the table is one physical line, every backticked hook occurs in the file its

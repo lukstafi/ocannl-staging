@@ -1,0 +1,42 @@
+Test stanzas in order of test name (gh-ocannl-2193): below a dune file's marker comment a
+stanza sits where its test's name sorts, and every aggregate alias lists its members in
+order, so two branches that each add a test meet only when the names are neighbours. The
+counts go to stderr, since a tally in a golden moves with every test.
+
+every file that must carry the marker was handed to the scan: true
+the ordered part the scan read holds hundreds of stanzas, so the order claim is not vacuous: true
+no stanza is out of place and no aggregate alias lists its members out of order: true
+
+Controls, on files built to be refused:
+a file whose tests are in order of name is accepted: true
+a test appended at the end of the file is refused, with the place it belongs: true
+the same test in its place is accepted: true
+a test's executable, its variant rules and its golden diffs are one group, in any order: true
+a rule sorts under its per-test alias, so one filed under another test's name is refused: true
+stanzas above the marker are not ordered: true
+a stanza below the marker that names no test is refused: true
+an aggregate alias whose members are out of order is refused, above the marker too: true
+an aggregate alias listing a member twice is refused: true
+a file without the marker is left alone: true
+a file that must carry the marker and does not is refused: true
+a file carrying the marker twice is refused: true
+a key is cut at its first `-` or `.`, and at nothing else: true
+
+Synthetic controls: scanner refusal diagnostics exercised by this control golden:
+  [scanner-refusal:486695c03657d82f7e086a00621b636c] file whose tests
+  [scanner-refusal:61d738fcc3d650e8f79cf987b0379b72] test appended at
+  [scanner-refusal:1e198bd028e8a39c5c3977cc813d9834] place is accepted
+  [scanner-refusal:3d1333cd18c39cb238aab1d16996ce50] executable its variant
+  [scanner-refusal:8dd0857386f3de0a537872e7aa705a1c] under another test's
+  [scanner-refusal:3a563b87be6f7e65724b94db7fedf3a8] stanzas above the
+  [scanner-refusal:53db316fd2aa6169c9425879ad300d0c] marker that names
+  [scanner-refusal:0badf3981a0bc3b5bec0e55af1399e02] aggregate alias whose
+  [scanner-refusal:c554043991ab4078c3fcc6d153cad7e5] aggregate alias listing
+  [scanner-refusal:dd4065465913518a0ea00aab99fccf7b] without the marker
+  [scanner-refusal:d3dfdb8fb0682b0cfbabc46d11b2263f] carry the marker
+  [scanner-refusal:f9cc533c8648cd034b0c007802ee79ec] carrying the marker
+  [scanner-refusal:dc68d51c63f61fc901eeda55b3f33b53] at nothing else
+  [scanner-refusal:ae504ed146c49a8bb38aed572a735ab8] marker was handed
+  [scanner-refusal:1ce540048aa8e8e8011e29317c3c6002] read holds hundreds
+  [scanner-refusal:4b1c66381f4f192275a615d13f00d9eb] aggregate alias lists
+End of synthetic controls.
