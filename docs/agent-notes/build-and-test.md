@@ -269,13 +269,12 @@ in the `tools/*.sh` scripts (gh-ocannl-1111) and in the string literals of the O
   predates lukstafi/ludics#1118 must not merge here: `git -C ~/ludics merge-base --is-ancestor
   4cb442be HEAD` says whether it does. That script always runs the formatter gate, then
   `dune build @check @test/operations/scans`, about 140 s from a fresh tree on mac-studio, then
-  the per-test aliases the PR's change reaches (the item after next), and adds
-  the shell harness tier only when a shared path is a `*.sh`, narrowed to what the shared paths
-  reach (the next item). Every path is an input
+  the per-test aliases the PR's change reaches (the item after next), and then the shell
+  harnesses that change reaches (the next item). Every path is an input
   because the scans read the repository itself: two notes edits that merge cleanly can still break
   `agent_notes_structure`, push `AGENTS.md` past `agents_md_size`'s cap, or desynchronize a scan
   golden (gh-ocannl-1382). In the month to 2026-10-19, 245 of 474 merges shared a path (166 an OCaml
-  input or script, 238 counting Markdown) and 6 a script, so the expensive tier stays rare.
+  input or script, 238 counting Markdown) and 6 a script.
   Run on the two merge commits above, it refused the first in its compile tier and the second in
   its shell tier. A clash across paths only one side changed, or one only a runtime test sees, is
   outside that boundary. To check a merge by hand, run the script at the root of a checkout whose
@@ -291,8 +290,11 @@ in the `tools/*.sh` scripts (gh-ocannl-1111) and in the string literals of the O
   and a zone in `--since`/`--until`: git fills a bare date with the current time of day and a
   zoneless one with the local zone. `tools/test-merge-build-replay.sh` pins its shell-tier replay
   to the script's own `--plan` merge by merge.
-- The merge build's shell tier runs what the overlap reaches, and its bound holds the whole tier
-  (gh-ocannl-1994). Sized on 2026-11-07 on mac-studio, under a `--cpu` slot from a fresh clone at
+- The merge build's harness tier runs the shell harnesses the PR's own change reaches, of every
+  group, and its bound holds the whole set (gh-ocannl-1994). Until 2026-11-13 it was a shell tier
+  that ran only when BOTH sides changed a script, the `--shell` group alone, because remote CI
+  read a PR's own change then and this build only the clash of two; the timings in the next
+  sentences are that tier's. Sized on 2026-11-07 on mac-studio, under a `--cpu` slot from a fresh clone at
   the tier's `--jobs 4` (`SHELL_JOBS` in `tools/merge-build-check.sh`, `tools/test-harnesses.sh
   --jobs`, gh-ocannl-2002), `tools/merge-build-check.sh --all` took 404 s and 403 s: compile 105 s
   and 107 s, shell 299 s and 295 s. Shared-box numbers, at load about 5 peaking at 14 and 17.
@@ -310,19 +312,32 @@ in the `tools/*.sh` scripts (gh-ocannl-1111) and in the string literals of the O
   failures compare without timing noise (gh-ocannl-1950); to recover the per-tier split, time
   `dune build --root . @check @test/operations/scans` and
   `tools/test-harnesses.sh --shell --jobs 4` separately under the same reservation.
-  When the trigger holds, the tier is
-  `tools/test-harnesses.sh --shell --affected --files PATH...` over every path changed on both sides,
-  both names of a rename, non-scripts too, so `affected --harnesses`'s mapping is asked and not
-  copied. `--shell` keeps only that group's members: a member of another group would need a
-  toolchain the tier does not promise and time the bound was not sized for, so a scoped run is
-  never more than the whole tier. The trigger itself stays `*.sh`, a shared non-script alone
-  building no shell tier, so `tools/merge-build-replay.py`'s shell-tier counts stand. The fallback
+  The tier is
+  `tools/test-harnesses.sh --affected --files PATH...` over every path the HEAD side changed since
+  the merge base, both names of a rename, a path the base side renamed by its other name too,
+  non-scripts included, so `affected --harnesses`'s mapping is asked and not copied. It names no
+  group: the per-PR `Formatting` job's harness batch is the `--toolchain` and `--promotion`
+  groups and the `Shell harnesses` job the `--shell` one, and the merge build has the toolchain
+  they need, since its format and compile tiers ran on it. A change reaching no member runs
+  none. `tools/merge-build-replay.py`'s shell-tier set follows: it counts the merges whose head
+  side changed a script, the ones the fail-closed rule can hand the whole set. Whole, the set
+  is 35 members: four at once from a fresh clone on 2026-11-13 it took 499 s on mac-studio at load
+  5 to 11 and 347 s on an idle minix-amd-linux (the `--toolchain` group alone 15 s and 11 s, the
+  `--promotion` group 109 s and 92 s), against the 422 s and 344 s of the shell group the next
+  item's bound was sized with. The slowest honest run is then about 1060 s and 950 s, 1.7 times
+  under the 1800 s bound. That run found one member the merge build could not have passed on
+  macOS: `tools/typecheck-scan-cases.sh` named its root by the logical path, and under `$TMPDIR`,
+  where ship-pr builds a merge, that is `/var/...` while dune's workspace is `/private/var/...`,
+  so dune refused every owning module ("is not in dune workspace"). It resolves the root with
+  `pwd -P` now, and its harness checks the tables through a symbolic link to the checkout. A
+  script a harness runs in a scratch checkout takes its root physically for the same reason.
+  The fallback
   is fail-closed: a failed ask, a line `--affected`'s allowlist refuses, a path reading as an
-  option, a scoped run refused before a member starts (exit 2), and a shared `*.sh` no member of
-  the tier reaches, each asked alone so one reached path cannot hide another, all run the whole
+  option, a scoped run refused before a member starts (exit 2), and a changed `*.sh` no member
+  reaches, each asked alone so one reached path cannot hide another, all run the whole
   tier. What the mapping answers is the policy: `scripts/harness-support.sh`, which every member
   loads, reaches the whole tier, and a manifest edit reaches the members naming
-  `tools/test-harnesses.sh` (three, about 30 s), which is why `tools/test-test-run.sh` compares the
+  `tools/test-harnesses.sh` (four members), which is why `tools/test-test-run.sh` compares the
   closing line of `prepush` without spelling that name. A harness named only in another's literal
   buys the slow member every edit of the named file; `tools/test-merge-build-check.sh` pins both
   answers. The nested slot needs nothing: `--list` takes none, and a run inside ship-pr's slot reuses

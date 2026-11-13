@@ -1583,7 +1583,7 @@ if harness_leg 'harness legs of this repository'; then
   [ -n "$ppx_modules" ] || report 1 'tensor/dune lists the ppx modules' 'no (modules ...) line in the ppx_ocannl stanza'
   for m in $ppx_modules; do
     raffected --files "tensor/$m.ml"
-    rhas "the ppx module $m reaches the #project legs" "tools/test-typecheck-scan-cases.sh --only '^(10|11):'"
+    rhas "the ppx module $m reaches the #project legs" "tools/test-typecheck-scan-cases.sh --only '^(10|11|16):'"
   done
   # The legs that selector picks are exactly the ones over the repository's
   # tables, as their names say: a new such leg must join the declaration.
@@ -1593,10 +1593,10 @@ if harness_leg 'harness legs of this repository'; then
     named=$(grep -F 'the repository tables' "$TMP/leg-names")
     if [ -n "$picked" ] && [ "$picked" = "$named" ]; then report 0 "'^(1|10):' selects exactly the legs over the repository tables"
     else report 1 "'^(1|10):' selects exactly the legs over the repository tables" "picked [$picked] named [$named]"; fi
-    picked=$(while IFS= read -r l; do [[ $l =~ ^(10|11): ]] && printf '%s\n' "$l"; done <"$TMP/leg-names")
+    picked=$(while IFS= read -r l; do [[ $l =~ ^(10|11|16): ]] && printf '%s\n' "$l"; done <"$TMP/leg-names")
     named=$(grep -F '#project' "$TMP/leg-names")
-    if [ -n "$picked" ] && [ "$picked" = "$named" ]; then report 0 "'^(10|11):' selects exactly the #project legs"
-    else report 1 "'^(10|11):' selects exactly the #project legs" "picked [$picked] named [$named]"; fi
+    if [ -n "$picked" ] && [ "$picked" = "$named" ]; then report 0 "'^(10|11|16):' selects exactly the #project legs"
+    else report 1 "'^(10|11|16):' selects exactly the #project legs" "picked [$picked] named [$named]"; fi
   else report 1 'tools/test-typecheck-scan-cases.sh lists its legs' "$(tail -n 3 "$TMP/legs")"; fi
   # Every declared selector of every harness selects some leg of it.
   bash "$root/tools/test-harnesses.sh" --list >"$TMP/members" || exit 2

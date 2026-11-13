@@ -27,14 +27,17 @@ NAME appends to it); a `@OTHER` element includes the globs of a set defined earl
 built-in one. `--set NAME` alone selects a built-in set, read from where it is defined in the
 replayed repository's working tree, never copied here:
   config      the `input` lines of `.github/ship-pr-merge-build` (what triggers the merge build);
-  shell-tier  `SHELL_GLOB` in `tools/merge-build-check.sh` (what selects its shell tier, which
-              that script decides on paths both sides changed, so this set always replays as
-              same-input, whatever `--trigger` says); as the script does, it also builds every merge where git would QUOTE a path either
-              side changed (a double quote, a backslash or a control character in
-              it), whatever the globs say.
+  shell-tier  `SHELL_GLOB` in `tools/merge-build-check.sh`: the merges whose HEAD side changed a
+              shell script, by either name of a rename on either side, whatever `--trigger`
+              says. Those are the merges whose harness tier that script holds to its fail-closed
+              rule (each changed script must reach a member, or the whole tier runs); the tier
+              itself also runs for a non-script that reaches a harness, which no glob replays.
+              As the script does, it also counts every merge where git would QUOTE a path either
+              side changed (a double quote, a backslash or a control character in it), whatever
+              the globs say.
 With no `--set`, both built-ins are replayed. `--trigger` defaults to the config's `trigger`
 line (same-input when it has none, or when there is no config); it governs every set but
-`shell-tier`, which counts the merges whose shell tier the script would select once built.
+`shell-tier`, which follows the script's own reading of the head side.
 
 Output, per set in the order given: the merges replayed, how many would build, and the paths that
 triggered them, counted by merges (`--top N`, default 15, 0 for all); from the second set on,
@@ -300,8 +303,12 @@ def main(argv: list[str]) -> int:
             if src == CHECK_PATH and quoted:
                 # merge-build-check.sh fails closed: a path git quotes on either side runs every tier.
                 hits, builds_here = quoted, True
-            elif trigger == "same-input" or src == CHECK_PATH:
-                # The shell tier selects on paths BOTH sides changed, whatever the trigger.
+            elif src == CHECK_PATH:
+                # The script reads the HEAD side's change, whatever the trigger: a script that side
+                # changed, by either name of a rename on either side.
+                hits = matching(head, globs, other)
+                builds_here = bool(hits)
+            elif trigger == "same-input":
                 hits = matching(base & head, globs, other)
                 builds_here = bool(hits)
             elif trigger == "always":

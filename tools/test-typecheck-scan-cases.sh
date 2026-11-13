@@ -46,7 +46,7 @@
 # the built ppx; every leg runs the engine.
 # affected-reads: test/operations/scan_case_stubs/* --only '^(1|10):'
 # affected-reads: test/operations/*_scan_cases.ml test/operations/config_scan_lexing.ml --only '^(1|10):'
-# affected-reads: tensor/ppx_*.ml --only '^(10|11):'
+# affected-reads: tensor/ppx_*.ml --only '^(10|11|16):'
 # affected-reads: tools/scan_case_snippets.ml
 
 set -u
@@ -542,5 +542,34 @@ leg15() {
   else report 1 'a forced-colour missing-library diagnostic still matches the project skip' "build exit $build_rc: $(cat "$err")"; fi
 }
 harness_leg_run '15: forced-colour dune diagnostics still identify missing project libraries' leg15
+
+# A checkout reached through a symbolic link (the local merge gate's case): on macOS every
+# directory under $TMPDIR is one, /var being a link to /private/var, and ship-pr builds a merge
+# there. Dune names its workspace by the physical path and refuses a module named through the
+# link ("is not in dune workspace"), so the subject resolves its root physically. Run through a
+# link to this checkout, the repository's tables must check exactly as they do directly.
+leg16() {
+  local linked=$TMP/linked-checkout direct
+  run --stubbed
+  if project_absent; then
+    skip "the repository tables, checked through a symbolic link to the checkout" "$(project_absent_reason)"
+    return
+  fi
+  direct=$(cat "$out")
+  ln -s "$(cd "$script_dir/.." && pwd -P)" "$linked" || { report 1 'a link to the checkout' 'ln -s failed'; return; }
+  rc=0
+  harness_dune_colour "$linked/tools/typecheck-scan-cases.sh" --stubbed >"$out" 2>"$err" || rc=$?
+  held_lock_abandons
+  expect_rc "the repository's stubbed tables, the checkout reached through a symbolic link" 0
+  if grep -qF 'is not in dune workspace' "$err"; then
+    report 1 "dune does not refuse the linked path" "$(grep -m1 -F 'is not in dune workspace' "$err")"
+  else report 0 "dune does not refuse the linked path"; fi
+  if [ -n "$direct" ] && [ "$(cat "$out")" = "$direct" ]; then
+    report 0 "the linked checkout checks the tables exactly as the direct one does"
+  else
+    report 1 "the linked checkout checks the tables exactly as the direct one does" "$(head -n 5 "$out"); stderr: $(head -n 3 "$err")"
+  fi
+}
+harness_leg_run '16: a checkout reached through a symbolic link checks as the direct one does #project' leg16
 
 finish
