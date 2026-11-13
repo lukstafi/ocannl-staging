@@ -215,7 +215,9 @@
 #     alias (a helper) is an entry of its own, never printed, read as a
 #     per-test one; one dune makes itself (`.PKG-files`, what `(package PKG)`
 #     needs) is read through `dune rules @ALIAS`, its installed files followed
-#     to the build's.
+#     to the build's. Dune 3.25 prints no such alias, but the files a
+#     `.packages/HASH` staging area holds for the action: each is read as the
+#     shared install area's link it stages, followed the same way.
 #   - A changed `dune` file compared across revisions (git forms only; both
 #     sides have it; the worktree's copy is the right-hand side's; both probes
 #     load) reaches what dune says changed: a rule of its directory that differs
@@ -1320,6 +1322,41 @@ sub dune_rules {
       ref $got[$k] or fail("unexpected atom in dune rules output: \"$got[$k]\" at byte $at[$k]: ..." . around($text, $at[$k]) . "...");
     }
     push @rules, @got;
+  }
+  return unstage(@rules);
+}
+# Dune 3.25 hands an action what `(package PKG)` needs as files of a staging
+# area, `_build/install/CTX/.packages/HASH/PATH`, whose rules `dune rules`
+# cannot print (gh-ocannl-2216; 3.24 printed the `.PKG-files` alias instead,
+# read through `dune rules @ALIAS` below). Each is a link to the shared install
+# area's `_build/install/CTX/PATH`, itself a link to the build file it
+# installs: a staged file is read as that link's dependencies.
+sub unstage {
+  my @rules = @_;
+  my (%link, @ask);   # staged file -> the shared area's link
+  for my $rule (@rules) {
+    for my $dep (items(field($rule, "deps"))) {
+      next unless ref $dep && @$dep == 2 && !ref $dep->[0] && $dep->[0] eq "File";
+      my ($where, $path) = pair($dep->[1], "a File dependency");
+      next unless $where eq "In_build_dir" && $path =~ m{^(_build/install/[^/]+)/\.packages/[^/]+/(.+)$};
+      push @ask, "$1/$2" unless $link{$path};
+      $link{$path} = "$1/$2";
+    }
+  }
+  return @rules unless @ask;
+  my @linked = dune_rules(@ask);
+  return undef if grep { !defined } @linked;
+  my %via;   # the shared area's link -> what its rule needs
+  for my $rule (@linked) {
+    my $tg = field($rule, "targets");
+    $via{atom($_, "targets")} = [items(field($rule, "deps"))] for items(field($tg // [], "files"));
+  }
+  for my $rule (@rules) {
+    my $deps = field($rule, "deps") // next;
+    @$deps = map {
+      my $l = ref $_ && $_->[0] eq "File" && ref $_->[1] && $_->[1][0] eq "In_build_dir" ? $link{$_->[1][1]} : undef;
+      !defined $l ? $_ : $via{$l} ? @{$via{$l}} : fail("dune rules printed no rule for $l, which $_->[1][1] stages")
+    } @$deps;
   }
   return @rules;
 }
