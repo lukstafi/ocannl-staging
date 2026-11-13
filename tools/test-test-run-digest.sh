@@ -1447,7 +1447,13 @@ for pid, start, dur, prog, target, owner in [
         (22, 12, 0.75, 'iota_extract.exe', [build + '/default/test/operations/iota.ml',
                                             build + '/default/test/operations/iota.coverage'], 'iota'),
         (23, 13, 5.0, 'ocamlopt.opt', build + '/default/test/operations/iota.exe', 'other'),
-        (24, 14, 5.0, 'ppx.exe', build + '/default/test/operations/iota.pp.ml', 'other')]:
+        (24, 14, 5.0, 'ppx.exe', build + '/default/test/operations/iota.pp.ml', 'other'),
+        # Dune >= 3.25 names an alias action by its digest alone: two processes of one action.
+        (25, 15, 0.25, 'sh', act + 'test/training/' + 'd' * 32, 'kappa'),
+        (26, 16, 0.5, 'kappa_gate.exe', act + 'test/training/' + 'd' * 32, 'kappa'),
+        # One anonymous action whose program names runtest-mu, and its helper process.
+        (27, 17, 0.5, 'mu.exe', act + 'test/mu/' + 'e' * 32, 'mu'),
+        (28, 18, 0.25, 'sh', act + 'test/mu/' + 'e' * 32, 'mu')]:
     if skip in (owner, 'all'):
         continue
     t = T0 + start * S
@@ -1472,7 +1478,7 @@ PY
       f { exit }' | sed 's/^ *//; s/  */ /g'
   }
   fresh_detail=
-  fresh_aliases='@test/operations/runtest-alpha @@test/einsum/slow-beta @test/operations/runtest-gamma @test/operations/runtest-delta @test/operations/runtest-epsilon-c_fwd @test/operations/runtest-zeta-extension @test/operations/runtest-theta-extension @test/operations/runtest-iota'
+  fresh_aliases='@test/operations/runtest-alpha @@test/einsum/slow-beta @test/operations/runtest-gamma @test/operations/runtest-delta @test/operations/runtest-epsilon-c_fwd @test/operations/runtest-zeta-extension @test/operations/runtest-theta-extension @test/operations/runtest-iota @test/training/runtest-kappa'
   # 1. Every named test ran: exit 0, the times attributed, the command forced,
   # uncached and in the run's own build directory -- recorded as such -- and
   # that directory gone with the run.
@@ -1489,7 +1495,8 @@ PY
 1.75 1 0 action @test/operations/runtest-epsilon-c_fwd
 0.50 1 0 action @test/operations/runtest-zeta-extension
 1.25 1 0 action @test/operations/runtest-theta-extension
-0.75 1 0 action @test/operations/runtest-iota'
+0.75 1 0 action @test/operations/runtest-iota
+0.75 2 0 anonymous @test/training/runtest-kappa'
   [ -n "$fresh_detail" ] || [ "$(fresh_rows "$argv_out")" = "$fresh_want" ] ||
     fresh_detail="all ran: rows $(fresh_rows "$argv_out" | tr '\n' ';') (want $(printf '%s' "$fresh_want" | tr '\n' ';'))"
   [ -n "$fresh_detail" ] ||
@@ -1520,7 +1527,7 @@ PY
       *) fresh_detail="one skipped: exit $argv_rc (want 2, NOT RUN): $argv_out" ;;
     esac
     [ -n "$fresh_detail" ] || [ "$(fresh_rows "$argv_out" | tr '\n' ';')" = \
-      "13.84 2 0 action @test/operations/runtest-alpha;NOT RUN 0 - - @@test/einsum/slow-beta;4.50 1 0 action @test/operations/runtest-gamma;2.25 1 0 program @test/operations/runtest-delta;1.75 1 0 action @test/operations/runtest-epsilon-c_fwd;0.50 1 0 action @test/operations/runtest-zeta-extension;1.25 1 0 action @test/operations/runtest-theta-extension;0.75 1 0 action @test/operations/runtest-iota;" ] ||
+      "13.84 2 0 action @test/operations/runtest-alpha;NOT RUN 0 - - @@test/einsum/slow-beta;4.50 1 0 action @test/operations/runtest-gamma;2.25 1 0 program @test/operations/runtest-delta;1.75 1 0 action @test/operations/runtest-epsilon-c_fwd;0.50 1 0 action @test/operations/runtest-zeta-extension;1.25 1 0 action @test/operations/runtest-theta-extension;0.75 1 0 action @test/operations/runtest-iota;0.75 2 0 anonymous @test/training/runtest-kappa;" ] ||
       fresh_detail="one skipped: rows $(fresh_rows "$argv_out" | tr '\n' ';')"
   fi
   # A program another named test's action already claimed is not a second
@@ -1530,6 +1537,24 @@ PY
     case $argv_rc:$(fresh_rows "$argv_out" | tr '\n' ';') in
       "2:4.50 1 0 action @test/operations/runtest-gamma;NOT RUN 0 - - @test/operations/runtest-shared;") ;;
       *) fresh_detail="a claimed program: exit $argv_rc (want 2, shared NOT RUN): $argv_out" ;;
+    esac
+  fi
+  # A digest a test claimed one process of by its program is that test's:
+  # its helper process is not credited to another test of the directory.
+  if [ -z "$fresh_detail" ]; then
+    fresh_probe fresh-anonymous-owned @test/mu/runtest-mu @test/mu/runtest-nu
+    case $argv_rc:$(fresh_rows "$argv_out" | tr '\n' ';') in
+      "2:0.50 1 0 program @test/mu/runtest-mu;NOT RUN 0 - - @test/mu/runtest-nu;") ;;
+      *) fresh_detail="an owned anonymous action: exit $argv_rc (want 2, nu NOT RUN): $argv_out" ;;
+    esac
+  fi
+  # An alias action named by its digest alone is no test's when two named
+  # tests of its directory are still without a process: both are NOT RUN.
+  if [ -z "$fresh_detail" ]; then
+    fresh_probe fresh-anonymous-two @test/training/runtest-kappa @test/training/runtest-lambda
+    case $argv_rc:$(fresh_rows "$argv_out" | tr '\n' ';') in
+      "2:NOT RUN 0 - - @test/training/runtest-kappa;NOT RUN 0 - - @test/training/runtest-lambda;") ;;
+      *) fresh_detail="an anonymous action, two candidates: exit $argv_rc (want 2, both NOT RUN): $argv_out" ;;
     esac
   fi
   # 3. A trace with no process at all (all served from elsewhere): NOT RUN,

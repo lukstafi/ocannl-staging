@@ -1726,7 +1726,7 @@ if harness_leg 'probe library and data'; then
     @t2/slow-gen @t5/slow-usesh
   affected --files fx.opam
   # shellcheck disable=SC2086
-  expect 'a (package) dependency is read through the alias dune makes for it' 0 \
+  expect 'a (package) dependency is read through what dune installs for it (its alias, or from 3.25 its staged files)' 0 \
     @t1/runtest-t_mid-blind @t2/runtest-needs_pkg @t2/runtest-pkg $probe_blind
   affected --files docs/other.md
   # shellcheck disable=SC2086

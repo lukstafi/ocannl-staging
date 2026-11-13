@@ -1034,8 +1034,9 @@ except Bad as e:
     sys.exit('ci-shard.sh: %s is not a canonical-S-expression dune trace (dune >= 3.24): '
              'malformed or cut short at byte %d' % (path, e.args[0]))
 toolchain = {'ppx.exe', 'menhir', 'cc', 'gcc', 'clang', 'ar', 'as', 'ld'}
-# An alias action's target: `<build>/.actions/<context>/<dir>/<alias>-<digest>`.
-ACTION = re.compile(r'(?:^|/)\.actions/[^/]+/(?:(.*)/)?([^/]+)-[0-9a-f]{32}$')
+# An alias action's target: `<build>/.actions/<context>/<dir>/<alias>-<digest>`, or from dune 3.25
+# on `<build>/.actions/<context>/<dir>/<digest>`, naming no alias (gh-ocannl-2216).
+ACTION = re.compile(r'(?:^|/)\.actions/[^/]+/(?:(.*)/)?(?:([^/]+)-)?[0-9a-f]{32}$')
 
 
 def in_context(path):
@@ -1049,13 +1050,16 @@ def unit_of(fields, prog):
     # The unit a process ran for, from its first target: an alias action of the
     # split directory's `runtest-<name>` is unit <name>, any other of its
     # aliases (bin-smoke) belongs to @rest; a file target <name>.<ext...> there
-    # is unit <name>; anything elsewhere is @rest. A process without a target
-    # is placed by its directory and named after its program.
+    # is unit <name>; anything elsewhere is @rest. A process without a target,
+    # or an alias action whose target names no alias (dune >= 3.25), is placed
+    # by its directory and named after its program.
     targets = fields.get('target_files')
     for t in targets if isinstance(targets, list) else []:
         if not isinstance(t, str):
             continue
         m = ACTION.search(t)
+        if m and m.group(2) is None:
+            break   # an alias action dune no longer names: placed as one without a target
         if m:
             if (m.group(1) or '.') != split_dir or not m.group(2).startswith('runtest-'):
                 return '@rest'

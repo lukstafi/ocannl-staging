@@ -291,8 +291,11 @@
 # stanza, `NAME.actual`, `NAME.ll.actual`, `NAME.coverage`; any target of the
 # process counts), a final `-VARIANT` of NAME read as `.VARIANT` too
 # (`runtest-x-extension` writes `x.extension.actual`); failing both, the runs
-# of `NAME.exe` in DIR that no other named test claimed -- summed,
-# with their count, exits and which rule matched (`action` or `program`). A
+# of `NAME.exe` in DIR that no other named test claimed; failing those, the
+# one alias action that ran in DIR when the trace names it by its digest alone
+# (dune >= 3.25) and no other named test of DIR is still without a process --
+# summed, with their count, exits and which rule matched (`action`, `program`
+# or `anonymous`). A
 # named test with no such process is NOT RUN: no process of the run is its
 # action, so there is no fresh time to report, and a run
 # that was otherwise green exits 2 under that verdict, naming it; one whose
@@ -2708,6 +2711,32 @@ attribution_awk='
           if (!claimed[j] && prog[j] == name ".exe" && in_dir(dir_of(act[j]))) {
             hits[i] = hits[i] " " j; claimed[j] = 1
           }
+      }
+      # Only for a test still without one: an alias action dune >= 3.25 names by
+      # its digest alone (`@DIR/(anonymous-HASH)`, gh-ocannl-2216), in the
+      # directory of the test, when exactly one named test there is still
+      # without a process and exactly one such action ran there (its processes
+      # share the digest). Two of either leave them all unattributed: the trace
+      # cannot tell a helper alias action there from the test action itself.
+      # A digest one of whose processes a test claimed (by its program) is the
+      # action of that test: none of its rows goes to another.
+      for (j = 1; j <= m; j++) if (claimed[j]) owned_digest[act[j]] = 1
+      for (j = 1; j <= m; j++) {
+        if (claimed[j] || (act[j] in owned_digest) || act[j] !~ /^@(.*\/)?\(anonymous-[0-9a-f]+\)$/) continue
+        ad = dir_of(act[j])
+        if (ad in anon_digests) { if (!index(anon_digests[ad] " ", " " act[j] " ")) anon_digests[ad] = anon_digests[ad] " " act[j] }
+        else anon_digests[ad] = " " act[j]
+        anon_rows[ad] = anon_rows[ad] " " j
+      }
+      for (i = 1; i <= n; i++) {
+        if (hits[i] != "") continue
+        named(i)
+        if (!(d in anon_digests) || split(anon_digests[d], dg, " ") != 1) continue
+        alone = 1
+        for (k = 1; k <= n; k++) if (k != i && hits[k] == "") { pk = alias[k]; sub(/^@@?/, "", pk); sub(/\/[^\/]*$/, "", pk); if (pk == d) alone = 0 }
+        if (!alone) continue
+        how[i] = "anonymous"
+        hits[i] = anon_rows[d]
       }
       # `rows` mode, for the plan of repeat --direct: the rows that are each named action.
       if (mode == "rows") {

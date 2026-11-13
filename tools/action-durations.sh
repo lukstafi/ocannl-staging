@@ -34,7 +34,8 @@
 #   -h, --help         this header
 #
 # The trace records no alias membership, so a row names its action by what it
-# produces: `@dir/alias` for an alias action, else its first target relative
+# produces: `@dir/alias` for an alias action (`@dir/(anonymous-<digest>)` from a
+# dune >= 3.25, whose trace no longer names the alias), else its first target relative
 # to the build context (`+k` more), else the directory it ran in. A process
 # the trace saw start but never finish (a run killed hard, or a trace read
 # while dune runs) prints `open` for its exit, and its seconds are a lower
@@ -312,13 +313,16 @@ def in_context(path):
     # (alias or None, path relative to the build context) for a path under the build directory:
     # `<build>/<ctx>/...`, a sandbox's `<build>/.sandbox/<hash>/<ctx>/...`, or an alias action's
     # `<build>/.actions/<ctx>/<dir>/<alias>-<hash>`. Anything else is returned unchanged.
+    # Dune >= 3.25 names an alias action's target by its digest alone,
+    # `<build>/.actions/<ctx>/<dir>/<hash>` (gh-ocannl-2216): its alias is `(anonymous-<hash>)`,
+    # which no alias spells, the digest kept so that one action's processes still read as one.
     prefix = build_dir.rstrip('/') + '/'
     if not path.startswith(prefix):
         return None, path
     rel = path[len(prefix):]
-    m = re.match(r'\.actions/[^/]+/(?:(.*)/)?([^/]+)-[0-9a-f]{32}$', rel)
+    m = re.match(r'\.actions/[^/]+/(?:(.*)/)?(?:([^/]+)-)?([0-9a-f]{32})$', rel)
     if m:
-        return m.group(2), m.group(1) or '.'
+        return m.group(2) or '(anonymous-%s)' % m.group(3), m.group(1) or '.'
     m = re.match(r'(?:\.sandbox/[^/]+/)?[^/]+(?:/(.*))?$', rel)
     return None, (m.group(1) or '.') if m else rel
 
