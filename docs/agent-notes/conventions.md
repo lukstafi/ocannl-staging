@@ -8,6 +8,14 @@ files.
 
 - Releases use lightweight, un-prefixed git tags (`0.8`, not `v0.8`).
 - `.github/wave-brief.md` is OCANNL's project part for the shipped native-Claude wave template; name it with `project_part` in the wave file.
+- `.github/review-checkpoint.md` is OCANNL's part of the wave review checkpoint's prompt: what a
+  second reviewer looks for here beyond the shipped list. Name it with `review.project_part` in
+  the wave file. It is read from the default branch, so a PR does not write its own reviewer's
+  instructions, and an edit applies once merged. It may use only the placeholders the review
+  verb fills (`WAVE`, `KIND`, `REPO`, `PR`, `SHA`, `SHA8`, `CHECKOUT`, `MAIN`, each between
+  doubled at-signs). Try an edit before it merges with a copy as `review/project.md` in a scratch
+  wave directory and `fleet-worker.sh wave review <wave.json> <task> <pr> <sha> --kind at-open
+  --dry-run` on a merged PR: the dry run posts nothing and prints the verdict line.
 - Release prep also writes the release's outcome section in `docs/release-history.md`, including
   what did not land, and re-reads each branch's status in `docs/concerns.md`, which promises that
   review. GitHub milestones own what comes next, so neither file carries a forward plan.
