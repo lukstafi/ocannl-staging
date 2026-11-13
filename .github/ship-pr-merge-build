@@ -17,8 +17,8 @@
 # What it builds. tools/merge-build-check.sh runs four tiers on the merged tree, the first failure
 # refusing the merge: the formatter gate (CI's `Formatting` job), `dune build @check
 # @test/operations/scans`, the per-test aliases the PR's change reaches (the pre-push list,
-# without its `slow-` and `train-` members), and, when both sides changed a shell script, the
-# harness tier that script reaches. The script's header says what each tier reads and what a
+# without its `slow-` and `train-` members), and the shell harnesses that change reaches, of
+# every group. The script's header says what each tier reads and what a
 # cross-cutting change is owed instead.
 #
 # Inputs. Under `trigger always` no input decides a build. The line stays for the trigger a
@@ -40,21 +40,21 @@
 # master.
 #
 # Bound. `timeout` covers the command's slowest honest run: the format and compile tiers, the
-# widest list the tests tier can be handed, and the WHOLE shell tier, which every fail-closed
-# fallback of tools/merge-build-check.sh runs, the tier's members four at once (gh-ocannl-2002).
+# widest list the tests tier can be handed, and the WHOLE harness set, which every fail-closed
+# fallback of tools/merge-build-check.sh runs, its members four at once (gh-ocannl-2002).
 # Measured on 2026-11-13, each tier from a fresh clone, on mac-studio (load 5 to 8) and on
 # minix-amd-linux (idle): format 4 s and 3 s; compile 136 s and 137 s; the tests tier on the 411
 # aliases of `arrayjit/lib/low_level.ml`'s first tier, the widest list `affected` still calls
-# narrow, 661 s and 731 s; the whole shell tier 422 s and 344 s. Unbounded, that is 1223 s and
-# 1215 s, so the tests tier is capped: it builds at most 200 aliases (TESTS_MAX in the script),
+# narrow, 661 s and 731 s; the whole harness set, 35 members, 499 s (at load 5 to 11) and 347 s.
+# Unbounded, that is 1300 s and 1218 s, so the tests tier is capped: it builds at most 200 aliases (TESTS_MAX in the script),
 # about 320 s and 360 s at the measured 1.6 s and 1.8 s an alias, and a longer list is owed to
 # the PR's own run. With the two asks of `affected` a cross-cutting change costs (about 50 s
-# each), the slowest honest run is then about 990 s and 940 s. 1800 s is 1.8 times that, and nine
-# times the ordinary run: a merge whose change reaches some tens of tests and no shell tier took
+# each), the slowest honest run is then about 1060 s and 950 s. 1800 s is 1.7 times that, and nine
+# times the ordinary run: a merge whose change reaches some tens of tests and no harness took
 # 200 s and 179 s whole (ship-pr's dry run, `pr-review.sh merge-build`). It is also the 30
 # minutes no CI job's cap goes past. A bound near a measured pass is what overran before: 1200 s
-# over a one-at-a-time shell tier's 1167 s, at load 3.6 (gh-ocannl-1994). Re-measure when the
-# shell tier or the per-alias cost grows: tools/merge-build-check.sh's header names the tiers,
+# over a one-at-a-time shell group's 1167 s, at load 3.6 (gh-ocannl-1994). Re-measure when the
+# harness set or the per-alias cost grows: tools/merge-build-check.sh's header names the tiers,
 # and docs/agent-notes/build-and-test.md how each was timed.
 #
 # Trust. The command is this repository's own code, trusted as a developer's build is: the

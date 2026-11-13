@@ -9,3 +9,4 @@
 # runs these legs strict: the `#project` group of tools/test-typecheck-scan-cases.sh.
 tools/test-typecheck-scan-cases.sh	the repository tables' project-syntax arms, checked in their owning modules' contexts
 tools/test-typecheck-scan-cases.sh	planted project-syntax arms, checked in an owning module's context
+tools/test-typecheck-scan-cases.sh	the repository tables, checked through a symbolic link to the checkout

@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Hermetic fixtures for tools/merge-build-check.sh: the order of its tiers (format, compile, tests,
-# shell) and where each stops the run; what the tests tier builds (the list prepush prints for the
-# head side's revisions, never printed; a cross-cutting change's first tier, or nothing, with the
-# rest OWED; an incomplete list's members; no list read fails the tier); which merges select the
-# shell tier (a script
-# both sides changed, by either name of a rename; a one-parent HEAD, --all and a quoted path run
-# the whole tier), what the shell tier narrows to (the overlap's reach, the whole tier on a failed ask,
+# harness) and where each stops the run; what the tests tier builds (the list prepush prints for
+# the head side's revisions, never printed; a cross-cutting change's first tier, or nothing, with
+# the rest OWED; an incomplete list's members; no list read fails the tier); what the harness tier
+# reads (the HEAD side's change, a script or not, a path the base side renamed by its other name;
+# a one-parent HEAD, --all and a quoted path run the whole tier), what it narrows to (the
+# change's reach, of any group; none when it reaches no member; the whole tier on a failed ask,
 # an unrecognized line or an unmapped script), the toolchain fallback through opam env, the exit
 # statuses, stable tier lines across different run durations, that the build of the base alone
 # narrows as the merge does, that this repository's mapping gives shared support the whole tier
@@ -137,24 +137,25 @@ fixture both-script
 first tools/sub/a.sh && commit_on base
 git -C "$R" checkout -q side && last tools/sub/a.sh && commit_on side && merge_side
 BOTH_SCRIPT=$R
-if harness_leg 'a script both sides changed selects the shell tier #select'; then
+if harness_leg 'a script the head side changed selects the harness tier #select'; then
   plan
-  if [ "$rc" = 0 ] && has 'shell tier: SELECTED -- tools/sub/a.sh, changed on both sides, matches *.sh' &&
+  if [ "$rc" = 0 ] && has 'harness tier: a script changed on the head side -- tools/sub/a.sh matches *.sh' &&
      has 'compile tier: dune build @check @test/operations/scans (always)'; then
-    report 0 'a script both sides changed selects the shell tier'
-  else report 1 'a script both sides changed selects the shell tier' "exit $rc; $(cat "$TMP/out")"; fi
+    report 0 'a script the head side changed selects the harness tier'
+  else report 1 'a script the head side changed selects the harness tier' "exit $rc; $(cat "$TMP/out")"; fi
 fi
 
-# OCaml both sides changed; each side changed a different script.
+# The base side changes a script, the head side none: the tier reads the head side's change.
 fixture apart
 first x.ml && first tools/sub/a.sh && commit_on base
-git -C "$R" checkout -q side && last x.ml && last b.sh && commit_on side && merge_side
+git -C "$R" checkout -q side && last x.ml && last m.txt && commit_on side && merge_side
 APART=$R
-if harness_leg 'scripts only one side changed each leave the shell tier out #select'; then
+if harness_leg 'a script the base side alone changed is not the change of the head side #select'; then
   plan
-  if [ "$rc" = 0 ] && has 'shell tier: skipped -- none of the 1 path(s) changed on both sides matches *.sh'; then
-    report 0 'scripts only one side changed each leave the shell tier out'
-  else report 1 'scripts only one side changed each leave the shell tier out' "exit $rc; $(cat "$TMP/out")"; fi
+  if [ "$rc" = 0 ] && has 'harness tier: no script changed on the head side -- none of the 2 path(s) it changed matches *.sh' &&
+     has 'harness tier: skipped -- the 2 path(s) the head side changed reach no harness'; then
+    report 0 'the head side changed no script and reaches no harness: the tier is skipped'
+  else report 1 'the head side changed no script and reaches no harness: the tier is skipped' "exit $rc; $(cat "$TMP/out")"; fi
 fi
 
 if harness_leg 'a rename counts by its other name, and only a script name selects #select'; then
@@ -164,8 +165,8 @@ if harness_leg 'a rename counts by its other name, and only a script name select
     git -C "$R" checkout -q side && last r.txt && commit_on side && merge_side
     plan
     case $target in
-      r.sh) want='shell tier: SELECTED -- r.txt, changed on both sides, was renamed from or to r.sh, which matches *.sh' ;;
-      r.md) want='shell tier: skipped -- none of the 1 path(s) changed on both sides matches *.sh' ;;
+      r.sh) want='harness tier: a script changed on the head side -- r.txt was renamed from or to r.sh, which matches *.sh' ;;
+      r.md) want='harness tier: no script changed on the head side -- none of the 1 path(s) it changed matches *.sh' ;;
     esac
     if [ "$rc" = 0 ] && has "$want"; then
       report 0 "a rename to $target on the base, an edit of its old name on the head"
@@ -176,50 +177,50 @@ if harness_leg 'a rename counts by its other name, and only a script name select
   last r.txt && commit_on base
   git -C "$R" checkout -q side && git -C "$R" mv r.txt r.sh && commit_on side && merge_side
   plan
-  if [ "$rc" = 0 ] && has 'shell tier: SELECTED -- r.txt, changed on both sides, was renamed from or to r.sh'; then
+  if [ "$rc" = 0 ] && has 'harness tier: a script changed on the head side -- r.sh matches *.sh'; then
     report 0 'a rename on the head counts too'
   else report 1 'a rename on the head counts too' "exit $rc; $(cat "$TMP/out")"; fi
 fi
 
-if harness_leg 'what cannot be read runs the whole shell tier #select'; then
+if harness_leg 'what cannot be read runs the whole harness tier #select'; then
   fixture one-parent
   plan
-  if [ "$rc" = 0 ] && has 'shell tier: SELECTED -- HEAD is not a two-parent merge, so the whole shell tier runs'; then
-    report 0 'a one-parent HEAD runs the whole shell tier'
-  else report 1 'a one-parent HEAD runs the whole shell tier' "exit $rc; $(cat "$TMP/out")"; fi
+  if [ "$rc" = 0 ] && has 'harness tier: SELECTED -- HEAD is not a two-parent merge, so the whole harness tier runs'; then
+    report 0 'a one-parent HEAD runs the whole harness tier'
+  else report 1 'a one-parent HEAD runs the whole harness tier' "exit $rc; $(cat "$TMP/out")"; fi
   # A name git quotes is one this script does not decode, so it cannot rule the path out.
   fixture quoted
   first x.ml && printf 'x\n' >"$R/q\"uote.txt" && commit_on base
   git -C "$R" checkout -q side && last x.ml && commit_on side && merge_side
   plan
-  if [ "$rc" = 0 ] && has 'shell tier: SELECTED -- git quoted a path one side changed, so the whole shell tier runs'; then
-    report 0 'a path git quotes runs the whole shell tier'
-  else report 1 'a path git quotes runs the whole shell tier' "exit $rc; $(cat "$TMP/out")"; fi
+  if [ "$rc" = 0 ] && has 'harness tier: SELECTED -- git quoted a path one side changed, so the whole harness tier runs'; then
+    report 0 'a path git quotes runs the whole harness tier'
+  else report 1 'a path git quotes runs the whole harness tier' "exit $rc; $(cat "$TMP/out")"; fi
   R=$APART plan --all
-  if [ "$rc" = 0 ] && has 'shell tier: SELECTED -- --all'; then
-    report 0 '--all runs the whole shell tier on a merge that would skip it'
-  else report 1 '--all runs the whole shell tier on a merge that would skip it' "exit $rc; $(cat "$TMP/out")"; fi
+  if [ "$rc" = 0 ] && has 'harness tier: SELECTED -- --all'; then
+    report 0 '--all runs the whole harness tier on a merge that would skip it'
+  else report 1 '--all runs the whole harness tier on a merge that would skip it' "exit $rc; $(cat "$TMP/out")"; fi
 fi
 
 if harness_leg 'a run builds the selected tiers in order and stops at the first failure #run'; then
   R=$BOTH_SCRIPT run "$TMP/dunebin"
   if [ "$rc" = 0 ] && [ "$(cat "$TMP/record")" = "build --root . @check @test/operations/scans
-shell --shell --jobs 4" ] && has 'merge-build-check: passed'; then
-    report 0 'a selected shell tier runs after the compile tier'
-  else report 1 'a selected shell tier runs after the compile tier' "exit $rc; $(cat "$TMP/record"); $(cat "$TMP/out")"; fi
+shell --jobs 4" ] && has 'merge-build-check: passed'; then
+    report 0 'a selected harness tier runs after the compile tier'
+  else report 1 'a selected harness tier runs after the compile tier' "exit $rc; $(cat "$TMP/record"); $(cat "$TMP/out")"; fi
   R=$APART run "$TMP/dunebin"
   if [ "$rc" = 0 ] && [ "$(cat "$TMP/record")" = 'build --root . @check @test/operations/scans' ]; then
-    report 0 'a skipped shell tier does not run'
-  else report 1 'a skipped shell tier does not run' "exit $rc; $(cat "$TMP/record"); $(cat "$TMP/out")"; fi
+    report 0 'a skipped harness tier does not run'
+  else report 1 'a skipped harness tier does not run' "exit $rc; $(cat "$TMP/record"); $(cat "$TMP/out")"; fi
   FAKE_DUNE_RC=3 R=$BOTH_SCRIPT run "$TMP/dunebin"
   if [ "$rc" = 1 ] && [ "$(cat "$TMP/record")" = 'build --root . @check @test/operations/scans' ] &&
      has 'compile tier FAILED (dune exit 3)'; then
-    report 0 'a failing compile tier exits 1 before the shell tier'
-  else report 1 'a failing compile tier exits 1 before the shell tier' "exit $rc; $(cat "$TMP/record"); $(cat "$TMP/out")"; fi
+    report 0 'a failing compile tier exits 1 before the harness tier'
+  else report 1 'a failing compile tier exits 1 before the harness tier' "exit $rc; $(cat "$TMP/record"); $(cat "$TMP/out")"; fi
   FAKE_SHELL_RC=1 R=$BOTH_SCRIPT run "$TMP/dunebin"
-  if [ "$rc" = 1 ] && has 'shell tier FAILED (tools/test-harnesses.sh exit 1)' && ! has 'merge-build-check: passed'; then
-    report 0 'a failing shell tier exits 1'
-  else report 1 'a failing shell tier exits 1' "exit $rc; $(cat "$TMP/out")"; fi
+  if [ "$rc" = 1 ] && has 'harness tier FAILED (tools/test-harnesses.sh exit 1)' && ! has 'merge-build-check: passed'; then
+    report 0 'a failing harness tier exits 1'
+  else report 1 'a failing harness tier exits 1' "exit $rc; $(cat "$TMP/out")"; fi
 fi
 
 COMPILE='build --root . @check @test/operations/scans'
@@ -250,9 +251,9 @@ if harness_leg 'the tests tier builds the list prepush prints for the head side 
   FAKE_LIST=$TMP/list R=$BOTH_SCRIPT run "$TMP/dunebin"
   if [ "$rc" = 0 ] && [ "$(cat "$TMP/record")" = "$COMPILE
 build --root . -j 4 @a/runtest-x @@runtest-root
-shell --shell --jobs 4" ] && [ "$(tiers | sed -n 2p)" = "$want_ask" ] && has 'merge-build-check: tests tier passed'; then
-    report 0 'the list is asked of the two revisions and built -j 4, after the compile tier and before the shell tier'
-  else report 1 'the list is asked of the two revisions and built -j 4, after the compile tier and before the shell tier' \
+shell --jobs 4" ] && [ "$(tiers | sed -n 2p)" = "$want_ask" ] && has 'merge-build-check: tests tier passed'; then
+    report 0 'the list is asked of the two revisions and built -j 4, after the compile tier and before the harness tier'
+  else report 1 'the list is asked of the two revisions and built -j 4, after the compile tier and before the harness tier' \
     "exit $rc; record: $(cat "$TMP/record"); tiers: $(tiers) (want $want_ask); $(cat "$TMP/out")"; fi
   # A merge that adds a test lists one alias more than its base alone: neither the list nor a
   # count may reach the log, or ship-pr reads a shared failure as the merge's own.
@@ -261,14 +262,14 @@ shell --shell --jobs 4" ] && [ "$(tiers | sed -n 2p)" = "$want_ask" ] && has 'me
   else report 1 'neither the list nor the ask'"'"'s counts are printed' "$(cat "$TMP/out")"; fi
   R=$BOTH_SCRIPT run "$TMP/dunebin"
   if [ "$rc" = 0 ] && [ "$(cat "$TMP/record")" = "$COMPILE
-shell --shell --jobs 4" ] && has 'tests tier: the change reaches no per-test alias' && has 'merge-build-check: tests tier passed'; then
+shell --jobs 4" ] && has 'tests tier: the change reaches no per-test alias' && has 'merge-build-check: tests tier passed'; then
     report 0 'a change reaching no per-test alias builds nothing and passes the tier'
   else report 1 'a change reaching no per-test alias builds nothing and passes the tier' "exit $rc; $(cat "$TMP/record"); $(cat "$TMP/out")"; fi
   FAKE_LIST=$TMP/list FAKE_TESTS_RC=5 R=$BOTH_SCRIPT run "$TMP/dunebin"
   if [ "$rc" = 1 ] && has 'tests tier FAILED (dune exit 5)' && ! grep -q '^shell ' "$TMP/record" &&
      ! has 'merge-build-check: passed'; then
-    report 0 'a failing tests tier exits 1 before the shell tier'
-  else report 1 'a failing tests tier exits 1 before the shell tier' "exit $rc; $(cat "$TMP/record"); $(cat "$TMP/out")"; fi
+    report 0 'a failing tests tier exits 1 before the harness tier'
+  else report 1 'a failing tests tier exits 1 before the harness tier' "exit $rc; $(cat "$TMP/record"); $(cat "$TMP/out")"; fi
   # The build of the base alone asks about the same change: the same two revisions.
   sha=$(git -C "$BOTH_SCRIPT" commit-tree 'HEAD^1^{tree}' -p 'HEAD^1' -p 'HEAD^2' -m 'the base alone') &&
     git -C "$BOTH_SCRIPT" checkout -q --detach "$sha"
@@ -374,8 +375,8 @@ fi
 if harness_leg 'whole logs are identical across run durations #run'; then
   for shell_rc in 0 1; do
     case $shell_rc in
-      0) shell_line='merge-build-check: shell tier passed' ;;
-      1) shell_line='merge-build-check: shell tier FAILED (tools/test-harnesses.sh exit 1)' ;;
+      0) shell_line='merge-build-check: harness tier passed' ;;
+      1) shell_line='merge-build-check: harness tier FAILED (tools/test-harnesses.sh exit 1)' ;;
     esac
     FAKE_SHELL_RC=$shell_rc FAKE_TIER_DELAY=0 R=$BOTH_SCRIPT run "$TMP/dunebin"
     first_rc=$rc
@@ -400,39 +401,59 @@ reach_of() { # PATH...: each PATH reaches tools/test-one.sh
 }
 export FAKE_REACH=$TMP/reach
 : >"$TMP/reach"
-if harness_leg 'an overlap reaching one member runs that member, and no more #scope'; then
+if harness_leg 'a change reaching one member runs that member, and no more #scope'; then
   reach_of tools/sub/a.sh
   R=$BOTH_SCRIPT plan
-  if [ "$rc" = 0 ] && has 'shell tier: SELECTED -- tools/sub/a.sh, changed on both sides, matches *.sh' &&
-     has 'shell tier: scoped to what the 1 shared path(s) reach:' && has 'merge-build-check:   tools/test-one.sh'; then
-    report 0 '--plan names what the overlap reaches'
-  else report 1 '--plan names what the overlap reaches' "exit $rc; $(cat "$TMP/out")"; fi
+  if [ "$rc" = 0 ] && has 'harness tier: a script changed on the head side -- tools/sub/a.sh matches *.sh' &&
+     has 'harness tier: SELECTED -- scoped to what the 1 path(s) the head side changed reach:' && has 'merge-build-check:   tools/test-one.sh'; then
+    report 0 '--plan names what the change reaches'
+  else report 1 '--plan names what the change reaches' "exit $rc; $(cat "$TMP/out")"; fi
   R=$BOTH_SCRIPT run "$TMP/dunebin"
   if [ "$rc" = 0 ] && [ "$(cat "$TMP/record")" = "$COMPILE
-shell --shell --jobs 4 --affected --files tools/sub/a.sh" ] && has 'merge-build-check: passed'; then
-    report 0 'a reached overlap runs its scoped tier, the whole tier not at all'
-  else report 1 'a reached overlap runs its scoped tier, the whole tier not at all' "exit $rc; $(cat "$TMP/record"); $(cat "$TMP/out")"; fi
+shell --jobs 4 --affected --files tools/sub/a.sh" ] && has 'merge-build-check: passed'; then
+    report 0 'a reached change runs its scoped tier, the whole tier not at all'
+  else report 1 'a reached change runs its scoped tier, the whole tier not at all' "exit $rc; $(cat "$TMP/record"); $(cat "$TMP/out")"; fi
   FAKE_SCOPED_RC=1 R=$BOTH_SCRIPT run "$TMP/dunebin"
-  if [ "$rc" = 1 ] && [ "$(grep -c '^shell ' "$TMP/record")" = 1 ] && has 'shell tier FAILED (tools/test-harnesses.sh exit 1)'; then
+  if [ "$rc" = 1 ] && [ "$(grep -c '^shell ' "$TMP/record")" = 1 ] && has 'harness tier FAILED (tools/test-harnesses.sh exit 1)'; then
     report 0 'a failing scoped tier exits 1, with no whole tier to fall back on'
   else report 1 'a failing scoped tier exits 1, with no whole tier to fall back on' "exit $rc; $(cat "$TMP/record"); $(cat "$TMP/out")"; fi
-  # Every shared path is asked about, a non-script too; a rename by both its names.
+  # Every path the head side changed is asked about, a non-script too; a rename by both its names.
   fixture ask-all
   first tools/sub/a.sh && first x.ml && commit_on base
   git -C "$R" checkout -q side && last tools/sub/a.sh && last x.ml && commit_on side && merge_side
   reach_of tools/sub/a.sh
   run "$TMP/dunebin"
-  if [ "$rc" = 0 ] && [ "$(sed -n 2p "$TMP/record")" = 'shell --shell --jobs 4 --affected --files tools/sub/a.sh x.ml' ]; then
-    report 0 'every path changed on both sides is asked about, a non-script too'
-  else report 1 'every path changed on both sides is asked about, a non-script too' "exit $rc; $(cat "$TMP/record")"; fi
+  if [ "$rc" = 0 ] && [ "$(sed -n 2p "$TMP/record")" = 'shell --jobs 4 --affected --files tools/sub/a.sh x.ml' ]; then
+    report 0 'every path the head side changed is asked about, a non-script too'
+  else report 1 'every path the head side changed is asked about, a non-script too' "exit $rc; $(cat "$TMP/record")"; fi
   fixture ask-rename
   git -C "$R" mv r.txt r.sh && commit_on base
   git -C "$R" checkout -q side && last r.txt && commit_on side && merge_side
   reach_of r.sh
   run "$TMP/dunebin"
-  if [ "$rc" = 0 ] && [ "$(sed -n 2p "$TMP/record")" = 'shell --shell --jobs 4 --affected --files r.txt r.sh' ]; then
+  if [ "$rc" = 0 ] && [ "$(sed -n 2p "$TMP/record")" = 'shell --jobs 4 --affected --files r.txt r.sh' ]; then
     report 0 'a rename is asked about by both its names'
   else report 1 'a rename is asked about by both its names' "exit $rc; $(cat "$TMP/record")"; fi
+  # The change is the head side's alone: nothing has to have changed on the base side (the merge
+  # `trigger always` builds when the base has not moved), and a non-script that reaches a member
+  # runs it with no script changed at all.
+  fixture head-only
+  git -C "$R" checkout -q side && last tools/sub/a.sh && commit_on side && merge_side
+  reach_of tools/sub/a.sh
+  run "$TMP/dunebin"
+  if [ "$rc" = 0 ] && [ "$(sed -n 2p "$TMP/record")" = 'shell --jobs 4 --affected --files tools/sub/a.sh' ]; then
+    report 0 'a script the head side alone changed runs what it reaches'
+  else report 1 'a script the head side alone changed runs what it reaches' "exit $rc; $(cat "$TMP/record"); $(cat "$TMP/out")"; fi
+  fixture non-script
+  first tools/sub/a.sh && commit_on base
+  git -C "$R" checkout -q side && last x.ml && commit_on side && merge_side
+  reach_of x.ml
+  run "$TMP/dunebin"
+  if [ "$rc" = 0 ] && [ "$(sed -n 2p "$TMP/record")" = 'shell --jobs 4 --affected --files x.ml' ] &&
+     has 'harness tier: no script changed on the head side -- none of the 1 path(s) it changed matches *.sh' &&
+     has 'harness tier: SELECTED -- scoped to what the 1 path(s) the head side changed reach:'; then
+    report 0 'a non-script the head side changed runs the member it reaches, no script changed'
+  else report 1 'a non-script the head side changed runs the member it reaches, no script changed' "exit $rc; $(cat "$TMP/record"); $(cat "$TMP/out")"; fi
   # The build of the base alone: the base's tree on the merge's two parents, as ship-pr commits it.
   fixture base-alone
   first tools/sub/a.sh && commit_on base
@@ -442,7 +463,7 @@ shell --shell --jobs 4 --affected --files tools/sub/a.sh" ] && has 'merge-build-
   cp "$TMP/out" "$TMP/merge-plan"
   sha=$(git -C "$R" commit-tree 'HEAD^1^{tree}' -p 'HEAD^1' -p 'HEAD^2' -m 'the base alone') &&
     git -C "$R" checkout -q --detach "$sha" && plan
-  if [ "$rc" = 0 ] && has 'shell tier: scoped to' && cmp -s "$TMP/out" "$TMP/merge-plan"; then
+  if [ "$rc" = 0 ] && has 'harness tier: SELECTED -- scoped to' && cmp -s "$TMP/out" "$TMP/merge-plan"; then
     report 0 'the build of the base alone selects and narrows as the merge does'
   else report 1 'the build of the base alone selects and narrows as the merge does' "exit $rc; $(cat "$TMP/out")"; fi
 fi
@@ -455,29 +476,29 @@ if harness_leg 'what the scope cannot establish runs the whole tier, never less 
   # One script reached, the other not: the reached one must not hide it.
   reach_of tools/sub/a.sh
   R=$TWO_SCRIPTS run "$TMP/dunebin"
-  if [ "$rc" = 0 ] && [ "$(sed -n 2,\$p "$TMP/record")" = 'shell --shell --jobs 4' ] &&
-     has 'shell tier: whole -- no member of the tier reaches b.sh'; then
+  if [ "$rc" = 0 ] && [ "$(sed -n 2,\$p "$TMP/record")" = 'shell --jobs 4' ] &&
+     has 'harness tier: SELECTED -- whole -- no harness reaches b.sh'; then
     report 0 'a script no member reaches runs the whole tier, though another is reached'
   else report 1 'a script no member reaches runs the whole tier, though another is reached' "exit $rc; $(cat "$TMP/record"); $(cat "$TMP/out")"; fi
   reach_of tools/sub/a.sh b.sh
   FAKE_ASK_RC=2 R=$TWO_SCRIPTS run "$TMP/dunebin"
-  if [ "$rc" = 0 ] && [ "$(sed -n 2,\$p "$TMP/record")" = 'shell --shell --jobs 4' ] &&
-     has 'shell tier: whole -- what b.sh reaches could not be asked (test-harnesses.sh exit 2)'; then
+  if [ "$rc" = 0 ] && [ "$(sed -n 2,\$p "$TMP/record")" = 'shell --jobs 4' ] &&
+     has 'harness tier: SELECTED -- whole -- what b.sh reaches could not be asked (test-harnesses.sh exit 2)'; then
     report 0 'a failed ask runs the whole tier'
   else report 1 'a failed ask runs the whole tier' "exit $rc; $(cat "$TMP/record"); $(cat "$TMP/out")"; fi
   # Each script alone answers, the joint ask does not.
   FAKE_ASK_FAILS_ON=x.ml R=$TWO_SCRIPTS run "$TMP/dunebin"
-  if [ "$rc" = 0 ] && [ "$(sed -n 2,\$p "$TMP/record")" = 'shell --shell --jobs 4' ] &&
-     has 'shell tier: whole -- what the paths changed on both sides reach could not be asked'; then
+  if [ "$rc" = 0 ] && [ "$(sed -n 2,\$p "$TMP/record")" = 'shell --jobs 4' ] &&
+     has 'harness tier: SELECTED -- whole -- what the paths the head side changed reach could not be asked'; then
     report 0 'a failed ask for the paths together runs the whole tier'
   else report 1 'a failed ask for the paths together runs the whole tier' "exit $rc; $(cat "$TMP/record"); $(cat "$TMP/out")"; fi
   FAKE_SCOPED_RC=2 R=$TWO_SCRIPTS run "$TMP/dunebin"
-  if [ "$rc" = 0 ] && [ "$(sed -n 2,\$p "$TMP/record")" = 'shell --shell --jobs 4 --affected --files b.sh tools/sub/a.sh x.ml
-shell --shell --jobs 4' ] && has 'the scoped run was refused (exit 2), no member run; running the whole tier'; then
+  if [ "$rc" = 0 ] && [ "$(sed -n 2,\$p "$TMP/record")" = 'shell --jobs 4 --affected --files b.sh tools/sub/a.sh x.ml
+shell --jobs 4' ] && has 'the scoped run was refused (exit 2), no member run; running the whole tier'; then
     report 0 'a scoped run refused before any member started runs the whole tier'
   else report 1 'a scoped run refused before any member started runs the whole tier' "exit $rc; $(cat "$TMP/record"); $(cat "$TMP/out")"; fi
   FAKE_SCOPED_RC=2 FAKE_SHELL_RC=1 R=$TWO_SCRIPTS run "$TMP/dunebin"
-  if [ "$rc" = 1 ] && has 'shell tier FAILED (tools/test-harnesses.sh exit 1)'; then
+  if [ "$rc" = 1 ] && has 'harness tier FAILED (tools/test-harnesses.sh exit 1)'; then
     report 0 'the whole tier a refusal falls back on still decides'
   else report 1 'the whole tier a refusal falls back on still decides' "exit $rc; $(cat "$TMP/out")"; fi
 fi
@@ -503,20 +524,20 @@ if harness_leg 'the real ask: an unrecognized line, an option-like path, another
   printf "%s --only '^1:'\n" "$shell_member" >"$FAKE_COMMANDS"
   plan
   if [ "$rc" = 0 ] && has "merge-build-check:   $shell_member --only '^1:'"; then
-    report 0 'an overlap reaching one leg narrows the tier to that leg'
-  else report 1 'an overlap reaching one leg narrows the tier to that leg' "exit $rc; $(cat "$TMP/out")"; fi
+    report 0 'a change reaching one leg narrows the tier to that leg'
+  else report 1 'a change reaching one leg narrows the tier to that leg' "exit $rc; $(cat "$TMP/out")"; fi
   printf '%s\n' "$other_member" >"$FAKE_COMMANDS"
   plan
-  if [ "$rc" = 0 ] && has 'shell tier: whole -- no member of the tier reaches tools/sub/a.sh'; then
-    report 0 'a script only a member outside the tier reaches runs the whole tier'
-  else report 1 'a script only a member outside the tier reaches runs the whole tier' "exit $rc; $(cat "$TMP/out")"; fi
+  if [ "$rc" = 0 ] && has 'harness tier: SELECTED -- scoped to' && has "merge-build-check:   $other_member"; then
+    report 0 'a member of another group narrows the tier too: every group is the tier'
+  else report 1 'a member of another group narrows the tier too: every group is the tier' "exit $rc; $(cat "$TMP/out")"; fi
   printf '%s; touch evaluated\n' "$shell_member" >"$FAKE_COMMANDS"
   plan
-  if [ "$rc" = 0 ] && has 'shell tier: whole -- what tools/sub/a.sh reaches could not be asked (test-harnesses.sh exit 2)' &&
+  if [ "$rc" = 0 ] && has 'harness tier: SELECTED -- whole -- what tools/sub/a.sh reaches could not be asked (test-harnesses.sh exit 2)' &&
      [ ! -e "$R/evaluated" ]; then
     report 0 'a line the allowlist does not recognize runs the whole tier'
   else report 1 'a line the allowlist does not recognize runs the whole tier' "exit $rc; $(cat "$TMP/out")"; fi
-  # A shared path reading as an option: the same stand-in, which would answer, is never asked.
+  # A changed path reading as an option: the same stand-in, which would answer, is never asked.
   fixture option-path
   printf '1\n2\n3\n4\n5\n6\n' >"$R/-dash.sh"
   git -C "$R" add -- ./-dash.sh && git -C "$R" commit -q -m 'a script named like an option' &&
@@ -527,9 +548,9 @@ if harness_leg 'the real ask: an unrecognized line, an option-like path, another
   printf '#!/bin/sh\ncat "$FAKE_COMMANDS"\n' >"$R/tools/test-run.sh"
   printf '%s\n' "$shell_member" >"$FAKE_COMMANDS"
   plan
-  if [ "$rc" = 0 ] && has 'shell tier: whole -- what -dash.sh reaches could not be asked (test-harnesses.sh exit 2)'; then
-    report 0 'a shared path reading as an option runs the whole tier'
-  else report 1 'a shared path reading as an option runs the whole tier' "exit $rc; $(cat "$TMP/out")"; fi
+  if [ "$rc" = 0 ] && has 'harness tier: SELECTED -- whole -- what -dash.sh reaches could not be asked (test-harnesses.sh exit 2)'; then
+    report 0 'a changed path reading as an option runs the whole tier'
+  else report 1 'a changed path reading as an option runs the whole tier' "exit $rc; $(cat "$TMP/out")"; fi
   unset FAKE_COMMANDS
 fi
 
@@ -538,9 +559,9 @@ fi
 # members that read the manifest, a small part of the tier (gh-ocannl-1994).
 if harness_leg 'this repository: shared support reaches the tier, a manifest edit part of it #mapping'; then
   members_of() { "$BASH" "$HERE/test-harnesses.sh" "$@" 2>/dev/null | LC_ALL=C sort; }
-  tier=$(members_of --shell --list)
-  support=$(members_of --shell --affected --list --files scripts/harness-support.sh)
-  manifest=$(members_of --shell --affected --list --files tools/test-harnesses.sh)
+  tier=$(members_of --list)
+  support=$(members_of --affected --list --files scripts/harness-support.sh)
+  manifest=$(members_of --affected --list --files tools/test-harnesses.sh)
   if [ -n "$tier" ] && [ "$support" = "$tier" ]; then
     report 0 'scripts/harness-support.sh reaches every member of the tier'
   else report 1 'scripts/harness-support.sh reaches every member of the tier' "tier: $tier; reached: $support"; fi
@@ -578,7 +599,7 @@ fi
 # scans read the repository itself (notes, docs, goldens, YAML, Python, scripts, sources), so the
 # config makes every tracked path an input rather than keeping a second copy of the scans' corpora
 # (gh-ocannl-1382). Each tracked path must match one `input` glob as the merge build reads it: the
-# whole path, `*` crossing `/` (a [[ == ]] pattern does the same). That covers the shell tier's
+# whole path, `*` crossing `/` (a [[ == ]] pattern does the same). That covers the harness tier's
 # trigger too, since every script the tier could select is a tracked path.
 if harness_leg 'the merge-build config runs this script, and every tracked path is an input #config'; then
   config=$HERE/../.github/ship-pr-merge-build

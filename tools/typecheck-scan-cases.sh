@@ -32,7 +32,10 @@
 # build directory's lock, so a build here was refused before it started and the run says nothing
 # about the tables (gh-ocannl-1940) -- run it again once that dune is done.
 set -u
-root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd) || exit 2
+# The physical path: dune names its workspace by it, and refuses an owning module named through a
+# symbolic link ("is not in dune workspace"). Every checkout under macOS's $TMPDIR is reached
+# through one (/var is a link to /private/var), ship-pr's merge build among them.
+root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P) || exit 2
 usage() { sed -n '5,7p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
 stub_mode=companion stub= stubbed=0 verbose=() includes=() tables=() context=()
 while [ $# -gt 0 ]; do

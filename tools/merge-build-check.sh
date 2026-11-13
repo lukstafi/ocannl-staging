@@ -36,27 +36,25 @@
 #            or unanswered ask of either list, a list both cross-cutting and incomplete, of
 #            which no first tier can be asked, a HEAD with no two sides) fails the tier: nothing
 #            here guesses what to run.
-#   shell    only when a path BOTH sides changed since their merge base matches `*.sh`: the
-#            whole path, `*` crossing `/`, as the config's `input` globs read, a path a rename on
-#            either side touched (git's -M detection) counting by its other name too -- the merge
-#            build's own trigger, narrowed to shell scripts. What runs then is the part of
-#            `tools/test-harnesses.sh --shell`, the toolchain-free harness tier CI runs, that the
-#            paths changed on both sides reach, both names of a rename and non-scripts included:
-#            `tools/test-harnesses.sh --shell --affected --files PATH...`, the mapping
-#            `tools/test-run.sh affected --harnesses` owns, read from the merged tree. A member
-#            outside the shell group stays out, so a scoped run is never more than the whole tier
-#            (measured in docs/agent-notes/build-and-test.md) and needs nothing the whole tier
-#            does not. The members run four at once (SHELL_JOBS, gh-ocannl-2002): the slow ones
-#            wait on their fixtures more than they compute.
-# The shell tier's selection is a fail-closed allowlist: it is skipped only when HEAD is a
-# two-parent merge, its merge base and both sides' changes were read, git listed every changed
-# path unquoted, and no path both sides changed matches `*.sh` by either name. Anything else --
-# a one-parent HEAD, a failed git read, a path git had to quote -- runs the whole shell tier. The
-# scope is one too: the tier narrows only when each matching path, asked alone, reaches a member
-# of the tier, and the ask for them all answers. An ask that fails (test-harnesses.sh refuses a
-# line of `affected --harnesses` it does not recognize, a path reading as an option, a failed
-# `affected`), a matching path no member reaches, or a scoped run refused before any member
-# started (exit 2) runs the whole tier, never less.
+#   harness  always asked: the shell harnesses the PR's change reaches, of every group, the
+#            members four at once (SHELL_JOBS, gh-ocannl-2002): what the per-PR `Formatting`
+#            job's harness batch and the `Shell harnesses` jobs read. The change is the paths
+#            the HEAD side changed since the merge base, both names of a rename, a path the
+#            base side renamed counting by its other name too, scripts or not. What runs is
+#            `tools/test-harnesses.sh --affected --files PATH...`, the mapping
+#            `tools/test-run.sh affected --harnesses` owns, read from the merged tree. A change
+#            reaching no member runs none. Until 2026-11-13 this was a shell tier that ran only
+#            when BOTH sides changed a script, the `--shell` group alone: remote CI read a PR's
+#            own change then, and this build only the clash of two.
+# The harness tier's scope is a fail-closed allowlist: it narrows only when HEAD is a two-parent
+# merge, its merge base and both sides' changes were read, git listed every changed path
+# unquoted, each changed path matching `*.sh` (SHELL_GLOB), asked alone, reaches a member, and the
+# ask for all the paths answers. Anything else -- a one-parent HEAD, a failed git read, a path git
+# had to quote, an ask that fails (test-harnesses.sh refuses a line of `affected --harnesses` it
+# does not recognize, a path reading as an option, a failed `affected`), a script no member
+# reaches, or a scoped run refused before any member started (exit 2) -- runs the whole tier,
+# every group, never less. A script is asked alone because a reach the other paths make up for
+# would hide one nothing maps.
 # The shared-red comparison (ship-pr's build of the base alone) stays like with like: that build
 # carries the merge's two parents on the base's tree, so it reads the same two sides here, asks
 # about the same change and narrows to the same paths, the reach read from the base's text. A
@@ -65,8 +63,8 @@
 # script prints of a run is the same for the same failure: tier lines omit elapsed time
 # (gh-ocannl-1950), and the tests tier prints neither its list nor a count (a PR that adds a
 # test lists one alias more than the base alone does); `--plan` shows the command that lists it.
-# --all runs the whole shell tier whatever HEAD is. --plan prints the selection, asking what the
-# shell tier reaches (no slot, no dune), and runs nothing; the tests tier's list needs dune, so
+# --all runs the whole harness tier whatever HEAD is. --plan prints the selection, asking what the
+# harness tier reaches (no slot, no dune), and runs nothing; the tests tier's list needs dune, so
 # --plan names the command that asks for it instead of running it.
 #
 # Toolchain: a non-interactive shell can lack the profile that puts the opam switch on PATH
@@ -89,7 +87,7 @@ while [ $# -gt 0 ]; do
   shift
 done
 SHELL_GLOB='*.sh'
-# The shell tier's members run this many at once (tools/test-harnesses.sh --jobs): the width
+# The harness tier's members run this many at once (tools/test-harnesses.sh --jobs): the width
 # of the `-j 4` build the slot this runs in is sized for, and what the bound was measured at.
 SHELL_JOBS=4
 # The tests tier's build width: the same `-j 4`.
@@ -120,56 +118,59 @@ $out
 EOF
 }
 
-# ask_reach PATH... sets `reach`, the commands of the shell tier's members PATH reaches, one per
-# line. It fails when the ask does; `--list` takes no slot and runs nothing.
+# ask_reach PATH... sets `reach`, the commands of the harness members PATH reaches, one per line.
+# It fails when the ask does; `--list` takes no slot and runs nothing.
 ask_reach() {
-  reach=$("${BASH:-bash}" "$root/tools/test-harnesses.sh" --shell --affected --list --files "$@" \
+  reach=$("${BASH:-bash}" "$root/tools/test-harnesses.sh" --affected --list --files "$@" \
     2>/dev/null </dev/null)
 }
 
-# scope_tier narrows a selected tier to what `asked` reaches (`scoped` 1, `reach` its commands), or
-# says in `scope_why` why the whole tier runs. `scripts` is every asked path matching SHELL_GLOB: a
-# reach the others make up for would hide one nothing maps, so each is asked alone.
+# scope_tier narrows the tier to what `asked` reaches (`scoped` 1, `reach` its commands, empty
+# when they reach no member), or says in `scope_why` why the whole tier runs. `scripts` is every
+# asked path matching SHELL_GLOB: a reach the others make up for would hide one nothing maps, so
+# each is asked alone.
 scope_tier() {
   local s rc
-  for s in "${scripts[@]}"; do
+  for s in ${scripts[@]+"${scripts[@]}"}; do
     ask_reach "$s" || {
       rc=$?
       scope_why="what $s reaches could not be asked (test-harnesses.sh exit $rc)"
       return
     }
-    [ -n "$reach" ] || { scope_why="no member of the tier reaches $s"; return; }
+    [ -n "$reach" ] || { scope_why="no harness reaches $s"; return; }
   done
   ask_reach "${asked[@]}" || {
     rc=$?
-    scope_why="what the paths changed on both sides reach could not be asked (test-harnesses.sh exit $rc)"
+    scope_why="what the paths the head side changed reach could not be asked (test-harnesses.sh exit $rc)"
     return
   }
   scoped=1
 }
 
-# select_tiers sets `shell` (1 = run the shell tier), `why` and, for a tier it could narrow,
-# `scoped`, `reach` and `asked` (or `scope_why`), and prints what it read.
+# select_tiers sets `harness` (1 = run the harness tier), `why`, `script_line` (whether the head
+# side changed a script, which tools/merge-build-replay.py's shell-tier set replays) and, for a
+# tier it could narrow, `scoped`, `reach` and `asked` (or `scope_why`).
 select_tiers() {
-  shell=1 scoped=0 scope_why= reach= asked=() scripts=()
-  local base_names base_pairs both p old new other n=0 rc=0 hit=
+  harness=1 scoped=0 scope_why= reach= asked=() scripts=() script_line=
+  local head_names base_pairs p old new other n=0 rc=0 hit=
   if [ -z "$base" ]; then
     [ "$all" = 0 ] || { why='--all'; return; }
-    why='HEAD is not a two-parent merge, so the whole shell tier runs'
+    why='HEAD is not a two-parent merge, so the whole harness tier runs'
     return
   fi
   if [ "$all" = 1 ]; then why='--all'; return; fi
   [ -n "$mb" ] || rc=1
+  # The base side is read for its renames alone: an edit of a path the base renamed lands in the
+  # merged tree under the other name.
   [ "$rc" != 0 ] || read_side "$mb" "$base" || rc=$?
-  base_names=${side_names-} base_pairs=${side_pairs-}
+  base_pairs=${side_pairs-}
   [ "$rc" != 0 ] || read_side "$mb" "$head" || rc=$?
   case $rc in
     0) ;;
-    3) why='git quoted a path one side changed, so the whole shell tier runs'; return ;;
-    *) why='the paths each side changed could not be read, so the whole shell tier runs'; return ;;
+    3) why='git quoted a path one side changed, so the whole harness tier runs'; return ;;
+    *) why='the paths each side changed could not be read, so the whole harness tier runs'; return ;;
   esac
-  both=$(LC_ALL=C comm -12 <(printf '%s' "$base_names" | LC_ALL=C sort -u) \
-    <(printf '%s' "$side_names" | LC_ALL=C sort -u))
+  head_names=$(printf '%s' "$side_names" | LC_ALL=C sort -u)
   while IFS= read -r p; do
     [ -n "$p" ] || continue
     n=$((n + 1))
@@ -177,9 +178,10 @@ select_tiers() {
     case $p in
       $SHELL_GLOB)
         scripts+=("$p")
-        [ -n "$hit" ] || hit="$p, changed on both sides, matches $SHELL_GLOB" ;;
+        [ -n "$hit" ] || hit="$p matches $SHELL_GLOB" ;;
     esac
-    # A path counts by its other name when a rename on either side touched it.
+    # A path counts by its other name when a rename on the base side touched it (the head side's
+    # own renames are among its names already).
     while IFS=$'\t' read -r old new; do
       [ -n "$old" ] || continue
       if [ "$old" = "$p" ]; then other=$new; elif [ "$new" = "$p" ]; then other=$old; else continue; fi
@@ -187,21 +189,31 @@ select_tiers() {
       case $other in
         $SHELL_GLOB)
           scripts+=("$other")
-          [ -n "$hit" ] || hit="$p, changed on both sides, was renamed from or to $other, which matches $SHELL_GLOB" ;;
+          [ -n "$hit" ] || hit="$p was renamed from or to $other, which matches $SHELL_GLOB" ;;
       esac
     done <<EOF
-$base_pairs$side_pairs
+$base_pairs
 EOF
   done <<EOF
-$both
+$head_names
 EOF
   if [ -n "$hit" ]; then
-    why=$hit
-    scope_tier
+    script_line="a script changed on the head side -- $hit"
+  else
+    script_line="no script changed on the head side -- none of the $n path(s) it changed matches $SHELL_GLOB, by either name of a rename"
+  fi
+  if [ "$n" = 0 ]; then
+    harness=0 why='the head side changed no path'
     return
   fi
-  shell=0
-  why="none of the $n path(s) changed on both sides matches $SHELL_GLOB, by either name of a rename"
+  scope_tier
+  if [ "$scoped" = 1 ] && [ -z "$reach" ]; then
+    harness=0 why="the $n path(s) the head side changed reach no harness"
+  elif [ "$scoped" = 1 ]; then
+    why="scoped to what the $n path(s) the head side changed reach:"
+  else
+    why="whole -- $scope_why"
+  fi
 }
 
 # read_parents sets `base` and `head`, the merge's two parents, and `mb`, their merge base; each is
@@ -281,18 +293,16 @@ if [ -n "$mb" ]; then
 else
   echo "$me: tests tier: UNREAD -- HEAD has no two sides with a merge base, so the tier fails"
 fi
-if [ "$shell" = 1 ]; then
-  echo "$me: shell tier: SELECTED -- $why"
+[ -z "$script_line" ] || echo "$me: harness tier: $script_line"
+if [ "$harness" = 1 ]; then
+  echo "$me: harness tier: SELECTED -- $why"
   if [ "$scoped" = 1 ]; then
-    echo "$me: shell tier: scoped to what the ${#asked[@]} shared path(s) reach:"
     while IFS= read -r line; do echo "$me:   $line"; done <<EOF
 $reach
 EOF
-  elif [ -n "$scope_why" ]; then
-    echo "$me: shell tier: whole -- $scope_why"
   fi
 else
-  echo "$me: shell tier: skipped -- $why"
+  echo "$me: harness tier: skipped -- $why"
 fi
 [ "$plan" = 0 ] || exit 0
 
@@ -345,21 +355,21 @@ elif [ "$tests" = list ]; then
   echo "$me: tests tier: the change reaches no per-test alias"
 fi
 echo "$me: tests tier passed"
-if [ "$shell" = 1 ]; then
+if [ "$harness" = 1 ]; then
   rc=0
   if [ "$scoped" = 1 ]; then
-    tools/test-harnesses.sh --shell --jobs "$SHELL_JOBS" --affected --files "${asked[@]}" </dev/null || rc=$?
+    tools/test-harnesses.sh --jobs "$SHELL_JOBS" --affected --files "${asked[@]}" </dev/null || rc=$?
     if [ "$rc" = 2 ]; then
       # Every refusal comes before a member starts, so the whole tier still fits the bound.
-      echo "$me: shell tier: the scoped run was refused (exit 2), no member run; running the whole tier"
+      echo "$me: harness tier: the scoped run was refused (exit 2), no member run; running the whole tier"
       scoped=0 rc=0
     fi
   fi
-  [ "$scoped" = 1 ] || tools/test-harnesses.sh --shell --jobs "$SHELL_JOBS" </dev/null || rc=$?
+  [ "$scoped" = 1 ] || tools/test-harnesses.sh --jobs "$SHELL_JOBS" </dev/null || rc=$?
   if [ "$rc" != 0 ]; then
-    echo "$me: shell tier FAILED (tools/test-harnesses.sh exit $rc)" >&2
+    echo "$me: harness tier FAILED (tools/test-harnesses.sh exit $rc)" >&2
     exit 1
   fi
-  echo "$me: shell tier passed"
+  echo "$me: harness tier passed"
 fi
 echo "$me: passed"

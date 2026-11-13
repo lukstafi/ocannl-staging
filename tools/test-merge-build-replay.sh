@@ -151,9 +151,9 @@ fi
 # The replay's shell-tier set must decide as the gate itself does: run merge-build-check.sh --plan
 # on every merge the replay reports and compare. A clone, so HEAD moves outside the shared fixture,
 # extended by m8: main adds q"uote.txt, a name git quotes, while the side edits b.ml -- nothing
-# shared, but the gate fails closed on the quoted name and selects the shell tier -- and m9: main
-# edits s/t.sh, the side r.sh -- a script on each side, none shared, which the gate skips under
-# either trigger. The comparison runs under both triggers.
+# shared, but the gate fails closed on the quoted name and runs the whole harness tier -- and m9:
+# main edits s/t.sh, the side r.sh -- a script on each side, none shared, which the gate reads as
+# the head side's script under either trigger. The comparison runs under both triggers.
 if harness_leg 'the shell-tier replay agrees with merge-build-check.sh on every merge #gate'; then
   if [ -z "$FIXTURE" ]; then report 1 'shell-tier agreement' 'no fixture'; else
     C=$TMP/gate
@@ -172,27 +172,28 @@ if harness_leg 'the shell-tier replay agrees with merge-build-check.sh on every 
       n=$((n + 1))
       git -C "$C" checkout -q --detach "$sha" 2>/dev/null || { bad+=" $sha(checkout)"; continue; }
       plan=$(cd "$C" && "$BASH" tools/merge-build-check.sh --plan 2>&1)
+      # What the gate says of the head side's scripts, or that it fails closed to the whole tier.
       case $plan in
-        *'shell tier: SELECTED'*) gate=1 ;;
-        *'shell tier: skipped'*) gate=0 ;;
+        *'harness tier: a script changed on the head side'* | *'so the whole harness tier runs'*) gate=1 ;;
+        *'harness tier: no script changed on the head side'*) gate=0 ;;
         *) bad+=" $sha(plan: $plan)"; continue ;;
       esac
       case $sets in shell-tier) mine=1 ;; *) mine=0 ;; esac
       selected=$((selected + gate))
       [ "$gate" = "$mine" ] || bad+=" $subject(gate $gate, replay $mine)"
     done < <(sed -n 's/^  \([0-9a-f]\{10\}\) \([^:]*\): \(.*\)$/\1 \2 \3/p' "$out")
-    label="under $trigger, the replay and the gate select the shell tier on the same 3 of 8 merges"
-    if [ "$rc" = 0 ] && [ "$n" = 8 ] && [ "$selected" = 3 ] && [ -z "$bad" ]; then
+    label="under $trigger, the replay and the gate read a head-side script on the same 4 of 8 merges"
+    if [ "$rc" = 0 ] && [ "$n" = 8 ] && [ "$selected" = 4 ] && [ -z "$bad" ]; then
       report 0 "$label"
     else report 1 "$label" \
       "exit $rc, $n merge(s) compared, gate selected $selected; disagreements:${bad:- none}; $(cat "$out")"; fi
     done
     # Negative controls: a replay that ignores renames' other names loses m3, one without the
-    # quoted-path fallback loses m8, and one whose shell tier follows any-input gains m9; the
-    # comparison must see each.
-    for control in 'rename-blind:m3:-:82-:s/for n in (p, \*other.get(p, \[\]))/for n in (p,)/' \
-                   'quote-blind:m8:-:82-:s/if src == CHECK_PATH and quoted:/if False:/' \
-                   'trigger-following:m9:shell-tier:84-:s/elif trigger == "same-input" or src == CHECK_PATH:/elif trigger == "same-input":/'; do
+    # quoted-path fallback loses m8, and one that reads paths both sides changed, as the tier did
+    # before it read the head side, loses m9; the comparison must see each.
+    for control in 'rename-blind:m3:-:83-:s/for n in (p, \*other.get(p, \[\]))/for n in (p,)/' \
+                   'quote-blind:m8:-:83-:s/if src == CHECK_PATH and quoted:/if False:/' \
+                   'both-sides:m9:-:83-:s/hits = matching(head, globs, other)/hits = matching(base \& head, globs, other)/'; do
       what=${control%%:*} rest=${control#*:}
       merge_name=${rest%%:*} rest=${rest#*:}
       verdict=${rest%%:*} rest=${rest#*:}
@@ -311,12 +312,12 @@ if harness_leg 'built-in sets are read from where they are defined #definitions'
       mv "$D/check.new" "$D/tools/merge-build-check.sh"
     replay --repo "$D" origin/main
     # any-input from the config: config (*.md *.txt) builds where each side changed one: m2 (n.md)
-    # and m3 (r.txt); shell-tier, now *.ml and same-input whatever the trigger, builds m1 alone
-    # (x.ml shared), not m4 (a.ml against b.ml).
+    # and m3 (r.txt); shell-tier, now *.ml and read off the head side whatever the trigger, counts
+    # m1, m4 and m5 (the side's x.ml, b.ml and c.ml), all three beyond config.
     if [ "$rc" = 0 ] && has 'set config: *.md *.txt  (.github/ship-pr-merge-build)' &&
        has 'set shell-tier: *.ml  (tools/merge-build-check.sh)' &&
        has 'trigger any-input (.github/ship-pr-merge-build)' &&
-       [ "$(row config)" = 62- ] && [ "$(row shell-tier)" = 611 ]; then
+       [ "$(row config)" = 62- ] && [ "$(row shell-tier)" = 633 ]; then
       report 0 'edited definitions change the default sets and trigger'
     else report 1 'edited definitions change the default sets and trigger' "exit $rc; $(cat "$out")"; fi
     printf "SHELL_GLOB='*.sh'\n" >>"$D/tools/merge-build-check.sh"
