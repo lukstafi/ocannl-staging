@@ -32,9 +32,12 @@ AGENTS.md's dependency-pin guidance.
 - Before pushing, run `tools/test-run.sh prepush --since origin/@@MAIN@@ build -j 4`, then
   `dune build @check -j 4`, each slot-wrapped. If the default list is CROSS-CUTTING, use
   `tools/test-run.sh prepush --referenced-only --since origin/@@MAIN@@ build -j 4` for its first
-  tier **only if narrow**, plus tests exercising the change; leave the full list to PR CI. If the
-  first tier is itself CROSS-CUTTING, run the tests exercising the change and name them in the
-  PR body. Run applicable `slow-` aliases named from the full list: CI does not run `@slow`.
+  tier **only if narrow**, plus tests exercising the change. No per-PR CI job runs the full list:
+  request it as a cc execution leg on a CPU-only box (`dune runtest`, the common brief's
+  execution request) and cite the run in the PR body before merging. If the first tier is itself
+  CROSS-CUTTING, run the tests exercising the change and name them in the PR body beside that
+  leg. Run applicable `slow-` and `train-` aliases named from the full list: no per-PR job runs
+  `@slow` or `@train`.
   Follow the notes for `train-` members and shell harnesses; a long batch needs the common
   brief's execution request.
 - Select backend legs using AGENTS.md and the *Skip coverage* and *Codegen text inventory*

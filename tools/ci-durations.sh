@@ -27,7 +27,7 @@
 #
 # Examples:
 #   tools/ci-durations.sh                        # last 30 completed ci.yml runs
-#   tools/ci-durations.sh --event pull_request -n 50   # the per-PR gate
+#   tools/ci-durations.sh --event pull_request -n 50   # what a PR still runs
 #   tools/ci-durations.sh --event schedule       # the extended (Windows) matrix
 #   tools/ci-durations.sh --workflow ci-env.yml --event push   # master's per-merge clean room
 #   tools/ci-durations.sh --event pull_request --job ubuntu --step 'Run (targets=|opam exec -- dune build)'

@@ -316,7 +316,7 @@ in the `tools/*.sh` scripts (gh-ocannl-1111) and in the string literals of the O
   `tools/test-harnesses.sh --affected --files PATH...` over every path the HEAD side changed since
   the merge base, both names of a rename, a path the base side renamed by its other name too,
   non-scripts included, so `affected --harnesses`'s mapping is asked and not copied. It names no
-  group: the per-PR `Formatting` job's harness batch is the `--toolchain` and `--promotion`
+  group: the scheduled `Formatting` job's harness batch is the `--toolchain` and `--promotion`
   groups and the `Shell harnesses` job the `--shell` one, and the merge build has the toolchain
   they need, since its format and compile tiers ran on it. A change reaching no member runs
   none. `tools/merge-build-replay.py`'s shell-tier set follows: it counts the merges whose head
@@ -348,7 +348,7 @@ in the `tools/*.sh` scripts (gh-ocannl-1111) and in the string literals of the O
 
 ### Scan corpora, goldens and floors
 
-- The merge build also runs what the per-PR `Formatting` job and the affected part of the `Build`
+- The merge build also runs what the `Formatting` job and the affected part of the `Build`
   shards read, so that it can become the merge gate (in wave-20261111 every head move waited
   25 to 40 minutes on remote CI). Its format tier is `tools/fmt-check.sh` with the scans off, since
   the compile tier runs them. Its tests tier builds, at `-j 4`, the list
@@ -4053,10 +4053,30 @@ replacement for the fleet reservation or `tools/test-run.sh` wrapper.
   set to that tip. A later PR's green covers only that PR's merge commit. The CI-red triage
   routine has no blind-span recovery step (gh-ocannl-2014).
 
+- **A PR is gated locally, and remote CI reads master nightly** (since 2026-11-13). ship-pr builds
+  the merged tree before every merge (`.github/ship-pr-merge-build`, `trigger always`):
+  `tools/merge-build-check.sh` runs the formatter gate, the compile and the repository scans, the
+  tests the change reaches and the shell harnesses it reaches, in about three minutes, where
+  every head move of wave-20261111 waited 25 to 40 on the remote matrix. Per PR `ci.yml` runs two
+  jobs, `Promotion harnesses (Dune floor)` and `Benchmark tests (CPU torch)`, which are what a
+  developer box does not have; `ci-env.yml`'s clean room runs per PR only when an opam file, an
+  opam template, `dune-project` or that workflow changed. `Build` (every shard, `train`
+  included), `Formatting`, `Shell harnesses` and `Shell harnesses (real dune)` run on the daily
+  schedule and by dispatch, and the CI-red triage routine owns their reds.
+  `test/operations/ci_matrix.sh` holds the per-PR job list and the clean room's paths. What the
+  local gate does not read waits for the nightly run, the integration loops and the daily sweep:
+  a test the change does not reach, a `slow-` or `train-` alias, a reached list past 200
+  aliases, other platforms, compilers and backends. The rest of a CROSS-CUTTING change's list
+  does not wait: it is owed before the merge, as a full `dune runtest` on a CPU-only box, cited
+  in the PR body (a wave worker requests it as a cc execution leg). Items in this section that
+  say what a PR's matrix run covered describe it as it ran until that day; the same matrix is the
+  ordinary dispatch's now.
+
 - Two workflows, split by what each proves (gh-ocannl-1816). `ci.yml`, the full matrix (ubuntu
-  shards, macOS, the side jobs; Windows and the OCaml floor on the schedule), runs per PR -- the
-  merge gate reads the PR head's run -- daily on the schedule, and by dispatch; NEVER on a master
-  push. `ci-env.yml` runs on every master push and every PR: the clean room, a fresh checkout and a
+  shards, macOS, the side jobs; Windows and the OCaml floor on the schedule), runs daily on the
+  schedule and by dispatch (per PR too until 2026-11-13; two side jobs still do, the item
+  above); NEVER on a master
+  push. `ci-env.yml` runs on every master push, and per PR for a change to the opam inputs: the clean room, a fresh checkout and a
   fresh dependency switch solved from the opam files alone (no CI-side pins, no dependency cache),
   `dune build -p arrayjit,neural_nets_lib` as opam builds them, `dune build --release @check`, and
   one smoke test (`hello_world_dim1x1` on cc), also `--release`: `-p` minus its package filter, so

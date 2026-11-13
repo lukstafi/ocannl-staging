@@ -1,8 +1,9 @@
 name: ci-env
 # The clean room: a fresh checkout, a fresh dependency switch solved from the
 # opam files alone, and the build an opam user gets (gh-ocannl-1816). This is
-# master's per-merge verdict; ci.yml's full matrix gates PR heads and sweeps
-# master daily. The fleet's boxes cover the backends and platforms, but they
+# master's per-merge verdict; ci.yml's full matrix sweeps master daily, and a
+# PR is gated by ship-pr's local merge build. The fleet's boxes cover the
+# backends and platforms, but they
 # share one opam switch, local pins, warm `_build` directories, ignored
 # fixtures and caches, so their drift is correlated. What a hosted runner
 # proves that they cannot is that the repository builds from what it declares.
@@ -16,7 +17,16 @@ on:
   push:
     branches:
       - master
+  # Per PR only where the clean room can say something the merge does not
+  # already get on master a few minutes later: a change to what the switch is
+  # solved from (the opam files, `dune-project`, which generates them) or to
+  # this workflow. Any other PR's clean-room verdict is its merge's push run.
   pull_request:
+    paths:
+      - "*.opam"
+      - "*.opam.template"
+      - "dune-project"
+      - ".github/workflows/ci-env.yml"
 # ci.yml's rule: a PR push supersedes the run of the push before it, and
 # nothing else is cancelled. A master push keys its group on its own commit,
 # so every merge gets its own verdict instead of one span verdict per burst;

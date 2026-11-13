@@ -6,13 +6,21 @@ name: ci
 run-name: ${{ inputs.expected_sha && format('ci at {0}', inputs.expected_sha) || '' }}
 # No `push` trigger (gh-ocannl-1816): a merge to master gets its verdict from
 # `ci-env.yml`, a fresh-checkout build from the opam files alone that takes
-# minutes. This matrix gates each PR head, sweeps master daily on the
-# schedule, and runs on demand by dispatch. Behind a wave's PR runs it takes
-# hours, and on a merged commit nothing would act on it sooner than on the
-# sweep: the fleet's boxes cover the backends and platforms after a merge, and
-# what only a hosted runner adds -- a clean room -- is ci-env.yml's job.
+# minutes. The build matrix sweeps master daily on the schedule and runs on
+# demand by dispatch; it no longer runs per PR. A PR is gated locally instead:
+# ship-pr builds the merged tree before every merge
+# (.github/ship-pr-merge-build, `trigger always`): the formatter gate, the
+# compile and the repository scans, the tests the change reaches and the shell
+# harnesses it reaches, in about three minutes, where this matrix took 25 to
+# 40 behind every head move of a wave. What runs here per PR is what a
+# developer box does not have: the Dune floor (`promotion-floor`) and a torch
+# install (`torch-runner`). The jobs that left `pull_request` -- `run`, `fmt`,
+# `harnesses`, `harness-real-dune` -- read on the schedule what the local gate
+# read at the merge, on a clean runner, and the CI-red triage routine owns
+# their reds.
 on:
-  # Markdown contains compiled examples; documentation edits need this gate too.
+  # Unfiltered: Markdown contains compiled examples, and the jobs that stay
+  # per PR are cheap.
   pull_request:
   # Daily, 03:00 UTC, so a scheduled red spans about one day of merges: it
   # carries the only Windows and OCaml-floor coverage, and at 50-150 merges a
@@ -69,7 +77,11 @@ concurrency:
   group: ci-${{ github.event_name }}-${{ github.ref }}${{ github.event_name == 'workflow_dispatch' && format('-{0}', github.run_id) || '' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
+  # Off the per-PR path (the header says what gates a PR instead). The matrix
+  # expressions below still name a default for an event that is neither the
+  # schedule nor a special dispatch: it is the ordinary dispatch's matrix.
   run:
+    if: github.event_name != 'pull_request'
     name: Build
     strategy:
       # These jobs are independent diagnostics, not stages, so one failing tells
@@ -144,7 +156,8 @@ jobs:
         # the macOS concurrency it grants Linux), so a second macOS job would
         # more likely wait for a runner than run beside the first.
         #
-        # Then the `train` tier. Per PR it runs as two ubuntu
+        # Then the `train` tier. On an ordinary dispatch (and per PR, while
+        # this matrix ran there) it runs as two ubuntu
         # shards, NOT on macOS (gh-ocannl-1422): as a second macOS job beside
         # `main` it doubled each PR's claim on the scarce runners, and in a
         # wave of ~20 PRs in review macOS jobs queued ~2h, one was cancelled
@@ -159,7 +172,7 @@ jobs:
         # matrix beside its main job; tools/sweep.sh's full-suite units still
         # execute the tier daily on every box.
         #
-        # And the floor the opam files claim: `"ocaml" {>= "5.3.0"}`. Per-PR
+        # And the floor the opam files claim: `"ocaml" {>= "5.3.0"}`. Ordinary
         # runs build only 5.5, so without this the lower bound is a promise
         # nothing checks -- and the alternative, raising the constraint to the
         # version we happen to test, would drop users for no technical reason.
@@ -1134,9 +1147,12 @@ jobs:
   # the tree. (Formatting used to be an off-branch daily sweep; the
   # gate replaced it -- gh-ocannl-938 -- because a repo-wide reformat commit
   # conflicts with every branch in flight, while on the author's branch it costs
-  # one command. AGENTS.md says when to run it.)
+  # one command. AGENTS.md says when to run it.) Scheduled, not per PR: the
+  # merge build's format tier is this job's command on the merged tree, and
+  # its harness tier runs the two harness groups below when the change
+  # reaches them.
   fmt:
-    if: github.event_name != 'workflow_dispatch' || !inputs.windows_only && inputs.ocaml_compiler == '5.5.x'
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' && !inputs.windows_only && inputs.ocaml_compiler == '5.5.x'
     name: Formatting
     runs-on: ubuntu-latest
     # Clears the job's ~5 minutes plus the apt pre-install's own cap (its fill:
@@ -1268,9 +1284,12 @@ jobs:
   # absences of this runner (no dune, not a fleet host) put on, so any box
   # with a toolchain reproduces the check before it pushes (gh-ocannl-1593).
   # The checks it skips for want of a dune are listed apart, and held to
-  # exactly those, so the next job can run them.
+  # exactly those, so the next job can run them. Scheduled, not per PR: the
+  # merge build's harness tier runs the members a PR's change reaches, with a
+  # dune, on the box that merges; this job is the whole set on a runner that
+  # has none.
   harnesses:
-    if: github.event_name != 'workflow_dispatch' || !inputs.windows_only && inputs.ocaml_compiler == '5.5.x'
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' && !inputs.windows_only && inputs.ocaml_compiler == '5.5.x'
     name: Shell harnesses
     runs-on: ubuntu-latest
     # The job's ~10 minutes plus the zsh pre-install's own cap (its fill: three
@@ -1378,7 +1397,9 @@ jobs:
     - name: Test shell harnesses
       run: tools/test-harnesses.sh --ci-shell --jobs 4
 
-  # The shell harnesses' real-dune checks, per PR (gh-ocannl-1650). The job
+  # The shell harnesses' real-dune checks (gh-ocannl-1650), scheduled like the
+  # job above: a box that merges has a dune, so the merge build's harness tier
+  # runs these legs for real whenever the change reaches them. The job
   # above hides dune and skips them, by its list
   # tools/harness-skips-ci-shell-dune.txt; here a dune is installed, only the
   # legs holding them run (tools/test-harnesses.sh's real_dune_legs, a minute
@@ -1387,7 +1408,7 @@ jobs:
   # its own, and setup-ocaml's cost lands only here. The scheduled legs-alone
   # job below also runs them, alone, beside every other gated leg.
   harness-real-dune:
-    if: github.event_name != 'workflow_dispatch' || !inputs.windows_only && inputs.ocaml_compiler == '5.5.x'
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' && !inputs.windows_only && inputs.ocaml_compiler == '5.5.x'
     name: Shell harnesses (real dune)
     runs-on: ubuntu-latest
     # Setup and the dune install take most of it; the budget is the fmt job's,

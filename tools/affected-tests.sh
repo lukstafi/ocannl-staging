@@ -67,12 +67,13 @@
 # (gh-ocannl-2072), plus exercising tests and applicable slow aliases from the
 # full list, link-only ones included. Otherwise the run before a push is `tools/test-run.sh prepush --since BASE`
 # (gh-ocannl-1829): the default list, link-only aliases included, without its
-# `slow-` and `train-` members (CI's `@train` shards run the `train-` ones; no
-# CI job runs `@slow`, so `prepush` names the `slow-` ones for the caller to
-# run those the change exercises) -- unless the verdict, below, is
-# `cross-cutting`: `prepush` then refuses, the PR's CI run owns the list but
-# its `slow-` aliases, and the local run is those plus the tests exercising
-# the change (AGENTS.md). The graph is always the CURRENT worktree's, whatever
+# `slow-` and `train-` members (the nightly CI run builds `@train`, no CI job
+# runs `@slow`, and no per-PR job runs either, so `prepush` names the `slow-`
+# ones and counts the `train-` ones for the caller to run those the change
+# exercises) -- unless the verdict, below, is `cross-cutting`: `prepush` then
+# refuses, a full-suite run on a CPU-only box before the merge owns the list
+# but its `slow-` aliases, and the local run is those plus the tests
+# exercising the change (AGENTS.md). The graph is always the CURRENT worktree's, whatever
 # revisions were named.
 #
 # What dune is asked (each answer is checked against the forms listed below,
@@ -3067,13 +3068,13 @@ my %verdict;
   if (!$verdict{"cross-cutting"}) {
   } elsif (first_tier_wide($n_first, $n_all)) {
     printf STDERR "affected: CROSS-CUTTING: %d of the %d per-test aliases rank first, so this change is cross-cutting:"
-      . " the PR's CI run owns the full list%s; locally run the tests that exercise the change, named in the PR"
-      . " body, and `dune build \@check`\n", $n_first, $n_all, $slow;
+      . " a full-suite run on a CPU-only box before the merge owns the full list%s; locally run the tests that exercise the change, named in"
+      . " the PR body with that run, and `dune build \@check`\n", $n_first, $n_all, $slow;
   } else {
     printf STDERR "affected: CROSS-CUTTING: %d of the %d per-test aliases are listed, %d of them link-only, so this change"
-      . " is cross-cutting by its list, though only %d rank first: the PR's CI run owns the full list%s; locally run"
-      . " the tests that exercise the change, named in the PR body -- the %d that rank first (--referenced-only) are"
-      . " where to start -- and `dune build \@check`\n", $n_listed, $n_all, scalar(@link_only), $n_first, $slow, $n_first;
+      . " is cross-cutting by its list, though only %d rank first: a full-suite run on a CPU-only box before the merge owns the full list%s;"
+      . " locally run the tests that exercise the change, named in the PR body with that run -- the %d that rank first"
+      . " (--referenced-only) are where to start -- and `dune build \@check`\n", $n_listed, $n_all, scalar(@link_only), $n_first, $slow, $n_first;
   }
 }
 printf STDERR "affected: %d alias(es) from %d changed path(s)%s%s%s\n", scalar(keys %out) + ($referenced_only ? 0 : @link_only),

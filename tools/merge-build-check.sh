@@ -37,7 +37,7 @@
 #            which no first tier can be asked, a HEAD with no two sides) fails the tier: nothing
 #            here guesses what to run.
 #   harness  always asked: the shell harnesses the PR's change reaches, of every group, the
-#            members four at once (SHELL_JOBS, gh-ocannl-2002): what the per-PR `Formatting`
+#            members four at once (SHELL_JOBS, gh-ocannl-2002): what the scheduled `Formatting`
 #            job's harness batch and the `Shell harnesses` jobs read. The change is the paths
 #            the HEAD side changed since the merge base, both names of a rename, a path the
 #            base side renamed counting by its other name too, scripts or not. What runs is

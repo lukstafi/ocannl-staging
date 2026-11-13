@@ -224,7 +224,7 @@ shell --jobs 4" ] && has 'merge-build-check: passed'; then
 fi
 
 COMPILE='build --root . @check @test/operations/scans'
-# The format tier and the tests tier (the local merge gate: what the per-PR `Formatting` job and
+# The format tier and the tests tier (the local merge gate: what the scheduled `Formatting` job and
 # the affected part of the `Build` shards read). Their fakes record in $TMP/record.tiers.
 range_of() { # the head side's change, as the script asks it: MERGE_BASE..HEAD_SIDE of R's HEAD
   local b h
