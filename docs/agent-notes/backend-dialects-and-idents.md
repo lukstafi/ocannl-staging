@@ -361,7 +361,11 @@ files.
   name with the backend's own compiler, settles each failing batch by the names its report blames
   (each confirmed ALONE) or by bisection, and prints the measurement, the missing and superfluous
   entries, and the module to paste. Exit 1 says the checked-in table no longer matches the
-  toolchain; `--names a,b` spot-checks entries. `tools/vendor-idents-check.sh <backend>` wraps the
+  toolchain; `--names a,b` spot-checks entries. Regenerate on the newest toolkit the fleet runs: the measurements so far only
+  grew (CUDA 13.5 added six runtime-API enumerators to 13.4's 1029 names and dropped none), so the
+  newest table is also the union. Should a later report list superfluous entries, keep the ones an
+  older supported toolkit still rejects -- a superfluous entry only renames a routine, a missing
+  one breaks its compile there -- and expect that box's check to keep saying TABLE STALE. `tools/vendor-idents-check.sh <backend>` wraps the
   check in a one-line verdict, and the sweep runs it after every CUDA and HIP unit whose suite ran
   (gh-ocannl-1705), so an SDK upgrade is said the day it lands. Reading the headers had been wrong in both
   directions (gh-ocannl-1338): nvrtc accepts kernels named `float4`, `uint4`, `char4` (CUDA's
