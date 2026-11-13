@@ -348,7 +348,10 @@ in the `tools/*.sh` scripts (gh-ocannl-1111) and in the string literals of the O
   merged tip. An INCOMPLETE list (a changed path UNMAPPED) runs what it holds: the gap is
   `affected`'s to close, not a reason to refuse the merge that met it. A list that cannot be read
   (a status and a verdict that do not belong together, no verdict line, a HEAD with no two sides)
-  fails the tier. A list of more than 200 aliases (`TESTS_MAX`) does not run either and is OWED,
+  fails the tier, and so does a first tier that did not answer for itself: that ask prints the
+  default list's trailer before the tier's, so one trailer is the default list's `cross-cutting`
+  again and not a wide tier. A list both cross-cutting and incomplete fails too, since `prepush`
+  asks no first tier of it and its refusal has the status of every other refusal. A list of more than 200 aliases (`TESTS_MAX`) does not run either and is OWED,
   a cross-cutting change's first tier included: that is the bound's share. Timed on 2026-11-13,
   each tier from a fresh clone under a `--cpu` slot, on mac-studio at load 5 to 8 and on an idle
   minix-amd-linux: format 4 s and 3 s, compile 136 s and 137 s, the whole shell tier 422 s and

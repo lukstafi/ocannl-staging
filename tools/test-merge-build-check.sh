@@ -327,7 +327,7 @@ build --root . -j 4 @a/runtest-first" ] && has 'tests tier: OWED -- the change i
   # A first tier that was not read is not a wide one: a failed query, a status and a verdict at
   # odds, no trailer of its own each fail the tier and show the ask.
   bad=
-  for probe in '1 ok' '2 ok' '0 cross-cutting' '3 ok' '0 none' '75 ok'; do
+  for probe in '1 ok' '2 ok' '0 cross-cutting' '3 ok' '0 none' '2 none' '75 ok'; do
     # shellcheck disable=SC2086 # the probe's two words
     set -- $probe
     FAKE_PREPUSH_RC=2 FAKE_VERDICT=cross-cutting FAKE_TIER_LIST=$TMP/tier-list FAKE_TIER_RC=$1 FAKE_TIER_VERDICT=$2 \
@@ -339,6 +339,14 @@ build --root . -j 4 @a/runtest-first" ] && has 'tests tier: OWED -- the change i
   if [ -z "$bad" ]; then
     report 0 'a first tier that was not read fails the tier, never reading as a wide one'
   else report 1 'a first tier that was not read fails the tier, never reading as a wide one' "$bad"; fi
+  # `2 none` above is the default list's trailer alone, under the refusal's own status: the ask
+  # that died before the tier answered (Codex P2). A list both cross-cutting and incomplete has
+  # no first tier to ask and no status of its own, so it fails too.
+  FAKE_LIST=$TMP/list FAKE_PREPUSH_RC=2 FAKE_VERDICT=cross-cutting,incomplete FAKE_TIER_LIST=$TMP/tier-list R=$APART run "$TMP/dunebin"
+  if [ "$rc" = 1 ] && [ "$(cat "$TMP/record")" = "$COMPILE" ] && [ "$(tiers | grep -c referenced-only)" = 0 ] && ! has 'OWED' &&
+     has 'tests tier FAILED (the change is CROSS-CUTTING and its list INCOMPLETE'; then
+    report 0 'a list both cross-cutting and incomplete fails the tier, asking no first tier'
+  else report 1 'a list both cross-cutting and incomplete fails the tier, asking no first tier' "exit $rc; $(tiers); $(grep 'tests tier' "$TMP/out")"; fi
   # Fail closed: a status and a verdict that do not belong together, no verdict, no two sides.
   bad=
   for probe in '2 ok' '0 cross-cutting' '3 ok' '0 none' '1 ok'; do

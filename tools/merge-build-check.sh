@@ -33,7 +33,8 @@
 #                is OWED: such a build would not fit the bound. A cross-cutting change's first
 #                tier is held to the same length.
 #            A list that cannot be read at all (prepush refusing for another reason, a failed
-#            or unanswered ask of either list, a HEAD with no two sides) fails the tier: nothing
+#            or unanswered ask of either list, a list both cross-cutting and incomplete, of
+#            which no first tier can be asked, a HEAD with no two sides) fails the tier: nothing
 #            here guesses what to run.
 #   shell    only when a path BOTH sides changed since their merge base matches `*.sh`: the
 #            whole path, `*` crossing `/`, as the config's `input` globs read, a path a rename on
@@ -231,14 +232,25 @@ ask_tests() {
   case $rc/$verdict in
     0/ok) tests=list ;;
     3/incomplete) tests=list tests_owed='the list is INCOMPLETE (a changed path is UNMAPPED), so what that path reaches' ;;
-    2/cross-cutting | 2/cross-cutting,incomplete)
+    2/cross-cutting,incomplete)
+      # prepush asks no first tier of an incomplete list, and its refusal (2) is the status of its
+      # other refusals too: nothing in this answer says the refusal was that one, so nothing here
+      # says what to run or that running nothing is right.
+      tests=unread tests_why='the change is CROSS-CUTTING and its list INCOMPLETE (a changed path is UNMAPPED), so no first tier can be asked: map the path in tools/affected-tests.sh, which tools/test-run.sh affected names as UNMAPPED' ;;
+    2/cross-cutting)
       rc=0
       "${BASH:-bash}" "$root/tools/test-run.sh" prepush --referenced-only --since "$mb..$head" --list \
         >"$tests_dir/list" 2>"$tests_dir/ask-first" </dev/null || rc=$?
-      # The first tier's own verdict, the last trailer of this ask: narrow (ok), incomplete, or
-      # wide (cross-cutting again, which prepush refuses with 2). Any other answer -- a failed
-      # query, a lock refusal, no trailer -- is no reading of the tier and fails it.
+      # The first tier's own verdict: narrow (ok), incomplete, or wide (cross-cutting again, which
+      # prepush refuses with 2). This ask prints the default list's trailer before the first
+      # tier's, so the tier answered only when there are TWO trailers; with one, the last trailer
+      # is the default list's `cross-cutting` again, and a query that failed before the tier was
+      # asked would read as a wide tier. Any other answer -- a failed query, a lock refusal, a
+      # missing trailer -- is no reading of the tier and fails it. This second ask is also what
+      # vouches for the first one's refusal: a first ask that exited 2 for another reason fails
+      # here the same way, before the tier's trailer.
       verdict=$(sed -n 's/^affected: verdict=//p' "$tests_dir/ask-first" | tail -n 1)
+      [ "$(grep -c '^affected: verdict=' "$tests_dir/ask-first")" = 2 ] || verdict='no trailer of its own'
       case $rc/$verdict in
         0/ok) tests=list tests_owed='the change is CROSS-CUTTING, so every per-test alias past its first tier' ;;
         3/incomplete) tests=list tests_owed='the change is CROSS-CUTTING and its first tier INCOMPLETE (a changed path is UNMAPPED), so every per-test alias past what that tier holds' ;;
