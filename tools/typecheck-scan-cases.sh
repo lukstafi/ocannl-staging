@@ -84,10 +84,12 @@ eval "$(credential_env_scrub_text)" || {
 build_dir=${DUNE_BUILD_DIR:-_build}
 case $build_dir in /*) ;; *) build_dir=$root/$build_dir ;; esac
 # Whether the dune output in FILE is its refusal to start beside another dune holding the build
-# directory's lock, in the wording of dune 3.24 or of the versions before it (gh-ocannl-1940). No
-# defect of the engine, a stub or a table: the run is abandoned with a status of its own.
+# directory's lock, in the wording of dune 3.24 or of the versions before it (gh-ocannl-1940), or of
+# dune 3.25, which forwards the build to the dune holding the lock and, that one being no watch-mode
+# server, reports the request refused (gh-ocannl-2216). No defect of the engine, a stub or a table:
+# the run is abandoned with a status of its own.
 dune_lock_held() { # FILE
-  grep -qE 'Another Dune instance is currently running|instance has locked the (_build|build) directory' "$1"
+  grep -qE 'Another Dune instance is currently running|instance has locked the (_build|build) directory|Build requests require a watch-mode server' "$1"
 }
 lock_held() {
   echo "typecheck-scan-cases: LOCK HELD: another dune holds the lock of $build_dir; nothing more was checked" >&2
