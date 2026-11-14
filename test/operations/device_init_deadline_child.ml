@@ -45,7 +45,10 @@
 
    [full-stderr BACKEND]: fd 2 is replaced by a full pipe nobody reads; then a 30 s stall.
    [full-stderr BACKEND throttled] first throttles the process's timers (every nap oversleeps by
-   far, as on a loaded macOS VM), printing [throttled <whether it applied>].
+   far, as on a loaded macOS VM), printing [throttled <whether it applied>]. Either way a probe
+   domain, started after the throttle so it shares it, naps 10 ms at a time and prints [nap <t>]
+   after each: the record of when the process was scheduled at all, so the parent can tell a
+   backstop that waited too long from a process that was not run.
 
    [fork-in-region BACKEND]: forks from inside an armed region; the child stalls 5 s in a region of
    its own, and the parent prints [fork-child <how it ended>].
@@ -218,6 +221,16 @@ let () =
       say "survived"
   | "full-stderr" :: name :: (([] | [ "throttled" ]) as throttled) ->
       if not (List.is_empty throttled) then say "throttled %b" (throttle_timers ());
+      (* Raw writes, one line each, so a line the process wrote before its death is in the
+         record. *)
+      ignore
+        (Stdlib.Domain.spawn (fun () ->
+             while true do
+               Unix.sleepf 0.01;
+               let line = Printf.sprintf "nap %.6f\n" (now ()) in
+               ignore (Unix.write_substring Unix.stdout line 0 (String.length line) : int)
+             done)
+          : unit Stdlib.Domain.t);
       (* fd 2 becomes a pipe that is full and that nobody reads, so a blocking write to it never
          returns. *)
       let r, w = Unix.pipe () in

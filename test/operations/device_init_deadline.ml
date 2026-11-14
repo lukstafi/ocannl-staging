@@ -101,7 +101,10 @@ let run_child_capped ~cap ~deadline args =
         (String.concat ~sep:" " args) deadline
         (Fresh_process.describe_status status)
         (if capped then ", SIGKILLed at the cap" else "")
-        (Fresh_process.prefixed text);
+        (Fresh_process.prefixed
+           (String.split_lines text
+           |> List.filter ~f:(fun l -> not (String.is_prefix l ~prefix:"nap "))
+           |> String.concat ~sep:"\n"));
       ({ status; ended; stdout_lines = String.split_lines text; stderr_lines = [] }, capped))
 
 let field o key =
@@ -118,6 +121,34 @@ let stalled o = Option.is_some (field o "stall-began")
 let diagnostic o = List.find o.stderr_lines ~f:(fun l -> String.is_prefix l ~prefix:tag)
 let since o key = Option.map (float_field o key) ~f:(fun t -> o.ended -. t)
 let within lo hi = Option.value_map ~default:false ~f:(fun s -> Float.(lo <= s && s <= hi))
+
+(* The full-stderr children's probe records when the process was run at all: a [nap <t>] line after
+   each of its 10 ms naps. A stretch of the record longer than [unscheduled_gap] between two
+   readings, the last of them the reaping, is time the process (or the parent reaping it) went
+   unscheduled, as on a loaded machine; its excess over that gap is time no implementation of the
+   deadline could have spent counting naps. So [scheduled_since o "stall-began"] is the stall's age
+   at the reaping less that excess, and [probed_naps] the readings it rests on -- gh-ocannl-1715:
+   the wall-clock window alone read a starved but correct backstop as one counting naps. A backstop
+   counting 200 naps of 10 ms oversleeping to [unscheduled_gap] or less still shows all of them. *)
+let unscheduled_gap = 0.25
+
+let probe_naps o ~after =
+  List.filter_map o.stdout_lines ~f:(fun l ->
+      Option.bind (String.chop_prefix l ~prefix:"nap ") ~f:Float.of_string_opt)
+  |> List.filter ~f:(fun t -> Float.(t > after))
+
+let probed_naps o key =
+  Option.value_map (float_field o key) ~default:0 ~f:(fun after ->
+      List.length (probe_naps o ~after))
+
+let scheduled_since o key =
+  Option.map (float_field o key) ~f:(fun began ->
+      let readings = (began :: probe_naps o ~after:began) @ [ o.ended ] in
+      let rec excess acc = function
+        | a :: (b :: _ as rest) -> excess (acc +. Float.max 0.0 (b -. a -. unscheduled_gap)) rest
+        | _ -> acc
+      in
+      o.ended -. began -. excess 0.0 readings)
 
 (* The deadline's own death: SIGALRM, within the 0.5 s deadline of the stall's start (and not before
    it), with the diagnostic naming the backend and the bound -- and the stall did not run out. *)
@@ -243,30 +274,44 @@ let () =
          && (not (says o "survived"))
          && within 0.8 2.9 (since o "timer-set")
          && Option.is_none (diagnostic o)));
-  let full_stderr =
-    if when_ then Some (run_child_capped ~cap:20.0 ~deadline:"0.5" [ "full-stderr"; "cuda" ])
+  (* The cap only ends a child that would hang for good; how long a dying one took is read off its
+     record, so the cap sits far past any starvation a loaded box inflicts. *)
+  let full_stderr_case args =
+    if when_ then begin
+      let ((o, _) as r) = run_child_capped ~cap:60.0 ~deadline:"0.5" args in
+      eprintf
+        "  stall's age at the reaping %s s, %s s of it scheduled, over %d probe naps (not part of \
+         the golden)\n\
+         %!"
+        (Option.value_map (since o "stall-began") ~default:"?" ~f:(Printf.sprintf "%.3f"))
+        (Option.value_map (scheduled_since o "stall-began") ~default:"?" ~f:(Printf.sprintf "%.3f"))
+        (probed_naps o "stall-began");
+      Some r
+    end
     else None
   in
+  (* The backstop held the death: at least 1.5 s on the clock (the wall-clock lower bound needs no
+     record), and the record was kept while it did. *)
+  let backstop_death ~within_s (o, capped) =
+    (not capped) && by_sigalrm o
+    && (not (says o "survived"))
+    && within 1.5 Float.infinity (since o "stall-began")
+    && probed_naps o "stall-began" >= 5
+    && within 0.0 within_s (scheduled_since o "stall-began")
+  in
+  let full_stderr = full_stderr_case [ "full-stderr"; "cuda" ] in
   gated ~when_ ~on ~aggregation:`Environment
     "with fd 2 a full pipe nobody reads, the deadline still kills the process by SIGALRM, its \
      backstop alarm firing while the diagnostic's write is blocked"
-    (Option.value_map full_stderr ~default:false ~f:(fun (o, capped) ->
-         (not capped) && by_sigalrm o
-         && (not (says o "survived"))
-         && within 1.5 10.0 (since o "stall-began")));
-  let full_stderr_throttled =
-    if when_ then
-      Some (run_child_capped ~cap:20.0 ~deadline:"0.5" [ "full-stderr"; "cuda"; "throttled" ])
-    else None
-  in
+    (Option.value_map full_stderr ~default:false ~f:(backstop_death ~within_s:6.0));
+  let full_stderr_throttled = full_stderr_case [ "full-stderr"; "cuda"; "throttled" ] in
   gated ~when_ ~on ~aggregation:`Environment
     "the backstop's 2 s are measured, not counted in naps: with the process's timers throttled so \
      every nap oversleeps by far (as on a loaded macOS VM), the full-pipe case still dies by \
-     SIGALRM within 10 s of the stall's start"
-    (Option.value_map full_stderr_throttled ~default:false ~f:(fun (o, capped) ->
-         says o "throttled true" && (not capped) && by_sigalrm o
-         && (not (says o "survived"))
-         && within 1.5 10.0 (since o "stall-began")));
+     SIGALRM within 6 s of the stall's start, less what the process's own nap record shows it went \
+     unscheduled"
+    (Option.value_map full_stderr_throttled ~default:false ~f:(fun ((o, _) as r) ->
+         says o "throttled true" && backstop_death ~within_s:6.0 r));
   let forked = run ~deadline:"0.5" [ "fork-in-region"; "cuda" ] in
   gated ~when_ ~on ~aggregation:`Environment
     "a child forked from inside an armed region gets a deadline of its own: its stall dies by \
