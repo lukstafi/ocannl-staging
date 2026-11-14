@@ -101,8 +101,9 @@ let scans (llc : LL.t) =
 type run = { values : float array; mma : Ir.C_syntax.mma_summary; scans : int }
 
 (* The forward under the default pipeline (the preset is what emits [Fold_mma]), or under
-   [lowered_transform] where a leg supplies its own pipeline. *)
-let forward ?(model = model) ?lowered_transform ~name ~on ~block ~seq ~d_k () =
+   [lowered_transform] where a leg supplies its own pipeline. [~execute:false] compiles without
+   running (no values): for a leg that only reads what the lowering passes its transform. *)
+let forward ?(model = model) ?lowered_transform ?(execute = true) ~name ~on ~block ~seq ~d_k () =
   Tensor.unsafe_reinitialize ();
   Online_softmax.set_enabled (Some on);
   Online_softmax.set_block (Some block);
@@ -120,9 +121,13 @@ let forward ?(model = model) ?lowered_transform ~name ~on ~block ~seq ~d_k () =
       in
       (* Run twice (the forward is idempotent): fresh buffers are already zero, so a zero that never
          runs shows only over the first run's sums (gh-ocannl-1625). *)
-      let ctx = Context.run (Context.run ctx routine) routine in
+      let values =
+        if execute then
+          Context.get_values (Context.run (Context.run ctx routine) routine) t.Tensor.value
+        else [||]
+      in
       {
-        values = Context.get_values ctx t.Tensor.value;
+        values;
         mma = routine.Context.mma;
         scans = List.sum (module Int) routine.Context.segments ~f:(fun o -> scans o.LL.llc);
       })
@@ -247,7 +252,11 @@ let () =
      [Fold_mma]. The emission is the GPU preset's decision on the host, so the fold's lowering is
      captured here and segmented by the GPU pipeline whatever the host, at limits advertising
      Metal's f32 matrix unit: the preset must emit [Fold_mma], and the same limits under the grid
-     cap must not. *)
+     cap must not. The capture is compiled, never run: the transform hands the raw lowering back
+     unscheduled, which on a GPU is one thread whose [Local] arrays (16576 B on CUDA, against at
+     most 224 B for this file's scheduled kernels) the driver reserves for every resident thread for
+     the process's life -- 1.1 GiB on rog-nv's RTX 5070 Ti, refused under a concurrent suite
+     (gh-ocannl-1773's class). *)
   let captured = ref None in
   ignore
     (forward
@@ -260,7 +269,7 @@ let () =
                optimize_ctx = LL.copy_optimize_ctx o.LL.optimize_ctx;
              };
          [ o ])
-       ~name:"osbm_cap_capture" ~on:true ~block ~seq ~d_k ()
+       ~execute:false ~name:"osbm_cap_capture" ~on:true ~block ~seq ~d_k ()
       : run);
   let captured = Option.value_exn ~here:[%here] !captured in
   let synthetic_emits ?(program = captured) limits =
