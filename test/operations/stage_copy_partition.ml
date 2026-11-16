@@ -11,7 +11,9 @@
    On GPU backends each kernel executes against the serial twin, its accumulator prefilled off the
    result so a dropped zero shows. Everywhere, the scheduled IR is read on the host
    ([Ll_test.captured_lowering]): which guards survive, and whether every tile store names both
-   Workgroup loops -- each thread copying cells of its own. *)
+   Workgroup loops -- each thread copying cells of its own. A broadcast-copy fixture also exercises
+   two unused axes: slot 0 takes the minor loop for divide, drop, and a minor drop beside a
+   divisible major loop (gh-ocannl-1842). *)
 
 open Base
 open Ocannl
@@ -128,3 +130,77 @@ let () =
   geometry ~tag:"restrict" ~n:48 ~bm:16 ~bk:24
     ~expect_guard:(Some ("the representative t == 0", Ir.Ops.Cmpeq))
     ~partitioned:false
+
+(* Two workgroup axes absent from the source: both must share the copy, and slot 0 must take its
+   minor loop first. The earlier matmuls each have only one unused axis. *)
+let broadcast_copy ~tag ~rows ~cols =
+  let node = Ll_test.node_factory ~first_id:18420 ~dims:[| rows; cols |] () in
+  let src = node (tag ^ "_src") in
+  let dst = node ~dims:[| 8; 8; rows; cols |] (tag ^ "_dst") in
+  let y = Ll_test.sym () and x = Ll_test.sym () in
+  let a = Ll_test.sym () and b = Ll_test.sym () in
+  let it = Ll_test.iter in
+  let raw =
+    Ll_test.loop_n y 8
+      (Ll_test.loop_n x 8
+         (Ll_test.loop_n a rows
+            (Ll_test.loop_n b cols
+               (Ll_test.set dst [| it y; it x; it a; it b |] (Ll_test.get src [| it a; it b |])))))
+  in
+  let serial = Ll_test.optimize ~materialized:[ src; dst ] ~name:(tag ^ "_serial") raw in
+  let staged =
+    Sched.apply
+      [
+        Sched.Retype { axis = y; ty = LL.Workgroup };
+        Sched.Retype { axis = x; ty = LL.Workgroup };
+        Sched.Stage
+          {
+            source = src;
+            tile_loops = [ a; b ];
+            shared = true;
+            cooperative = None;
+            hoisted = false;
+            swizzle = None;
+            pad_stride = None;
+            pipeline_depth = 1;
+            tile_prec = None;
+          };
+      ]
+      serial
+  in
+  let slot0 =
+    LL.hardware_axes staged.LL.llc
+    |> List.filter ~f:(fun h -> Poly.equal h.LL.ha_kind `Workgroup && h.LL.ha_slot = 0)
+    |> List.map ~f:(fun h -> h.LL.ha_index)
+  in
+  let copies = ref [] in
+  Ll_test.walk staged.LL.llc ~on_stmt:(function
+    | LL.Set { tn; idcs; _ } when Set.mem staged.LL.workgroup_shared tn -> copies := idcs :: !copies
+    | _ -> ());
+  let coefficient s = function
+    | Ir.Indexing.Iterator t -> if Ir.Indexing.equal_symbol s t then 1 else 0
+    | Ir.Indexing.Affine { symbols; _ } ->
+        List.sum
+          (module Int)
+          symbols
+          ~f:(fun (c, t) -> if Ir.Indexing.equal_symbol s t then c else 0)
+    | _ -> 0
+  in
+  p_all (tag ^ ": consecutive slot-0 lanes copy consecutive minor-axis cells") !copies
+    ~f:(fun idcs ->
+      List.exists slot0 ~f:(fun s -> coefficient s idcs.(1) = 1 && coefficient s idcs.(0) = 0));
+  let parity = tag ^ ": broadcast staging matches the serial twin" in
+  if has_shared then
+    let values = Array.init (rows * cols) ~f:(fun i -> Float.of_int (i + 1) /. 8.) in
+    let execute name opt =
+      Ll_test.execute ~name opt ~seed:[ (src, values) ] ~read:[ dst ] |> List.hd_exn
+    in
+    let want = execute (tag ^ "_reference") serial in
+    let got = execute (tag ^ "_staged") staged in
+    p_close parity got want ~tol:(fun _ -> 0.)
+  else skipped parity
+
+let () =
+  broadcast_copy ~tag:"two-axis divide" ~rows:16 ~cols:16;
+  broadcast_copy ~tag:"two-axis drop" ~rows:4 ~cols:4;
+  broadcast_copy ~tag:"minor drop before major divide" ~rows:16 ~cols:4

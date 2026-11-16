@@ -12,3 +12,9 @@ restrict: staged matmul matches the serial twin: true
 restrict: exactly the two copies are guarded: true
 restrict: each guard is the representative t == 0: true
 restrict: every tile store sits under both Workgroup loops, indexed by one: true
+two-axis divide: consecutive slot-0 lanes copy consecutive minor-axis cells: true
+two-axis divide: broadcast staging matches the serial twin: true
+two-axis drop: consecutive slot-0 lanes copy consecutive minor-axis cells: true
+two-axis drop: broadcast staging matches the serial twin: true
+minor drop before major divide: consecutive slot-0 lanes copy consecutive minor-axis cells: true
+minor drop before major divide: broadcast staging matches the serial twin: true

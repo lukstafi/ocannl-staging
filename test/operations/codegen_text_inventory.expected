@@ -913,6 +913,7 @@ test/operations/simplify_const_left_sub.ml [through Ll_test.execute; run by @tes
 test/operations/simplify_fma_precision.ml [through Ll_test.execute; run by @test/operations/runtest-simplify_fma_precision]
 test/operations/simplify_rng_operands.ml [through Ll_test.execute; run by @test/operations/runtest-simplify_rng_operands]
 test/operations/splice_semantics.ml [through Ll_test.execute; through Ll_test.link_finalized; through Ll_test.run; run by @test/operations/runtest-splice_semantics]
+test/operations/stage_copy_partition.ml [through Ll_test.execute; run by @test/operations/runtest-stage_copy_partition]
 test/operations/stage_scope_anchor.ml [through Ll_test.execute; run by @test/operations/runtest-stage_scope_anchor]
 test/operations/stored_template_elision.ml [through Ll_test.execute; through Ll_test.link_finalized; through Ll_test.run; run by @test/operations/runtest-stored_template_elision]
 test/operations/symbolic_extent_backward.ml [through Ll_test.execute; run by @test/operations/runtest-symbolic_extent_backward]
@@ -1065,6 +1066,7 @@ test/operations/zero_run_reorder.ml [prelowered compile; run by @test/operations
 @test/operations/runtest-simplify_fma_precision
 @test/operations/runtest-simplify_rng_operands
 @test/operations/runtest-splice_semantics
+@test/operations/runtest-stage_copy_partition
 @test/operations/runtest-stage_scope_anchor
 @test/operations/runtest-stored_template_elision
 @test/operations/runtest-symbolic_extent_backward

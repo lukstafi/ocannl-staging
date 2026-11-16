@@ -1053,6 +1053,10 @@ files.
   ~1.4–1.5× cost and HIP's null.
 - A staged copy is partitioned across the workgroup axis its tile does not use (gh-ocannl-1661,
   `Schedule.apply_stage`; `stage_copy_partition` pins divide, drop and the restrict fallback).
+  With several unused axes, partition fastest slot first onto the innermost admissible copy
+  loop (gh-ocannl-1842): outermost-first put slot 0 on rows. Drop candidates must also prefer
+  the minor loop, including equal extents; the host IR claim and executed broadcast twin pin
+  both paths. `Schedule_cache.entry_version` 25 retires crowns timed with the old copy mapping.
   Before, one row of threads (`threadIdx.y == 0`) copied the whole tile serially, and nvcc unrolls
   a copy of 128 loads per lane only partly (about 8 in flight), so the deep-K blocktile leaves
   measured 1.2-2.9x slower at equal transactions, legs and occupancy; the cost model, charging
