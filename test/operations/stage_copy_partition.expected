@@ -25,3 +25,21 @@ reused slot 0: consecutive slot-0 lanes copy consecutive minor-axis cells: true
 reused slot 0: every tile store is partitioned across both Workgroup loops: true
 reused slot 0: slot 1 divides the major copy loop without idling lanes: true
 reused slot 0: broadcast staging matches the serial twin: true
+register copy: consecutive slot-0 lanes read consecutive source-minor cells: true
+register copy: both Workgroup axes partition the copy: true
+register copy: consumer keeps its requested slot-0 stride: true
+register copy: serial twin matches the indexed input: true
+register copy: serial phase replay matches the serial twin: true
+register copy: native shared staging matches the serial twin: true
+transposed register copy: consecutive slot-0 lanes read consecutive source-minor cells: true
+transposed register copy: both Workgroup axes partition the copy: true
+transposed register copy: consumer keeps its requested slot-0 stride: true
+transposed register copy: serial twin matches the indexed input: true
+transposed register copy: serial phase replay matches the serial twin: true
+transposed register copy: native shared staging matches the serial twin: true
+combined Workgroup vector: consecutive slot-0 lanes read consecutive source-minor cells: true
+combined Workgroup vector: both Workgroup axes partition the copy: true
+combined Workgroup vector: consumer keeps its requested slot-0 stride: true
+combined Workgroup vector: serial twin matches the indexed input: true
+combined Workgroup vector: serial phase replay matches the serial twin: true
+combined Workgroup vector: native shared staging matches the serial twin: true

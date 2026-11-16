@@ -2160,17 +2160,96 @@ let apply_stage ~source ~tile_loops ~shared ~cooperative ~hoisted ~swizzle ~pad_
     Tn.Placements.update opt.Low_level.optimize_ctx.placements tile Tn.Local
       (Site "175:stage-shared-tile");
     ignore (get_node opt.traced_store tile : traced_array);
-    (* The load nest. *)
-    let fresh = List.map iterated ~f:(fun s -> (s, Indexing.get_symbol ())) in
-    let load_sym s =
-      match List.Assoc.find fresh ~equal:Indexing.equal_symbol s with Some s' -> s' | None -> s
+    let stage_axes = if shared then hardware_axes opt.llc else [] in
+    let copy_candidate ~slot ~width loops =
+      if slot = 0 then List.find (List.rev loops) ~f:(fun (_, e) -> e % width = 0 || e <= width)
+      else
+        match List.filter loops ~f:(fun (_, e) -> e % width = 0) |> List.last with
+        | Some _ as divide -> divide
+        | None ->
+            List.filter loops ~f:(fun (_, e) -> e <= width)
+            |> List.max_elt ~compare:(fun (_, e1) (_, e2) -> Int.compare e1 e2)
     in
-    let subst_terms terms = List.map terms ~f:(fun (c, s) -> (c, load_sym s)) in
-    (* [load_sym] renames only iterated tile loops, which occur in tile parts alone. *)
-    let load_src_idcs = Array.map idcs0 ~f:(rename_index ~f:load_sym) in
-    let tile_store_idcs =
-      Array.map tile_axes ~f:(fun (a, _) ->
-          normalize_affine ~terms:(subst_terms (tile_terms a)) ~offset:0)
+    (* A dense, separable tile can use one copy coordinate per tile axis, independently of the
+       Workgroup/register decomposition the consumer uses. Keep the allocation and reads unchanged:
+       only the load's source and destination indices use these fresh coordinates. The mixed-radix
+       proof excludes holes, overlaps and symbols shared across source axes. Copy loops follow
+       source-axis order even for a transposed packed tile, so slot 0 addresses the source's minor
+       axis rather than the consumer's packed minor axis. *)
+    let dense_copy =
+      shared && Option.is_none cooperative
+      && (not (List.is_empty reused))
+      && Array.for_all decomp ~f:(fun (_, outer, _) ->
+          List.for_all outer ~f:(fun (_, s) ->
+              match depth_of s with
+              | Some (_, { axis = Workgroup | Workgroup_reduce; _ }) -> false
+              | _ -> true))
+      && List.for_all tile_loops ~f:(fun s ->
+          Array.count tile_axes ~f:(fun (a, _) ->
+              List.exists (tile_terms a) ~f:(fun (_, t) -> Indexing.equal_symbol s t))
+          = 1)
+      && Array.for_all tile_axes ~f:(fun (a, e) ->
+          List.sort (tile_terms a) ~compare:(fun (c, _) (d, _) -> Int.compare c d)
+          |> List.fold ~init:(Some 1) ~f:(fun next (c, s) ->
+              Option.bind next ~f:(fun n -> if c = n then Some (n * extent s) else None))
+          |> Option.value_map ~default:false ~f:(Int.equal e))
+      (* Do not trade the original Workgroup participation for a longer serial copy. In particular a
+         one-axis tile combining two Workgroup axes already uses both; collapsing it then
+         restricting one axis would be a throughput regression. *)
+      && Option.value_map lstar_depth ~default:false ~f:(fun ld ->
+          let remaining =
+            ref
+              (Array.to_list tile_axes |> List.sort ~compare:(fun (a, _) (b, _) -> Int.compare a b))
+          in
+          Array.to_list (Array.sub stack0 ~pos:0 ~len:(ld + 1))
+          |> List.rev
+          |> List.for_all ~f:(fun fl ->
+              match fl.axis with
+              | Workgroup | Workgroup_reduce -> (
+                  let w = fl.to_ - fl.from_ + 1 in
+                  if fl.from_ <> 0 || w < 1 then false
+                  else if w = 1 then true
+                  else
+                    let slot =
+                      List.find_exn stage_axes ~f:(fun a ->
+                          Poly.equal a.ha_kind `Workgroup
+                          && Indexing.equal_symbol a.ha_index fl.index)
+                      |> fun a -> a.ha_slot
+                    in
+                    match copy_candidate ~slot ~width:w !remaining with
+                    | Some (a, e) when e % w = 0 ->
+                        remaining := List.filter !remaining ~f:(fun (b, _) -> a <> b);
+                        true
+                    | _ -> false)
+              | Serial | Grid | Vectorized | Unrolled -> true))
+    in
+    let copy_loops, load_src_idcs, tile_store_idcs, copy_reused =
+      if dense_copy then (
+        let axes = Array.map tile_axes ~f:(fun (a, e) -> (a, Indexing.get_symbol (), e)) in
+        let source_idcs = Array.copy idcs0 in
+        Array.iter axes ~f:(fun (a, q, _) ->
+            let tp, outer, offset = decomp.(a) in
+            source_idcs.(a) <-
+              normalize_affine ~terms:((stage_compaction_factor tp, q) :: outer) ~offset);
+        ( Array.to_list axes
+          |> List.sort ~compare:(fun (a, _, _) (b, _, _) -> Int.compare a b)
+          |> List.map ~f:(fun (_, q, e) -> (q, e)),
+          source_idcs,
+          Array.map axes ~f:(fun (_, q, _) -> Indexing.Iterator q),
+          [] ))
+      else
+        let fresh = List.map iterated ~f:(fun s -> (s, Indexing.get_symbol ())) in
+        let load_sym s =
+          match List.Assoc.find fresh ~equal:Indexing.equal_symbol s with
+          | Some s' -> s'
+          | None -> s
+        in
+        let subst_terms terms = List.map terms ~f:(fun (c, s) -> (c, load_sym s)) in
+        ( List.map fresh ~f:(fun (s, s') -> (s', extent s)),
+          Array.map idcs0 ~f:(rename_index ~f:load_sym),
+          Array.map tile_axes ~f:(fun (a, _) ->
+              normalize_affine ~terms:(subst_terms (tile_terms a)) ~offset:0),
+          reused )
     in
     let tile_read_idcs =
       Array.map tile_axes ~f:(fun (a, _) -> normalize_affine ~terms:(tile_terms a) ~offset:0)
@@ -2212,10 +2291,9 @@ let apply_stage ~source ~tile_loops ~shared ~cooperative ~hoisted ~swizzle ~pad_
        bounded by the width falls back to the representative-lane ([w == 0]) discipline. *)
     let lane = Option.map cooperative ~f:(fun w -> (Indexing.get_symbol (), w)) in
     let lane_plan =
-      match (lane, List.last fresh) with
+      match (lane, List.last copy_loops) with
       | None, _ | _, None -> `Serial_all
-      | Some (w_sym, w), Some (s_orig, s_inner) ->
-          let e = extent s_orig in
+      | Some (w_sym, w), Some (s_inner, e) ->
           if e <= w then `Drop_inner (s_inner, e, w_sym)
           else if e % w = 0 then `Divide_inner (s_inner, e / w, w_sym, w)
           else `Restrict_lane0
@@ -2248,12 +2326,12 @@ let apply_stage ~source ~tile_loops ~shared ~cooperative ~hoisted ~swizzle ~pad_
             load_stmt
     in
     let load_nest =
-      List.fold (List.rev fresh) ~init:load_stmt ~f:(fun body (s, s') ->
+      List.fold (List.rev copy_loops) ~init:load_stmt ~f:(fun body (s, e) ->
           match lane_plan with
-          | `Drop_inner (si, _, _) when Indexing.equal_symbol s' si -> body
-          | `Divide_inner (si, ext', _, _) when Indexing.equal_symbol s' si ->
-              For_loop { index = s'; from_ = 0; to_ = ext' - 1; body; axis = Serial }
-          | _ -> For_loop { index = s'; from_ = 0; to_ = extent s - 1; body; axis = Serial })
+          | `Drop_inner (si, _, _) when Indexing.equal_symbol s si -> body
+          | `Divide_inner (si, ext', _, _) when Indexing.equal_symbol s si ->
+              For_loop { index = s; from_ = 0; to_ = ext' - 1; body; axis = Serial }
+          | _ -> For_loop { index = s; from_ = 0; to_ = e - 1; body; axis = Serial })
     in
     (* The splice target. With an anchor L* (an outer-part symbol or reused workgroup axis), the
        load nest goes at the start of L*'s body. A shared stage with no anchor (e.g. staging a
@@ -2292,7 +2370,7 @@ let apply_stage ~source ~tile_loops ~shared ~cooperative ~hoisted ~swizzle ~pad_
        below): hardware threads differing only in an uncovered slot would all execute the loads,
        writing the same shared addresses concurrently — a same-value race is still a race. *)
     (if shared then
-       let axes = hardware_axes opt.llc in
+       let axes = stage_axes in
        let wg_axes =
          List.filter axes ~f:(fun a -> match a.ha_kind with `Workgroup -> true | `Grid -> false)
        in
@@ -2323,13 +2401,13 @@ let apply_stage ~source ~tile_loops ~shared ~cooperative ~hoisted ~swizzle ~pad_
            ^ Tn.debug_name source
            ^ ": their threads would race on the shared tile; restructure the schedule so the \
               workgroup loops enclose the staging point (or reuse them as tile loops)"));
-    (* In-scope workgroup axes that do not participate in this tile would load redundantly. Each one
-       is folded into a serial copy loop of its own (gh-ocannl-1661), the [Divide_inner] /
-       [Drop_inner] partition of the lane-aware mode above with the axis's own threads as the lanes:
-       [s := w * s + t] over [e / w] steps when the axis extent [w] divides the loop's extent [e] or
-       [s := t] under [t < e] when [e <= w]. Slots are considered fastest first. Slot 0 takes the
-       innermost admissible loop to drive the minor axis; higher slots prefer a divide, otherwise
-       the longest drop, keeping their lanes busy. Only an axis no remaining loop admits keeps the
+    (* In-scope workgroup axes not already reused by the copy would load redundantly. Each one is
+       folded into a serial copy loop of its own (gh-ocannl-1661), the [Divide_inner] / [Drop_inner]
+       partition of the lane-aware mode above with the axis's own threads as the lanes: [s := w * s
+       + t] over [e / w] steps when the axis extent [w] divides the loop's extent [e] or [s := t]
+       under [t < e] when [e <= w]. Slots are considered fastest first. Slot 0 takes the innermost
+       admissible loop to drive the minor axis; higher slots prefer a divide, otherwise the longest
+       drop, keeping their lanes busy. Only an axis no remaining loop admits keeps the
        representative-thread discipline: one thread ([t == 0]) loads for all. The restriction it
        replaces serialized the whole copy onto one row of threads, whose few loads in flight bound
        deep-K staged tiles (gh-ocannl-1661: 1.9x at gpt2_mini's outproj on CUDA). The lane-aware
@@ -2353,34 +2431,21 @@ let apply_stage ~source ~tile_loops ~shared ~cooperative ~hoisted ~swizzle ~pad_
     let load_nest =
       if not shared then load_nest
       else
-        let unfolded =
-          ref
-            (if Option.is_some cooperative then []
-             else List.map fresh ~f:(fun (s, s') -> (s', extent s)))
-        in
-        let axes = hardware_axes opt.llc in
+        let unfolded = ref (if Option.is_some cooperative then [] else copy_loops) in
+        let axes = stage_axes in
         (* Slots are assigned innermost-first by [hardware_axes]. Give slot 0 first choice of the
            minor copy loop; higher slots retain the throughput-oriented partition policy. *)
         List.fold (List.rev in_scope) ~init:load_nest ~f:(fun body fl ->
             match fl.axis with
             | (Workgroup | Workgroup_reduce)
-              when not (List.mem reused fl.index ~equal:Indexing.equal_symbol) -> (
+              when not (List.mem copy_reused fl.index ~equal:Indexing.equal_symbol) -> (
                 let t = fl.index and w = fl.to_ - fl.from_ + 1 in
                 let slot =
                   List.find_exn axes ~f:(fun a ->
                       Poly.equal a.ha_kind `Workgroup && Indexing.equal_symbol a.ha_index t)
                   |> fun a -> a.ha_slot
                 in
-                let candidate =
-                  if slot = 0 then
-                    List.find (List.rev !unfolded) ~f:(fun (_, e) -> e % w = 0 || e <= w)
-                  else
-                    match List.filter !unfolded ~f:(fun (_, e) -> e % w = 0) |> List.last with
-                    | Some _ as divide -> divide
-                    | None ->
-                        List.filter !unfolded ~f:(fun (_, e) -> e <= w)
-                        |> List.max_elt ~compare:(fun (_, e1) (_, e2) -> Int.compare e1 e2)
-                in
+                let candidate = copy_candidate ~slot ~width:w !unfolded in
                 let take s' =
                   unfolded :=
                     List.filter !unfolded ~f:(fun (s'', _) -> not (Indexing.equal_symbol s' s''))

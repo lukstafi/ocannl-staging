@@ -229,3 +229,191 @@ let () =
   broadcast_copy ~tag:"two-axis drop" ~rows:4 ~cols:4 ~reuse_minor:false;
   broadcast_copy ~tag:"minor drop before major divide" ~rows:16 ~cols:4 ~reuse_minor:false;
   broadcast_copy ~tag:"reused slot 0" ~rows:64 ~cols:8 ~reuse_minor:true
+
+let copy_stage source tile_loops =
+  Sched.Stage
+    {
+      source;
+      tile_loops;
+      shared = true;
+      cooperative = None;
+      hoisted = false;
+      swizzle = None;
+      pad_stride = None;
+      pipeline_depth = 1;
+      tile_prec = None;
+    }
+
+let check_copy ~tag ~prefix ~src ~dst ~serial ~(staged : LL.optimized) ~expected ~consumer_stride =
+  let slot0 =
+    LL.hardware_axes staged.LL.llc
+    |> List.filter ~f:(fun a -> Poly.equal a.LL.ha_kind `Workgroup && a.LL.ha_slot = 0)
+    |> List.map ~f:(fun a -> a.LL.ha_index)
+  in
+  let copies = ref [] and consumers = ref [] in
+  Ll_test.walk staged.LL.llc ~on_scalar:(function
+    | LL.Get (tn, idcs) when Ir.Tnode.equal tn src -> copies := idcs :: !copies
+    | LL.Get (tn, idcs) when Set.mem staged.LL.workgroup_shared tn ->
+        consumers := idcs :: !consumers
+    | _ -> ());
+  let coefficient sym = function
+    | Ir.Indexing.Iterator s -> if Ir.Indexing.equal_symbol sym s then 1 else 0
+    | Ir.Indexing.Affine { symbols; _ } ->
+        List.sum
+          (module Int)
+          symbols
+          ~f:(fun (c, s) -> if Ir.Indexing.equal_symbol sym s then c else 0)
+    | _ -> 0
+  in
+  p_all (tag ^ ": consecutive slot-0 lanes read consecutive source-minor cells") !copies
+    ~f:(fun idcs ->
+      List.exists slot0 ~f:(fun s ->
+          let minor = Array.length idcs - 1 in
+          coefficient s idcs.(minor) = 1
+          && Array.for_alli idcs ~f:(fun i idx -> i = minor || coefficient s idx = 0)));
+  let partitions = Ll_test.tile_store_partitions ~tiles:staged.LL.workgroup_shared staged.LL.llc in
+  p_all (tag ^ ": both Workgroup axes partition the copy") partitions ~f:(fun (n, all) ->
+      n = 2 && all);
+  p_all (tag ^ ": consumer keeps its requested slot-0 stride") !consumers ~f:(fun idcs ->
+      List.exists slot0 ~f:(fun s -> coefficient s idcs.(Array.length idcs - 1) = consumer_stride));
+  (* Closed fixture grammar: one block, no scopes, reductions or nested phases. Replay every
+     cooperative write before every consumer, serializing only the hardware loop bindings.
+     Materialize the tile to prevent optimization from erasing the copy under test. *)
+  let symbol env s = List.Assoc.find_exn env s ~equal:Ir.Indexing.equal_symbol in
+  let index env = function
+    | Ir.Indexing.Fixed_idx _ as i -> i
+    | Ir.Indexing.Iterator s -> Ir.Indexing.Iterator (symbol env s)
+    | Ir.Indexing.Affine { symbols; offset } ->
+        Ll_test.aff (List.map symbols ~f:(fun (c, s) -> (c, symbol env s))) offset
+    | _ -> failwith "copy phase replay: unexpected fixture index"
+  in
+  let rec scalar env = function
+    | LL.Get (tn, idcs) -> LL.Get (tn, Array.map idcs ~f:(index env))
+    | LL.Embed_index i -> LL.Embed_index (index env i)
+    | (LL.Constant _ | LL.Constant_bits _) as v -> v
+    | LL.Unop (op, a) -> LL.Unop (op, arg env a)
+    | LL.Binop (op, a, b) -> LL.Binop (op, arg env a, arg env b)
+    | LL.Ternop (op, a, b, c) -> LL.Ternop (op, arg env a, arg env b, arg env c)
+    | _ -> failwith "copy phase replay: unexpected fixture scalar"
+  and arg env (v, p) = (scalar env v, p) in
+  let rec phase ~copy env = function
+    | LL.For_loop fl ->
+        let fresh = Ll_test.sym () in
+        LL.For_loop
+          {
+            fl with
+            index = fresh;
+            axis = LL.Serial;
+            body = phase ~copy ((fl.index, fresh) :: env) fl.body;
+          }
+    | LL.Seq (a, b) -> LL.Seq (phase ~copy env a, phase ~copy env b)
+    | LL.If { cond; body } -> LL.If { cond = arg env cond; body = phase ~copy env body }
+    | LL.Set ({ tn; idcs; llsc; _ } as s) ->
+        if Bool.equal (Set.mem staged.LL.workgroup_shared tn) copy then
+          LL.Set { s with idcs = Array.map idcs ~f:(index env); llsc = scalar env llsc }
+        else LL.Noop
+    | LL.Noop | LL.Comment _ | LL.Workgroup_barrier -> LL.Noop
+    | _ -> failwith "copy phase replay: unexpected fixture statement"
+  in
+  let tile = Set.to_list staged.LL.workgroup_shared in
+  let replay =
+    Ll_test.optimize ~materialized:(src :: dst :: tile) ~name:(prefix ^ "_phase_replay")
+      (LL.Seq (phase ~copy:true [] staged.LL.llc, phase ~copy:false [] staged.LL.llc))
+  in
+  let values =
+    Array.init
+      (Array.fold (Lazy.force src.Ir.Tnode.dims) ~init:1 ~f:( * ))
+      ~f:(fun i -> Float.of_int (i + 1) /. 8.)
+  in
+  let execute name opt =
+    Ll_test.execute ~name opt ~seed:[ (src, values) ] ~read:[ dst ] |> List.hd_exn
+  in
+  let want = execute (prefix ^ "_reference") serial in
+  p_close (tag ^ ": serial twin matches the indexed input") want expected ~tol:(fun _ -> 0.);
+  p_close
+    (tag ^ ": serial phase replay matches the serial twin")
+    (execute (prefix ^ "_replay") replay)
+    want
+    ~tol:(fun _ -> 0.);
+  in_leg ~leg:(Verdict.leg ~when_:has_shared ~on:backend_name ())
+    (tag ^ ": native shared staging matches the serial twin") (fun label ->
+      p_close label (execute (prefix ^ "_native") staged) want ~tol:(fun _ -> 0.))
+
+(* The real register-tile copy: slot 0 is reused in [4*x + t], so keeping that binding gives
+   adjacent lanes a stride of four. Only the copy is remapped; the consumer keeps [4*x + t]. Serial
+   phase replay helper exercises those exact copy and consumer indices on cc as well as the GPU
+   backends, without asking cc to implement shared memory. *)
+let register_copy ~transposed =
+  let tag = if transposed then "transposed register copy" else "register copy" in
+  let prefix = if transposed then "trc" else "rc" in
+  let dims = if transposed then [| 32; 64 |] else [| 64; 32 |] in
+  let node = Ll_test.node_factory ~first_id:(if transposed then 18470 else 18460) ~dims () in
+  let src = node (prefix ^ "_src") in
+  let dst = node ~dims:[| 8; 8; 64; 4 |] (prefix ^ "_dst") in
+  let y = Ll_test.sym () and x = Ll_test.sym () in
+  let k = Ll_test.sym () and t = Ll_test.sym () in
+  let it = Ll_test.iter in
+  let raw =
+    Ll_test.loop_n y 8
+      (Ll_test.loop_n x 8
+         (Ll_test.loop_n k 64
+            (Ll_test.loop_n t 4
+               (Ll_test.set dst
+                  [| it y; it x; it k; it t |]
+                  (Ll_test.get src
+                     (if transposed then [| Ll_test.aff [ (4, x); (1, t) ] 0; it k |]
+                      else [| it k; Ll_test.aff [ (4, x); (1, t) ] 0 |]))))))
+  in
+  let serial = Ll_test.optimize ~materialized:[ src; dst ] ~name:(prefix ^ "_serial") raw in
+  let staged =
+    Sched.apply
+      [
+        Sched.Retype { axis = y; ty = LL.Workgroup };
+        Sched.Retype { axis = x; ty = LL.Workgroup };
+        copy_stage src [ k; x; t ];
+      ]
+      serial
+  in
+  let expected =
+    List.concat_map (List.range 0 8) ~f:(fun _y ->
+        List.concat_map (List.range 0 8) ~f:(fun x ->
+            List.concat_map (List.range 0 64) ~f:(fun k ->
+                List.init 4 ~f:(fun t ->
+                    let col = (4 * x) + t in
+                    let src_flat = if transposed then (col * 64) + k else (k * 32) + col in
+                    Float.of_int (src_flat + 1) /. 8.))))
+    |> Array.of_list
+  in
+  check_copy ~tag ~prefix ~src ~dst ~serial ~staged ~expected ~consumer_stride:4
+
+(* A vector whose coordinate already combines two Workgroup axes must retain both lanes; making one
+   serial copy axis and restricting the other would lose participation. *)
+let vector_copy () =
+  let node = Ll_test.node_factory ~first_id:18480 ~dims:[| 256 |] () in
+  let src = node "vc_src" and dst = node ~dims:[| 16; 16 |] "vc_dst" in
+  let y = Ll_test.sym () and x = Ll_test.sym () in
+  let raw =
+    Ll_test.loop_n y 16
+      (Ll_test.loop_n x 16
+         (Ll_test.set dst
+            [| Ll_test.iter y; Ll_test.iter x |]
+            (Ll_test.get src [| Ll_test.aff [ (16, y); (1, x) ] 0 |])))
+  in
+  let serial = Ll_test.optimize ~materialized:[ src; dst ] ~name:"vc_serial" raw in
+  let staged =
+    Sched.apply
+      [
+        Sched.Retype { axis = y; ty = LL.Workgroup };
+        Sched.Retype { axis = x; ty = LL.Workgroup };
+        copy_stage src [ y; x ];
+      ]
+      serial
+  in
+  let expected = Array.init 256 ~f:(fun i -> Float.of_int (i + 1) /. 8.) in
+  check_copy ~tag:"combined Workgroup vector" ~prefix:"vc" ~src ~dst ~serial ~staged ~expected
+    ~consumer_stride:1
+
+let () =
+  register_copy ~transposed:false;
+  register_copy ~transposed:true;
+  vector_copy ()

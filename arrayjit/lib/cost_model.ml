@@ -937,12 +937,12 @@ let launch_fill fm contexts =
    compact count for the same distinct bytes. The excess is the feature: zero for a fully coalesced
    access, so pricing it changes no score of a kernel without one. The block's lane groups (warps,
    wavefronts, simdgroups) are counted together, not each on its own: a sector one group
-   over-fetches the multiprocessor's L1 serves to the sibling group reading its other half
-   (gh-ocannl-1661's partitioned staging copies put [.x] on rows and [.y] along them, so each warp
-   of an 8 x 8 block reads half of eight sectors whose other halves its sibling reads; counted per
-   group, that excess ranked those -- the fastest measured leaves, by 1.8x on tuf -- below 16-thread
-   tiles at every gh-ocannl-1479 qkv and outproj cell). The lane width still sizes the register-tile
-   window below and the uncovered estimate.
+   over-fetches the multiprocessor's L1 serves to the sibling group reading its other half (before
+   gh-ocannl-1842, gh-ocannl-1661's partitioned staging copies put [.x] on rows and [.y] along them,
+   so each warp of an 8 x 8 block reads half of eight sectors whose other halves its sibling reads;
+   counted per group, that excess ranked those -- the fastest measured leaves, by 1.8x on tuf --
+   below 16-thread tiles at every gh-ocannl-1479 qkv and outproj cell). The lane width still sizes
+   the register-tile window below and the uncovered estimate.
 
    Activity follows the access's own loops: a lane whose coordinate on a slot lies outside the
    access's loop of that slot is idle, so a wide sibling nest lends a narrow access no lanes. A slot

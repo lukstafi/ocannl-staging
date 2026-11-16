@@ -1053,11 +1053,16 @@ files.
   ~1.4–1.5× cost and HIP's null.
 - A staged copy is partitioned across the workgroup axis its tile does not use (gh-ocannl-1661,
   `Schedule.apply_stage`; `stage_copy_partition` pins divide, drop and the restrict fallback).
-  With several unused axes, partition fastest slot first (gh-ocannl-1842): outermost-first
-  put slot 0 on rows. Slot 0 takes the innermost admissible loop, including drop ties; higher
-  slots keep the innermost divide or longest drop to avoid idle lanes. `stage_copy_partition`
-  pins both-slot participation and the higher-slot policy with a reused slot 0, on host IR
-  and executed broadcast twins. `Schedule_cache.entry_version` 25 retires old copy timings.
+  Dense shared, non-cooperative tiles use fresh copy coordinates in SOURCE axis order
+  (gh-ocannl-1842), combining reused Workgroup and serial register parts. The shared tile's
+  layout, consumer indices, staging anchor and barriers stay unchanged. Admission proves a
+  dense mixed-radix interval per axis, disjoint tile symbols, workgroup-uniform outer
+  offsets and a full-width copy partition; other layouts retain the original reuse path.
+  Fastest slot first: slot 0 takes the innermost admissible copy loop; higher slots prefer a divide, otherwise the longest
+  drop. `stage_copy_partition` pins source-minor lane continuity in both orientations,
+  both-slot participation and executed serial-phase/native parity. `Schedule_cache.entry_version`
+  25 retires old copy timings. Reordering unused axes alone was inert on the real sketches,
+  whose register axis is reused; the first CUDA A/B at `61260307` had unchanged scheduled IR.
   Before, one row of threads (`threadIdx.y == 0`) copied the whole tile serially, and nvcc unrolls
   a copy of 128 loads per lane only partly (about 8 in flight), so the deep-K blocktile leaves
   measured 1.2-2.9x slower at equal transactions, legs and occupancy; the cost model, charging

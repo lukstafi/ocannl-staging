@@ -50,6 +50,7 @@ test/operations/scope_over_materialized.ml -- records=3 traversals=0
 test/operations/simplify_if_narrowing.ml -- records=1 traversals=0
 test/operations/simplify_rng_operands.ml -- records=1 traversals=0
 test/operations/splice_semantics.ml -- records=1 traversals=0
+test/operations/stage_copy_partition.ml -- records=3 traversals=2
 test/operations/test_slice_alias.ml -- records=0 traversals=2
 test/operations/tile_bf16_row_groups.ml -- records=3 traversals=0
 test/operations/vec_signed_zero.ml -- records=0 traversals=1
