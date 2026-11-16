@@ -131,21 +131,27 @@ let () =
     ~expect_guard:(Some ("the representative t == 0", Ir.Ops.Cmpeq))
     ~partitioned:false
 
-(* Two workgroup axes absent from the source: both must share the copy, and slot 0 must take its
-   minor loop first. The earlier matmuls each have only one unused axis. *)
-let broadcast_copy ~tag ~rows ~cols =
-  let node = Ll_test.node_factory ~first_id:18420 ~dims:[| rows; cols |] () in
+(* With two workgroup axes absent from the source, both must share the copy and slot 0 takes its
+   minor loop first. With slot 0 reused as the source's minor axis, slot 1 must keep the longer,
+   divisible major copy loop. The earlier matmuls have only one fresh copy loop. *)
+let broadcast_copy ~tag ~rows ~cols ~reuse_minor =
+  let width = if reuse_minor then 16 else 8 in
+  let dims = if reuse_minor then [| rows; cols; width |] else [| rows; cols |] in
+  let node = Ll_test.node_factory ~first_id:18420 ~dims () in
   let src = node (tag ^ "_src") in
-  let dst = node ~dims:[| 8; 8; rows; cols |] (tag ^ "_dst") in
+  let dst = node ~dims:[| width; width; rows; cols |] (tag ^ "_dst") in
   let y = Ll_test.sym () and x = Ll_test.sym () in
   let a = Ll_test.sym () and b = Ll_test.sym () in
   let it = Ll_test.iter in
   let raw =
-    Ll_test.loop_n y 8
-      (Ll_test.loop_n x 8
+    Ll_test.loop_n y width
+      (Ll_test.loop_n x width
          (Ll_test.loop_n a rows
             (Ll_test.loop_n b cols
-               (Ll_test.set dst [| it y; it x; it a; it b |] (Ll_test.get src [| it a; it b |])))))
+               (Ll_test.set dst
+                  [| it y; it x; it a; it b |]
+                  (Ll_test.get src
+                     (if reuse_minor then [| it a; it b; it x |] else [| it a; it b |]))))))
   in
   let serial = Ll_test.optimize ~materialized:[ src; dst ] ~name:(tag ^ "_serial") raw in
   let staged =
@@ -156,7 +162,7 @@ let broadcast_copy ~tag ~rows ~cols =
         Sched.Stage
           {
             source = src;
-            tile_loops = [ a; b ];
+            tile_loops = (if reuse_minor then [ a; b; x ] else [ a; b ]);
             shared = true;
             cooperative = None;
             hoisted = false;
@@ -188,10 +194,27 @@ let broadcast_copy ~tag ~rows ~cols =
   in
   p_all (tag ^ ": consecutive slot-0 lanes copy consecutive minor-axis cells") !copies
     ~f:(fun idcs ->
-      List.exists slot0 ~f:(fun s -> coefficient s idcs.(1) = 1 && coefficient s idcs.(0) = 0));
+      List.exists slot0 ~f:(fun s ->
+          let minor = Array.length idcs - 1 in
+          coefficient s idcs.(minor) = 1
+          && Array.for_alli idcs ~f:(fun i idx -> i = minor || coefficient s idx = 0)));
+  let stores = Ll_test.tile_store_partitions ~tiles:staged.LL.workgroup_shared staged.LL.llc in
+  p_all (tag ^ ": every tile store is partitioned across both Workgroup loops") stores
+    ~f:(fun (n, all) -> n = 2 && all);
+  (if reuse_minor then
+     let slot1 =
+       LL.hardware_axes staged.LL.llc
+       |> List.filter ~f:(fun h -> Poly.equal h.LL.ha_kind `Workgroup && h.LL.ha_slot = 1)
+       |> List.map ~f:(fun h -> h.LL.ha_index)
+     in
+     p_all (tag ^ ": slot 1 divides the major copy loop without idling lanes") !copies
+       ~f:(fun idcs ->
+         List.exists slot1 ~f:(fun s -> coefficient s idcs.(0) = 1 && coefficient s idcs.(1) = 0)));
   let parity = tag ^ ": broadcast staging matches the serial twin" in
   if has_shared then
-    let values = Array.init (rows * cols) ~f:(fun i -> Float.of_int (i + 1) /. 8.) in
+    let values =
+      Array.init (Array.fold dims ~init:1 ~f:( * )) ~f:(fun i -> Float.of_int (i + 1) /. 8.)
+    in
     let execute name opt =
       Ll_test.execute ~name opt ~seed:[ (src, values) ] ~read:[ dst ] |> List.hd_exn
     in
@@ -201,6 +224,8 @@ let broadcast_copy ~tag ~rows ~cols =
   else skipped parity
 
 let () =
-  broadcast_copy ~tag:"two-axis divide" ~rows:16 ~cols:16;
-  broadcast_copy ~tag:"two-axis drop" ~rows:4 ~cols:4;
-  broadcast_copy ~tag:"minor drop before major divide" ~rows:16 ~cols:4
+  broadcast_copy ~tag:"two-axis divide" ~rows:16 ~cols:16 ~reuse_minor:false;
+  (* These two cases discriminate a reverse-only fix, rather than the base scheduler. *)
+  broadcast_copy ~tag:"two-axis drop" ~rows:4 ~cols:4 ~reuse_minor:false;
+  broadcast_copy ~tag:"minor drop before major divide" ~rows:16 ~cols:4 ~reuse_minor:false;
+  broadcast_copy ~tag:"reused slot 0" ~rows:64 ~cols:8 ~reuse_minor:true

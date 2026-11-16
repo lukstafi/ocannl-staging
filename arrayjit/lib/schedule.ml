@@ -2327,13 +2327,13 @@ let apply_stage ~source ~tile_loops ~shared ~cooperative ~hoisted ~swizzle ~pad_
        is folded into a serial copy loop of its own (gh-ocannl-1661), the [Divide_inner] /
        [Drop_inner] partition of the lane-aware mode above with the axis's own threads as the lanes:
        [s := w * s + t] over [e / w] steps when the axis extent [w] divides the loop's extent [e] or
-       [s := t] under [t < e] when [e <= w]. Slots are considered fastest first and take the
-       innermost admissible loop, so slot 0 drives the minor axis whenever it can. Only an axis no
-       remaining loop admits keeps the representative-thread discipline: one thread ([t == 0]) loads
-       for all. The restriction it replaces serialized the whole copy onto one row of threads, whose
-       few loads in flight bound deep-K staged tiles (gh-ocannl-1661: 1.9x at gpt2_mini's outproj on
-       CUDA). The lane-aware mode keeps the restriction: its lane loop already partitions the
-       copy. *)
+       [s := t] under [t < e] when [e <= w]. Slots are considered fastest first. Slot 0 takes the
+       innermost admissible loop to drive the minor axis; higher slots prefer a divide, otherwise
+       the longest drop, keeping their lanes busy. Only an axis no remaining loop admits keeps the
+       representative-thread discipline: one thread ([t == 0]) loads for all. The restriction it
+       replaces serialized the whole copy onto one row of threads, whose few loads in flight bound
+       deep-K staged tiles (gh-ocannl-1661: 1.9x at gpt2_mini's outproj on CUDA). The lane-aware
+       mode keeps the restriction: its lane loop already partitions the copy. *)
     let restrict t body =
       If
         {
@@ -2358,15 +2358,28 @@ let apply_stage ~source ~tile_loops ~shared ~cooperative ~hoisted ~swizzle ~pad_
             (if Option.is_some cooperative then []
              else List.map fresh ~f:(fun (s, s') -> (s', extent s)))
         in
-        (* Slots are assigned innermost-first by [hardware_axes]. Give the fastest in-scope slot
-           first choice of the minor copy loop. *)
+        let axes = hardware_axes opt.llc in
+        (* Slots are assigned innermost-first by [hardware_axes]. Give slot 0 first choice of the
+           minor copy loop; higher slots retain the throughput-oriented partition policy. *)
         List.fold (List.rev in_scope) ~init:load_nest ~f:(fun body fl ->
             match fl.axis with
             | (Workgroup | Workgroup_reduce)
               when not (List.mem reused fl.index ~equal:Indexing.equal_symbol) -> (
                 let t = fl.index and w = fl.to_ - fl.from_ + 1 in
+                let slot =
+                  List.find_exn axes ~f:(fun a ->
+                      Poly.equal a.ha_kind `Workgroup && Indexing.equal_symbol a.ha_index t)
+                  |> fun a -> a.ha_slot
+                in
                 let candidate =
-                  List.find (List.rev !unfolded) ~f:(fun (_, e) -> e % w = 0 || e <= w)
+                  if slot = 0 then
+                    List.find (List.rev !unfolded) ~f:(fun (_, e) -> e % w = 0 || e <= w)
+                  else
+                    match List.filter !unfolded ~f:(fun (_, e) -> e % w = 0) |> List.last with
+                    | Some _ as divide -> divide
+                    | None ->
+                        List.filter !unfolded ~f:(fun (_, e) -> e <= w)
+                        |> List.max_elt ~compare:(fun (_, e1) (_, e2) -> Int.compare e1 e2)
                 in
                 let take s' =
                   unfolded :=

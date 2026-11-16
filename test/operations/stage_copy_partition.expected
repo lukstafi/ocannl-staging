@@ -13,8 +13,15 @@ restrict: exactly the two copies are guarded: true
 restrict: each guard is the representative t == 0: true
 restrict: every tile store sits under both Workgroup loops, indexed by one: true
 two-axis divide: consecutive slot-0 lanes copy consecutive minor-axis cells: true
+two-axis divide: every tile store is partitioned across both Workgroup loops: true
 two-axis divide: broadcast staging matches the serial twin: true
 two-axis drop: consecutive slot-0 lanes copy consecutive minor-axis cells: true
+two-axis drop: every tile store is partitioned across both Workgroup loops: true
 two-axis drop: broadcast staging matches the serial twin: true
 minor drop before major divide: consecutive slot-0 lanes copy consecutive minor-axis cells: true
+minor drop before major divide: every tile store is partitioned across both Workgroup loops: true
 minor drop before major divide: broadcast staging matches the serial twin: true
+reused slot 0: consecutive slot-0 lanes copy consecutive minor-axis cells: true
+reused slot 0: every tile store is partitioned across both Workgroup loops: true
+reused slot 0: slot 1 divides the major copy loop without idling lanes: true
+reused slot 0: broadcast staging matches the serial twin: true
