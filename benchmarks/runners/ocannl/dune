@@ -73,6 +73,28 @@
   arrayjit.autotune
   bench_design))
 
+; Temporary HIP measurement for gh-ocannl-2215. Keep this on the experiment branch.
+
+(executable
+ (name wait_poll_probe)
+ (modules wait_poll_probe)
+ (optional)
+ (libraries
+  base
+  ocannl
+  stdio
+  arrayjit.autotune
+  arrayjit.context
+  arrayjit.utils
+  arrayjit.verdict
+  arrayjit.hip_backend
+  hipjit.hip
+  unix
+  mtime
+  mtime.clock.os)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
 (library
  (name bench_conv_model)
  (package neural_nets_lib)

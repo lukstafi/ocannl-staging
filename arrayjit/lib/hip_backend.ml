@@ -261,6 +261,7 @@ module Impl : sig
 
   val hip_to_code : name:string -> string -> Hiprtc.compile_to_code_result
   val routine_name_probe : unit -> Ir.C_syntax.routine_name_probe
+  val wait_probe_stream : ordinal:int -> Hip.Stream.t
 end = struct
   include Backend_impl.Device (Device_stream) (Slab)
 
@@ -639,6 +640,11 @@ end = struct
     else H.Stream.synchronize device.runner
 
   let is_idle (device : device) = H.Stream.is_ready device.runner
+
+  let wait_probe_stream ~ordinal =
+    let device = get_device ~ordinal in
+    set_ctx device.dev.primary_context;
+    device.runner
 
   (* Transfers take {!Backend_intf.buffer_loc} and resolve to the concrete device pointer here,
      against the device's private pool table. We pass [~length] explicitly to [memcpy_H_to_D] /
