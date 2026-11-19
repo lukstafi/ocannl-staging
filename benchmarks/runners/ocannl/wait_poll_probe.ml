@@ -1,4 +1,5 @@
-(* Temporary gh-ocannl-2215 experiment, carried forward from bd5747b1c. Both wait arms time the same
+(* Temporary gh-ocannl-2215 experiment, carried forward from bd5747b1c, extended for gh-ocannl-2308
+   (PROBE_CAND_ORDER, call timestamps, per-visit EVENT batches). Both wait arms time the same
    compiled routine through the production tuner. The blocking arm is bounded by the experiment's
    process watchdog. Keep the experiment off master. *)
 open Base
@@ -22,6 +23,16 @@ module T = Autotune.Make (Driver)
 type candidate = { id : string; ctx : Context.t; routine : Context.routine }
 
 let elapsed_us c = Mtime.Span.to_float_ns (Mtime_clock.count c) /. 1e3
+
+(* gh-ocannl-2308: PROBE_CAND_ORDER=fixed visits the seed candidates in the order the command line
+   keeps them, in the warm-up and in every visit, so candidate order no longer follows the wait
+   order. Unset (or abba) is gh-ocannl-2215's design. *)
+let fixed_order =
+  match Stdlib.Sys.getenv_opt "PROBE_CAND_ORDER" with
+  | None | Some ("" | "abba") -> false
+  | Some "fixed" -> true
+  | Some other -> failwith ("PROBE_CAND_ORDER: abba or fixed, not " ^ other)
+
 let arm_name blocking = if blocking then "sync" else "poll"
 let triad_widths = [ 32; 128; 256 ]
 
@@ -114,11 +125,13 @@ let seeds ~metadata ~m ~n ~k ~keep =
           Some (compile ~id ~transform program c ~expected))
   in
   let complete =
-    List.length candidates >= 2 && (List.is_empty keep || List.length candidates = List.length keep)
+    if List.is_empty keep then List.length candidates >= 2
+    else List.length candidates = List.length keep
   in
-  Verdict.p "at least two seeded candidates compiled" complete;
+  Verdict.p "the seed shortlist compiled" complete;
   if not complete then failwith "seed shortlist did not match";
-  candidates
+  if not fixed_order then candidates
+  else List.map keep ~f:(fun id -> List.find_exn candidates ~f:(fun c -> String.equal c.id id))
 
 let run_tuner ?prior_depth { ctx; routine; _ } arm =
   blocking := arm;
@@ -131,42 +144,19 @@ let run_tuner ?prior_depth { ctx; routine; _ } arm =
   (result, Option.value_exn !call)
 
 let record_tuner ~metadata ?prior_depth ~round ~visit ({ id; _ } as candidate) arm =
+  let t_start = Unix.gettimeofday () in
   let result, call = run_tuner ?prior_depth candidate arm in
+  let t_end = Unix.gettimeofday () in
   let depth = call.decision.depth in
   let kind = if Option.is_none prior_depth then "adaptive" else "matched" in
-  Stdio.printf "READING,%s,%s,%d,%d,%s,%s,%.9f,%d,%s,%.9f,%d,%b,%b,%.9f,%.9f\n%!" metadata kind
-    round visit id (arm_name arm) result.ms depth
+  Stdio.printf "READING,%s,%s,%d,%d,%s,%s,%.9f,%d,%s,%.9f,%d,%b,%b,%.9f,%.9f,%.6f,%.6f\n%!" metadata
+    kind round visit id (arm_name arm) result.ms depth
     (Autotune.batch_settle_name call.decision.settle)
     result.spread result.samples result.contended result.unbatched call.setup_ms
-    call.window.median_wall_ms;
+    call.window.median_wall_ms t_start t_end;
   List.iteri call.calibration_probes ~f:(fun ordinal probe ->
       Stdio.printf "CALIBRATION,%s,%s,%d,%d,%s,%s,%d,%d,%d,%.9f\n%!" metadata kind round visit id
         (arm_name arm) ordinal probe.depth probe.runs probe.min_ms)
-
-let candidates_abba ~metadata ~rounds ~process candidates =
-  (* A common prior comes from the two discarded warm-up calls. The recorded calls still run the
-     production timing loop, and their settle reason and observed depth identify whether the common
-     prior was accepted. *)
-  let warmed =
-    List.map candidates ~f:(fun candidate ->
-        let first = process % 2 = 0 in
-        let _, a = run_tuner candidate first in
-        let _, b = run_tuner candidate (not first) in
-        (candidate, (a.decision.depth + b.decision.depth) / 2))
-  in
-  for round = 1 to rounds do
-    let forward = (round + process) % 2 = 0 in
-    let arms = if forward then [ false; true; true; false ] else [ true; false; false; true ] in
-    let ordered = if forward then warmed else List.rev warmed in
-    List.iteri arms ~f:(fun visit arm ->
-        let order = if visit % 2 = 0 then ordered else List.rev ordered in
-        List.iter order ~f:(fun (candidate, depth) ->
-            if (round + visit) % 2 = 0 then
-              record_tuner ~metadata ~prior_depth:depth ~round ~visit candidate arm;
-            record_tuner ~metadata ~round ~visit candidate arm;
-            if (round + visit) % 2 <> 0 then
-              record_tuner ~metadata ~prior_depth:depth ~round ~visit candidate arm))
-  done
 
 type wait = Sync | Tight_query | Sparse_spin | Sparse_sleep
 
@@ -249,6 +239,47 @@ let diagnostics ~metadata ~rounds ~process candidates =
                   Stdio.printf "FIXED,%s,%d,%d,%s,%s,%d,%.6f,%.6f,%.6f,%d,%.6f,%.6f\n%!" metadata
                     round sample id (wait_name wait) depth wall gpu submit queries bracket await)
             done))
+  done
+
+let candidates_abba ~metadata ~rounds ~process candidates =
+  (* A common prior comes from the two discarded warm-up calls. The recorded calls still run the
+     production timing loop, and their settle reason and observed depth identify whether the common
+     prior was accepted. *)
+  let warmed =
+    List.map candidates ~f:(fun candidate ->
+        let first = process % 2 = 0 in
+        let _, a = run_tuner candidate first in
+        let _, b = run_tuner candidate (not first) in
+        (candidate, (a.decision.depth + b.decision.depth) / 2))
+  in
+  (* gh-ocannl-2308: after every visit, one fixed batch per candidate at its matched depth between
+     two HIP events, so a mode is placed on the device (event span) or the host (wall only). *)
+  let stream = Hip_backend.Impl.wait_probe_stream ~ordinal:0 in
+  let first = Hip.Event.create ~enable_timing:true () in
+  let last = Hip.Event.create ~enable_timing:true () in
+  Stdio.printf "ORDER,%s,%s,%s\n%!" metadata
+    (if fixed_order then "fixed" else "abba")
+    (String.concat ~sep:"+" (List.map candidates ~f:(fun c -> c.id)));
+  for round = 1 to rounds do
+    let forward = (round + process) % 2 = 0 in
+    let arms = if forward then [ false; true; true; false ] else [ true; false; false; true ] in
+    let ordered = if forward || fixed_order then warmed else List.rev warmed in
+    List.iteri arms ~f:(fun visit arm ->
+        let order = if visit % 2 = 0 || fixed_order then ordered else List.rev ordered in
+        List.iter order ~f:(fun (candidate, depth) ->
+            if (round + visit) % 2 = 0 then
+              record_tuner ~metadata ~prior_depth:depth ~round ~visit candidate arm;
+            record_tuner ~metadata ~round ~visit candidate arm;
+            if (round + visit) % 2 <> 0 then
+              record_tuner ~metadata ~prior_depth:depth ~round ~visit candidate arm);
+        List.iter order ~f:(fun (({ id; _ } as candidate), depth) ->
+            let t = Unix.gettimeofday () in
+            let wall, gpu, _, _, _, _ = fixed_batch ~stream ~first ~last ~depth candidate Sync in
+            Stdio.printf "EVENT,%s,%d,%d,%s,%s,%d,%.6f,%.6f,%.6f\n%!" metadata round visit id
+              (arm_name arm) depth
+              (wall /. Float.of_int depth)
+              (gpu /. Float.of_int depth)
+              t))
   done
 
 let screen ~metadata ~rounds candidates =
