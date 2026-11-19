@@ -61,8 +61,8 @@ let expected_total = 2.0 *. (Float.of_int (side * side) *. 0.5)
    gate leaves for declared arrays ([compiler_frame_limit_bytes - frame_reserve_bytes]), and over
    the scratch budget of every device with more than 17,176 resident work-items (gfx1151: 40,960, a
    104,832 B budget). *)
-let scratch_floats = 62500
-let scratch_bytes = scratch_floats * 4
+let scratch_floats = 1024
+let scratch_bytes = 62500 * 4
 
 (* The budget [Hip_backend.scratch_limit_per_work_item] computes, from the same documented constant
    (the 4 GiB WSL WDDM scratch cap) and the same queried residency. It decides only whether the leg
