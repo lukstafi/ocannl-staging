@@ -15048,6 +15048,7 @@
   unix
   arrayjit.verdict
   ll_test
+  fresh_process
   arrayjit.utils
   arrayjit.context
   arrayjit.autotune)
