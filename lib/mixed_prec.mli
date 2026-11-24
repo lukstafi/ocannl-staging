@@ -20,7 +20,9 @@
       compute is wider than storage, the twin's gradient among them while it is virtual. So a
       model's other placements can still change its values (gh-ocannl-1965; the contract is in
       docs/precision_inference.md). The twin's gradient flows back into the master's f32 gradient
-      through an accumulating assignment, which is where the f16 -> f32 widening happens.
+      through an accumulating assignment, which is where the f16 -> f32 widening happens; narrow
+      reductions and allowlisted embedding scatters into the twin's gradient accumulate at the
+      backend's [accum_prec] and round once into the twin store (gh-ocannl-2362, gh-ocannl-2444).
     - {b Loss scaling} ({!Loss_scaler}): f16's exponent range underflows on small gradients, so the
       backprop is seeded with a scale factor ([Train.grad_update ~loss_scale]) and gradients are
       unscaled in the optimizer step ([Train.sgd_update ~grad_unscale]). The dynamic schedule backs
