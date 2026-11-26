@@ -6,6 +6,28 @@ module Impl : sig
       Exposed for hardware-backed compiler regression probes; callers normally enter through
       {!compile}. *)
 
+  val wait_probe_stream : ordinal:int -> Hip.Stream.t
+  (** Temporary gh-ocannl-2215/2308/2384 experiment. Returns the active stream for [ordinal]. *)
+
+  val with_probe_stream : ordinal:int -> Hip.Stream.t -> (unit -> 'a) -> 'a
+  (** Temporary gh-ocannl-2384 experiment. Routes HIP work for [ordinal] onto the given stream. *)
+
+  val probe_kernel_attrs_hook :
+    (name:string ->
+    symbol:string ->
+    local_bytes:int ->
+    shared_bytes:int ->
+    const_bytes:int ->
+    num_regs:int ->
+    max_threads:int ->
+    occ_blocks:int ->
+    grid:int array ->
+    block:int array ->
+    unit)
+    option
+    ref
+  (** Temporary gh-ocannl-2384 experiment. Observes linked kernel attributes. *)
+
   val routine_name_probe : with_rocwmma:bool -> unit -> Ir.C_syntax.routine_name_probe
   (** The kernel prelude and compiler used by the routine-name harvest (gh-ocannl-1338). The
       ordinary HIP prelude is always present. [with_rocwmma] selects the tensorized context. *)

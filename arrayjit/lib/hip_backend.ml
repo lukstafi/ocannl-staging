@@ -251,6 +251,23 @@ module Impl : sig
 
   val hip_to_code : name:string -> string -> Hiprtc.compile_to_code_result
   val routine_name_probe : with_rocwmma:bool -> unit -> Ir.C_syntax.routine_name_probe
+  val wait_probe_stream : ordinal:int -> Hip.Stream.t
+  val with_probe_stream : ordinal:int -> Hip.Stream.t -> (unit -> 'a) -> 'a
+
+  val probe_kernel_attrs_hook :
+    (name:string ->
+    symbol:string ->
+    local_bytes:int ->
+    shared_bytes:int ->
+    const_bytes:int ->
+    num_regs:int ->
+    max_threads:int ->
+    occ_blocks:int ->
+    grid:int array ->
+    block:int array ->
+    unit)
+    option
+    ref
 end = struct
   include Backend_impl.Device (Device_stream) (Slab)
 
@@ -258,14 +275,23 @@ end = struct
      the shared [Device_config_common]). *)
   include Backend_buffer
 
+  let probe_stream_overrides : (int, H.Stream.t) Hashtbl.t = Hashtbl.create (module Int)
+
+  let active_stream (device : device) =
+    match Hashtbl.find probe_stream_overrides device.ordinal with
+    | Some s -> s
+    | None -> device.runner
+
+  let probe_kernel_attrs_hook = ref None
+
   let ctx_of (context : context) = context.device.dev.primary_context
   let event_device_id event = Some event.device_id
   let is_done event = H.Delimited_event.query event.raw
-  let will_wait_for context event = H.Delimited_event.wait context.device.runner event.raw
+  let will_wait_for context event = H.Delimited_event.wait (active_stream context.device) event.raw
   let sync event = H.Delimited_event.synchronize event.raw
 
   let all_work (device : device) =
-    { device_id = device.device_id; raw = H.Delimited_event.record device.runner }
+    { device_id = device.device_id; raw = H.Delimited_event.record (active_stream device) }
 
   (* The inline-test harness ([ppx_inline_test]'s runner, which hosts ppx_expect tests) is detected
      by its command line, the same way [Ppx_inline_test_lib] switches to test mode. *)
@@ -623,9 +649,22 @@ end = struct
        return while the printf FIFO is still being copied to host stdout; use device synchronization
        while routine logging is enabled so callers may safely close or restore stdout afterward. *)
     if Utils.debug_log_from_routines () then H.Context.synchronize ()
-    else H.Stream.synchronize device.runner
+    else H.Stream.synchronize (active_stream device)
 
-  let is_idle (device : device) = H.Stream.is_ready device.runner
+  let is_idle (device : device) = H.Stream.is_ready (active_stream device)
+
+  let wait_probe_stream ~ordinal =
+    let device = get_device ~ordinal in
+    set_ctx device.dev.primary_context;
+    active_stream device
+
+  let with_probe_stream ~ordinal stream f =
+    let prev = Hashtbl.find probe_stream_overrides ordinal in
+    Hashtbl.set probe_stream_overrides ~key:ordinal ~data:stream;
+    Exn.protect ~f ~finally:(fun () ->
+        match prev with
+        | Some s -> Hashtbl.set probe_stream_overrides ~key:ordinal ~data:s
+        | None -> Hashtbl.remove probe_stream_overrides ordinal)
 
   (* Transfers take {!Backend_intf.buffer_loc} and resolve to the concrete device pointer here,
      against the device's private pool table. We pass [~length] explicitly to [memcpy_H_to_D] /
@@ -639,7 +678,7 @@ end = struct
       let full_bytes = Bigarray.Genarray.size_in_bytes src in
       let elem_bytes = Bigarray.kind_size_in_bytes (Bigarray.Genarray.kind src) in
       H.Stream.memcpy_H_to_D ~length:(full_bytes / elem_bytes) ~dst_offset:dst_loc.offset ~dst:base
-        ~src dst.device.runner
+        ~src (active_stream dst.device)
     in
     Ndarray.apply { f } hosted
 
@@ -650,7 +689,7 @@ end = struct
       let full_bytes = Bigarray.Genarray.size_in_bytes dst in
       let elem_bytes = Bigarray.kind_size_in_bytes (Bigarray.Genarray.kind dst) in
       H.Stream.memcpy_D_to_H ~length:(full_bytes / elem_bytes) ~src_offset:src_loc.offset ~dst
-        ~src:base src.device.runner
+        ~src:base (active_stream src.device)
     in
     Ndarray.apply { f } hosted
 
@@ -663,12 +702,12 @@ end = struct
     let memcpy ~dst_base ~dst_offset =
       if same_device then
         H.Stream.memcpy_D_to_D ~size_in_bytes ~dst_offset ~src_offset ~dst:dst_base ~src:src_base
-          dst.device.runner
+          (active_stream dst.device)
       else
         (* Note: unlike CUDA, HIP identifies peers by device rather than by context. *)
         H.Stream.memcpy_peer ~size_in_bytes ~dst_offset ~src_offset ~dst:dst_base
           ~dst_device:dst.device.dev.dev ~src:src_base ~src_device:src.device.dev.dev
-          dst.device.runner
+          (active_stream dst.device)
     in
     match (into_merge_buffer, dst_loc) with
     | No, None -> invalid_arg "Hip_backend.device_to_device: missing dst_loc"
@@ -1436,6 +1475,22 @@ end = struct
     let func = H.Module.get_function run_module ~name:symbol in
     let device = prior_context.device in
     validate_scratch_budget ~device ~name func;
+    Option.iter !probe_kernel_attrs_hook ~f:(fun hook ->
+        let attr a = H.Module.get_function_attribute func a in
+        let block_threads =
+          launch.Low_level.block.(0) * launch.Low_level.block.(1) * launch.Low_level.block.(2)
+        in
+        let occ_blocks =
+          H.Module.occupancy_max_active_blocks_per_multiprocessor func ~block_size:block_threads
+            ~shared_mem_bytes:0 ~disable_caching_override:false
+        in
+        hook ~name ~symbol
+          ~local_bytes:(attr H.Module.HIP_FUNC_ATTRIBUTE_LOCAL_SIZE_BYTES)
+          ~shared_bytes:(attr H.Module.HIP_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES)
+          ~const_bytes:(attr H.Module.HIP_FUNC_ATTRIBUTE_CONST_SIZE_BYTES)
+          ~num_regs:(attr H.Module.HIP_FUNC_ATTRIBUTE_NUM_REGS)
+          ~max_threads:(attr H.Module.HIP_FUNC_ATTRIBUTE_MAX_THREADS_PER_BLOCK)
+          ~occ_blocks ~grid:launch.Low_level.grid ~block:launch.Low_level.block);
     (* gh-ocannl-1530: the compiled kernel's static shared bytes, for an armed census. *)
     if Compiled_kernels.armed () then
       Compiled_kernels.record ~kernel:symbol
@@ -1488,7 +1543,7 @@ end = struct
         S.launch_kernel func ~grid_dim_x:launch.Low_level.grid.(0)
           ~grid_dim_y:launch.Low_level.grid.(1) ~grid_dim_z:launch.Low_level.grid.(2)
           ~block_dim_x:launch.Low_level.block.(0) ~block_dim_y:launch.Low_level.block.(1)
-          ~block_dim_z:launch.Low_level.block.(2) ~shared_mem_bytes:0 device.runner args
+          ~block_dim_z:launch.Low_level.block.(2) ~shared_mem_bytes:0 (active_stream device) args
       in
       let launch_kernel () =
         if Stdlib.Domain.DLS.get capturing then submit ()
