@@ -6171,7 +6171,10 @@ merged whether or not anyone ran it. `tools/owed-run.sh`'s header is the boundar
   `/usr/local/bin/mawk`. Missing `mawk` on macOS refuses (exit 2) with `brew install mawk` before
   taking a fleet slot or running any member, and never falls back to macOS's BWK `/usr/bin/awk`
   (which hides Linux mawk constructs such as `in`-inside-assignment). Non-Darwin hosts are
-  unaffected.
+  unaffected. On macOS, `runtest-sweep_components` puts system awk first in the driver's input
+  PATH. Its child runs the planted staging#2244 probe with a system-only PATH and with the
+  driver's PATH. It checks for the exact BWK result (exit 0) and mawk defect (exit 1), so a
+  lost symlink or subprocess PATH injection makes the alias fail.
 - The gate is witnessed only locally: the nightly `ci` run reads master, where there is no PR head.
 
 ## The cross-machine sweep
