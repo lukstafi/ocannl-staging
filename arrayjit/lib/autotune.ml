@@ -5759,10 +5759,27 @@ let reduction_sink_enabled () = Utils.registered_flag ~arg_name:"gpu_default_red
 let seed_narrow_storage_enabled () =
   Utils.get_global_flag ~default:false ~arg_name:"gpu_default_seed_narrow_storage"
 
+(* gh-ocannl-1663, gh-ocannl-2360: whether untimed seeded CUDA/HIP choosers -- [seeded_default] at
+   f32-accumulating narrow sites and [model_default]'s seeded ranking -- admit tensorized matmul
+   leaves. Default on; [reproducible] pins it off. *)
+let seeded_tensorize_enabled () =
+  Utils.get_global_flag ~default:true ~arg_name:"model_default_tensorize"
+
 let seeded_geometries =
   [ (64, 64, 8, 4, 4); (32, 32, 8, 4, 4); (32, 32, 16, 2, 2); (16, 16, 8, 2, 2); (16, 16, 8, 4, 4) ]
 
+(* Staged GPU tensorized geometries over [(bm, bk)] in preference order (gh-ocannl-2360); [bn] is
+   pinned by the family tree to the lane width. Largest tile first for operand reuse, matching
+   #1190/#1495 rog timings where plain 32x32x32 led 16x32x32. *)
+let seeded_mma_geometries = [ (32, 32); (16, 32); (32, 16) ]
+
 let seeded_min_blocks = 128
+
+(* The untwinned GPU matmul skeleton shared by {!scalar_blocktile} and {!tensorized_blocktile}:
+   unfused, uncoalesced, non-batch-inner, unswizzled, depth-1 leaves. *)
+let untwinned p =
+  p.sk_gpu && (not p.sk_conv) && (not p.sk_epilogue) && Option.is_none p.sk_coalesce
+  && (not p.sk_batch_inner) && Option.is_none p.sk_swizzle && p.sk_depth = 1
 
 (* The numerics-preserving candidate set (gh-ocannl-1324, gh-ocannl-1253): the unfused scalar
    blocktile pipeline with no twin flavor. Tensorized forms change numerics and the conv family
@@ -5771,16 +5788,39 @@ let seeded_min_blocks = 128
    are the search's to time -- the ranking score cannot tell a coalesced leaf from its uncoalesced
    twin (gh-ocannl-1278). Shared by the seeding and the numerics-preserving arm of [model_default]'s
    GPU family search. *)
-let scalar_blocktile p =
-  p.sk_gpu && (not p.sk_mma) && (not p.sk_conv) && (not p.sk_epilogue)
-  && Option.is_none p.sk_coalesce && (not p.sk_batch_inner) && Option.is_none p.sk_swizzle
-  && p.sk_depth = 1
+let scalar_blocktile p = untwinned p && not p.sk_mma
+
+(* Staged untwinned GPU tensorized leaves (gh-ocannl-2360): unstaged leaves ([sk_bk = 0]) require
+   exact divisibility, fail on rounded reads of wider masters, and measured ~2x slower than staged
+   leaves at the #1190 fp8 site. *)
+let tensorized_blocktile p = untwinned p && p.sk_mma && p.sk_bk > 0
+
+let is_narrow_float = function
+  | Ir.Ops.Half_prec _ | Ir.Ops.Bfloat16_prec _ | Ir.Ops.Fp8_prec _ -> true
+  | _ -> false
+
+(* gh-ocannl-2360: sites admitted to untuned tensorized seeding -- narrow float operands (f16, bf16
+   or fp8, accounting for rounded reads of wider masters) accumulating in f32 (checked against both
+   [accum_prec] and, when described, [capabilities.mma_arm]'s [arm_accumulator]). f32 operand sites
+   (even with [tf32_matmuls]) and narrow-accumulating sites stay out. *)
+let f32_accumulating_narrow ~(capabilities : Ir.Backend_intf.codegen_capabilities) ~accum_prec
+    (site : matmul_site) ~bk =
+  let a_prec = operand_prec site site.m_a
+  and b_prec = operand_prec site site.m_b
+  and d_prec = Lazy.force site.m_d.Ir.Tnode.storage_prec in
+  is_narrow_float a_prec && is_narrow_float b_prec
+  && Ir.Ops.equal_prec (accum_prec d_prec) Ir.Ops.single
+  && Option.for_all
+       (capabilities.mma_arm ~a_prec ~b_prec ~d_prec ~scope:(matmul_mma_scope site ~bk))
+       ~f:(fun arm -> Ir.Ops.equal_prec arm.arm_accumulator Ir.Ops.single)
 
 (* [Error] names the refusing gate, for the seeding census (gh-ocannl-1407). [capabilities] are the
    compiling context's, so the family's workgroup-memory refutation charges the tiles as the gate
-   that judges the seeded kernel does ([Sched.kernel_workgroup_bytes], gh-ocannl-1330). *)
-let seeded_params_judged ?capabilities ~limits ~min_reduction (seg : LL.optimized) :
-    (sketch_params, string) Result.t =
+   that judges the seeded kernel does ([Sched.kernel_workgroup_bytes], gh-ocannl-1330). Returns an
+   ordered candidate list: an admitted staged tensorized leaf first when [tensorize site] holds,
+   followed by the scalar blocktile leaf. *)
+let seeded_candidates_judged ?capabilities ?(tensorize = fun _ ~bk:_ -> false) ~limits
+    ~min_reduction (seg : LL.optimized) : (sketch_params list, string) Result.t =
   match detect_matmul_canonical seg with
   | None -> Error "no matmul site"
   | Some (site, _, _) when site_reduction_extent site < min_reduction ->
@@ -5791,15 +5831,11 @@ let seeded_params_judged ?capabilities ~limits ~min_reduction (seg : LL.optimize
       match matmul_sketch_tree ?capabilities ~is_gpu:true ~is_cpu:false ~limits seg with
       | None -> Error "no matmul site"
       | Some tree -> (
-          (* The tree's own leaves, so every refutation the search applies (launch caps,
-             workgroup-memory and thread floors, companion coverage) applies here too; of those, the
-             unfused scalar blocktile pipeline with no twin flavor: tensorized forms change
-             numerics, and the twins are the search's to time. *)
-          let leaves = List.filter (Sspace.leaves tree) ~f:scalar_blocktile in
+          let all_leaves = Sspace.leaves tree in
           let batch = List.map (site.m_bo @ site.m_bi) ~f:snd in
           (* A batched site's batch loops launch as grid blocks where the device's [.z] cap admits
              them (the tree refutes the flavor otherwise); serial inside each block otherwise. *)
-          let leaves =
+          let prefer_batch_grid leaves =
             match List.filter leaves ~f:(fun p -> p.sk_batch_grid) with
             | [] -> leaves
             | grid when not (List.is_empty batch) -> grid
@@ -5811,12 +5847,6 @@ let seeded_params_judged ?capabilities ~limits ~min_reduction (seg : LL.optimize
             * ((site.m_nj + p.sk_bn - 1) / p.sk_bn)
             * if p.sk_batch_grid then List.fold batch ~init:1 ~f:( * ) else 1
           in
-          let threads p = blocks p * (p.sk_bm / p.sk_tm) * (p.sk_bn / p.sk_tn) in
-          let ranked =
-            List.filter_map seeded_geometries ~f:(fun (bm, bn, bk, tm, tn) ->
-                List.find leaves ~f:(fun p ->
-                    p.sk_bm = bm && p.sk_bn = bn && p.sk_bk = bk && p.sk_tm = tm && p.sk_tn = tn))
-          in
           (* A block tile wider than the output pads it with cells every thread computes and
              discards — attention's value product (a 32-column output) under a 64-column tile wastes
              half its threads. Geometries padding the output by at most an eighth go first. *)
@@ -5826,26 +5856,59 @@ let seeded_params_judged ?capabilities ~limits ~min_reduction (seg : LL.optimize
             * ((site.m_nj + p.sk_bn - 1) / p.sk_bn * p.sk_bn)
             > 9 * site.m_ni * site.m_nj
           in
-          let ranked =
+          let prefer_snug ranked =
             match List.filter ranked ~f:(fun p -> not (padded p)) with [] -> ranked | snug -> snug
           in
-          match List.find ranked ~f:(fun p -> blocks p >= seeded_min_blocks) with
-          | Some p -> Ok p
-          | None -> (
-              (* Nothing reaches the block count: the geometry putting the most threads on the
-                 output, the earlier one on a tie. *)
-              match
-                List.fold ranked ~init:None ~f:(fun best p ->
-                    match best with Some b when threads b >= threads p -> best | _ -> Some p)
-              with
-              | Some p -> Ok p
-              | None ->
-                  Error
-                    (Printf.sprintf
-                       "site %s: no seeded geometry is a scalar blocktile leaf of its family tree \
-                        (%d such leaves, %d refutations)"
-                       (Ir.Tnode.debug_name site.m_d) (List.length leaves)
-                       (List.length (Sspace.refutations tree))))))
+          let scalar_leaves = prefer_batch_grid (List.filter all_leaves ~f:scalar_blocktile) in
+          let scalar_threads p = blocks p * (p.sk_bm / p.sk_tm) * (p.sk_bn / p.sk_tn) in
+          let scalar_ranked =
+            prefer_snug
+              (List.filter_map seeded_geometries ~f:(fun (bm, bn, bk, tm, tn) ->
+                   List.find scalar_leaves ~f:(fun p ->
+                       p.sk_bm = bm && p.sk_bn = bn && p.sk_bk = bk && p.sk_tm = tm && p.sk_tn = tn)))
+          in
+          let scalar_pick =
+            match List.find scalar_ranked ~f:(fun p -> blocks p >= seeded_min_blocks) with
+            | Some _ as hit -> hit
+            | None ->
+                (* Nothing reaches the block count: the geometry putting the most threads on the
+                   output, the earlier one on a tie. *)
+                List.fold scalar_ranked ~init:None ~f:(fun best p ->
+                    match best with
+                    | Some b when scalar_threads b >= scalar_threads p -> best
+                    | _ -> Some p)
+          in
+          let mma_pick =
+            let mma_leaves =
+              prefer_batch_grid
+                (List.filter all_leaves ~f:(fun p ->
+                     tensorized_blocktile p && tensorize site ~bk:p.sk_bk))
+            in
+            let mma_ranked =
+              prefer_snug
+                (List.filter_map seeded_mma_geometries ~f:(fun (bm, bk) ->
+                     List.find mma_leaves ~f:(fun p -> p.sk_bm = bm && p.sk_bk = bk)))
+            in
+            match List.find mma_ranked ~f:(fun p -> blocks p >= seeded_min_blocks) with
+            | Some _ as hit -> hit
+            | None ->
+                (* GPU MMA leaves carry [sk_tm = sk_tn = 0] and launch one lane group per block, so
+                   the fallback maximizes block count, earlier on a tie. *)
+                List.fold mma_ranked ~init:None ~f:(fun best p ->
+                    match best with Some b when blocks b >= blocks p -> best | _ -> Some p)
+          in
+          match List.filter_opt [ mma_pick; scalar_pick ] with
+          | _ :: _ as candidates -> Ok candidates
+          | [] ->
+              Error
+                (Printf.sprintf
+                   "site %s: no seeded geometry is a scalar blocktile leaf of its family tree (%d \
+                    such leaves, %d refutations)"
+                   (Ir.Tnode.debug_name site.m_d) (List.length scalar_leaves)
+                   (List.length (Sspace.refutations tree)))))
+
+let seeded_params_judged ?capabilities ~limits ~min_reduction seg =
+  Result.map (seeded_candidates_judged ?capabilities ~limits ~min_reduction seg) ~f:List.last_exn
 
 let seeded_params ?capabilities ~limits ~min_reduction seg =
   Result.ok (seeded_params_judged ?capabilities ~limits ~min_reduction seg)
@@ -5979,7 +6042,7 @@ let no_seeded_choice =
    first: the thresholds are CUDA/HIP settings, so a malformed value must not break a compile on a
    backend that ignores them. *)
 let seeded_settings ?min_reduction ?seed_gate ?min_serial ?reduction_sink:sink_override ?seed_narrow
-    ~facts ~configured_gate () =
+    ?seed_tensorize ~facts ~configured_gate () =
   let gate () =
     match (seed_gate, min_reduction) with
     | Some _, Some _ ->
@@ -6000,13 +6063,16 @@ let seeded_settings ?min_reduction ?seed_gate ?min_serial ?reduction_sink:sink_o
   let admit_narrow () =
     match seed_narrow with Some b -> b | None -> seed_narrow_storage_enabled ()
   in
+  let tensorize () =
+    match seed_tensorize with Some b -> b | None -> seeded_tensorize_enabled ()
+  in
   if
     (not (seeded_default_backend facts))
     || (gate_off () && min_serial () <= 0 && not (sink_enabled ()))
     || (not (Sched.automatic_schedule_active ~facts))
     || not (Sched.default_pipeline_fissions ())
   then None
-  else Some (gate (), min_serial (), sink_enabled (), admit_narrow ())
+  else Some (gate (), min_serial (), sink_enabled (), admit_narrow (), tensorize ())
 
 (* The split reductions first, whole-routine and before any segmentation, as the search's [F_split]
    seeds apply them: the partials edge each split mints is what fission cuts the two passes apart
@@ -6082,66 +6148,96 @@ let seeded_ranker ~capabilities ~limits ~accum_prec ~static_indices ~capacity ~c
    start (gh-ocannl-1138), which applies it to each key's own segment. The judgment's [Error]
    names the refusing gate, for the seeding census (gh-ocannl-1407). *)
 let seeded_segment_judgment ~capabilities ~limits ~accum_prec ~static_indices ~gate ~ranked_below
-    (pre : LL.optimized) : (sketch_params, string) Result.t =
-  let candidate =
+    ~tensorize (pre : LL.optimized) : (sketch_params, string) Result.t =
+  let admit_tensorize site ~bk =
+    tensorize && f32_accumulating_narrow ~capabilities ~accum_prec site ~bk
+  in
+  let candidates =
     match gate with
     | Min_reduction n when n <= 0 ->
         Error "sketch seeding is off (gpu_default_sketch_min_reduction=0)"
-    | Min_reduction min_reduction -> seeded_params_judged ~capabilities ~limits ~min_reduction pre
-    | Ranked
-        {
-          capacity;
-          cache_rate;
-          scalar_rate;
-          dram_rate;
-          matrix_rate;
-          gather_rate;
-          fill;
-          sector_rate;
-          wg_capacity;
-          copy_rate;
-        } -> (
-        match seeded_params_judged ~capabilities ~limits ~min_reduction:1 pre with
-        | Ok p
-          when ranked_below ~capacity ~cache_bandwidth:cache_rate ~issue_rate:scalar_rate
-                 ~dram_bandwidth:dram_rate ~mma_rate:matrix_rate ~device_gather_rate:gather_rate
-                 ~fill_model:fill ~transaction_rate:sector_rate ~workgroup_capacity:wg_capacity
-                 ~staged_copy_rate:copy_rate p pre ->
-            Ok p
-        | Ok p ->
-            Error
-              (sketch_params_label p
-             ^ ": the auto gate's ranking score does not place it below the preset")
-        | Error _ as refused -> refused)
+    | Min_reduction min_reduction ->
+        seeded_candidates_judged ~capabilities ~tensorize:admit_tensorize ~limits ~min_reduction pre
+    | Ranked _ ->
+        seeded_candidates_judged ~capabilities ~tensorize:admit_tensorize ~limits ~min_reduction:1
+          pre
   in
-  match candidate with
-  | Error _ as refused -> refused
-  | Ok p -> (
-      match
-        validate_segments_for_model ~limits
-          [
-            Sched.apply_classified ~static_indices
-              (sketch_schedule ~accum_prec ~p pre)
-              (scratch_of pre);
-          ]
-      with
-      | _ -> Ok p
-      | exception Outcome.Cause_at (_, cause) ->
-          (* Typed refusals only (gh-ocannl-1390): an untyped exception from the builder or the
-             transforms is a bug, not this segment's decline. *)
-          logf "seeded_default: %s declined on a segment; keeping the preset"
-            (sketch_params_label p);
+  let judge_candidate p =
+    match
+      validate_segments_for_model ~limits
+        [
+          Sched.apply_classified ~static_indices
+            (sketch_schedule ~accum_prec ~p pre)
+            (scratch_of pre);
+        ]
+    with
+    | [ post ] ->
+        if
+          p.sk_mma
+          && CM.accepted_tile_mma_flops ~operand_accepts:capabilities.Ir.Backend_intf.mma_accepts
+               post
+             <= 0
+        then
           Error
-            (sketch_params_label p ^ " declined on the segment: " ^ Outcome.detail_of_cause cause))
+            (sketch_params_label p ^ ": backend declined tile-MMA emission on the scheduled segment")
+        else (
+          match gate with
+          | Min_reduction _ -> Ok p
+          | Ranked
+              {
+                capacity;
+                cache_rate;
+                scalar_rate;
+                dram_rate;
+                matrix_rate;
+                gather_rate;
+                fill;
+                sector_rate;
+                wg_capacity;
+                copy_rate;
+              } ->
+              if
+                ranked_below ~capacity ~cache_bandwidth:cache_rate ~issue_rate:scalar_rate
+                  ~dram_bandwidth:dram_rate ~mma_rate:matrix_rate ~device_gather_rate:gather_rate
+                  ~fill_model:fill ~transaction_rate:sector_rate ~workgroup_capacity:wg_capacity
+                  ~staged_copy_rate:copy_rate p pre
+              then Ok p
+              else
+                Error
+                  (sketch_params_label p
+                 ^ ": the auto gate's ranking score does not place it below the preset"))
+    | _ -> assert false
+    | exception Outcome.Cause_at (_, cause) ->
+        (* Typed refusals only (gh-ocannl-1390): an untyped exception from the builder or the
+           transforms is a bug, not this segment's decline. *)
+        logf "seeded_default: %s declined on a segment; keeping the preset" (sketch_params_label p);
+        Error
+          (sketch_params_label p ^ " declined on the segment: " ^ Outcome.detail_of_cause cause)
+  in
+  match candidates with
+  | Error _ as refused -> refused
+  | Ok ps ->
+      let rec try_candidates last_err = function
+        | [] -> Error last_err
+        | p :: rest -> (
+            match judge_candidate p with
+            | Ok _ as accepted -> accepted
+            | Error why ->
+                if p.sk_mma && not (List.is_empty rest) then
+                  logf "seeded_default: tensorized candidate fell through (%s); trying scalar seed"
+                    why;
+                try_candidates why rest)
+      in
+      try_candidates "no seeded candidate" ps
 
-let seeded_segment_params ~capabilities ~limits ~accum_prec ~static_indices ~gate ~ranked_below pre
-    =
+let seeded_segment_params ~capabilities ~limits ~accum_prec ~static_indices ~gate ~ranked_below
+    ~tensorize pre =
   Result.ok
     (seeded_segment_judgment ~capabilities ~limits ~accum_prec ~static_indices ~gate ~ranked_below
-       pre)
+       ~tensorize pre)
 
 let seeded_decisions ?memo ?(census = true) ~scatter_packets ~capabilities ~limits ~accum_prec
-    ~admit_narrow ~static_indices ~gate ~ranked_below ~sink_enabled (opt : LL.optimized) =
+    ~admit_narrow ~tensorize ~static_indices ~gate ~ranked_below ~sink_enabled (opt : LL.optimized) =
   let preset = seeded_preset ~limits in
   let zero_sched tns = Sched.zero_expansion ~limits tns in
   let keep_mapping = Sched.fission_keep_mapping ~is_gpu:true ~limits in
@@ -6187,7 +6283,7 @@ let seeded_decisions ?memo ?(census = true) ~scatter_packets ~capabilities ~limi
         Hashtbl.find_or_add decided (Lazy.force key) ~default:(fun () ->
             let judged =
               seeded_segment_judgment ~capabilities ~limits ~accum_prec ~static_indices ~gate
-                ~ranked_below pre
+                ~ranked_below ~tensorize pre
             in
             census_verdict ~key
               (match judged with
@@ -6293,10 +6389,10 @@ let seeded_plan_choice (plan : seeded_plan) =
 
 (* The plan on [opt], the routine [split] was applied to. *)
 let seeded_plan_on ?memo ?census ~scatter_packets ~capabilities ~limits ~accum_prec ~admit_narrow
-    ~static_indices ~gate ~ranked_below ~sink_enabled ~split opt =
+    ~tensorize ~static_indices ~gate ~ranked_below ~sink_enabled ~split opt =
   match
     seeded_decisions ?memo ?census ~scatter_packets ~capabilities ~limits ~accum_prec ~admit_narrow
-      ~static_indices ~gate ~ranked_below ~sink_enabled opt
+      ~tensorize ~static_indices ~gate ~ranked_below ~sink_enabled opt
   with
   | None ->
       {
@@ -6315,16 +6411,17 @@ let seeded_plan_on ?memo ?census ~scatter_packets ~capabilities ~limits ~accum_p
         sp_admit_narrow = admit_narrow;
       }
 
-let seeded_plan ?min_reduction ?seed_gate ?min_serial ?reduction_sink ?seed_narrow ?memo
-    ?(capabilities = Ir.Backend_intf.no_codegen_capabilities) ~facts ~limits ~accum_prec
+let seeded_plan ?min_reduction ?seed_gate ?min_serial ?reduction_sink ?seed_narrow ?seed_tensorize
+    ?memo ?(capabilities = Ir.Backend_intf.no_codegen_capabilities) ~facts ~limits ~accum_prec
     ~static_indices (opt : LL.optimized) =
   match
-    seeded_settings ?min_reduction ?seed_gate ?min_serial ?reduction_sink ?seed_narrow ~facts
+    seeded_settings ?min_reduction ?seed_gate ?min_serial ?reduction_sink ?seed_narrow ?seed_tensorize
+      ~facts
       ~configured_gate:(fun () -> seeded_default_gate ~limits)
       ()
   with
   | None -> None
-  | Some (gate, min_serial, sink_enabled, admit_narrow) -> (
+  | Some (gate, min_serial, sink_enabled, admit_narrow, tensorize) -> (
       (* Hermetic, prelude included: deriving the plan must leave the caller's lowering as it
          was. *)
       let scatter_packets = Sched.scatter_packets_enabled ~facts in
@@ -6340,7 +6437,7 @@ let seeded_plan ?min_reduction ?seed_gate ?min_serial ?reduction_sink ?seed_narr
       in
       match
         seeded_plan_on ?memo ~scatter_packets ~capabilities ~limits ~accum_prec ~admit_narrow
-          ~static_indices ~gate ~ranked_below ~sink_enabled ~split opt
+          ~tensorize ~static_indices ~gate ~ranked_below ~sink_enabled ~split opt
       with
       | { sp_split = []; sp_segments = None; _ } ->
           (* [seeded_settings] requires automatic scheduling and fission here. The tuner's serial
@@ -6360,7 +6457,7 @@ let seeded_plan ?min_reduction ?seed_gate ?min_serial ?reduction_sink ?seed_narr
             {
               decide =
                 seeded_segment_params ~capabilities ~limits ~accum_prec ~static_indices ~gate
-                  ~ranked_below;
+                  ~ranked_below ~tensorize;
               gate_tag;
               rederive =
                 (fun memo split opt ->
@@ -6373,8 +6470,8 @@ let seeded_plan ?min_reduction ?seed_gate ?min_serial ?reduction_sink ?seed_narr
                       Some
                         {
                           (seeded_plan_on ~memo ~census:false ~scatter_packets ~capabilities ~limits
-                             ~accum_prec ~admit_narrow ~static_indices ~gate ~ranked_below
-                             ~sink_enabled ~split split_opt)
+                             ~accum_prec ~admit_narrow ~tensorize ~static_indices ~gate
+                             ~ranked_below ~sink_enabled ~split split_opt)
                           with
                           sp_start = Some start;
                         });
@@ -6397,8 +6494,8 @@ let seeded_resplit ?memo (plan : seeded_plan) split (opt : LL.optimized) =
    decided on the split routine, its replay. Shared by the untuned compile's transform and by
    [model_default], which starts from it (gh-ocannl-1253). *)
 let seeded_apply ?(on_choice = fun (_ : seeded_choice) -> ()) ~capabilities ~facts ~limits
-    ~accum_prec ~static_indices ~gate ~min_serial ~sink_enabled ~admit_narrow (opt : LL.optimized) :
-    LL.optimized list =
+    ~accum_prec ~static_indices ~gate ~min_serial ~sink_enabled ~admit_narrow ~tensorize
+    (opt : LL.optimized) : LL.optimized list =
   let t0 = Unix.gettimeofday () in
   let scatter_packets = Sched.scatter_packets_enabled ~facts in
   let opt, split = seeded_split ~facts ~min_serial ~static_indices opt in
@@ -6412,8 +6509,8 @@ let seeded_apply ?(on_choice = fun (_ : seeded_choice) -> ()) ~capabilities ~fac
          sp_admit_narrow = admit_narrow;
        });
   let plan =
-    seeded_plan_on ~scatter_packets ~capabilities ~limits ~accum_prec ~admit_narrow ~static_indices
-      ~gate
+    seeded_plan_on ~scatter_packets ~capabilities ~limits ~accum_prec ~admit_narrow ~tensorize
+      ~static_indices ~gate
       ~ranked_below:(seeded_ranker ~capabilities ~limits ~accum_prec ~static_indices)
       ~sink_enabled ~split opt
   in
@@ -6451,7 +6548,11 @@ let ranking_multiprocessors ~limits =
    and [model_explain]. *)
 let model_seeding ~facts ~limits =
   if not (Ir.Backend_intf.binds_hardware_grid facts) then None
-  else seeded_settings ~facts ~configured_gate:(fun () -> seeded_default_gate ~limits) ()
+  else
+    Option.map
+      (seeded_settings ~facts ~configured_gate:(fun () -> seeded_default_gate ~limits) ())
+      ~f:(fun (gate, min_serial, sink_enabled, admit_narrow, _tensorize) ->
+        (gate, min_serial, sink_enabled, admit_narrow))
 
 (* gh-ocannl-1600: whether [model_default] ranks the coalesced layouts: only where the terms that
    tell them apart are priced -- the memory-transaction rate (with the lane group's width stated),
@@ -6484,7 +6585,7 @@ let model_admits ?(coalesced = false) ~seeding p =
   || (coalesced && Option.is_some p.sk_coalesce && scalar_blocktile { p with sk_coalesce = None })
   || p.sk_mma && (not p.sk_conv)
      && (coalesced || Option.is_none p.sk_coalesce)
-     && Utils.get_global_flag ~default:true ~arg_name:"model_default_tensorize"
+     && seeded_tensorize_enabled ()
 
 (* gh-ocannl-1477: the seeded plan's own sketches on a program [model_default] searches -- the whole
    routine, or one keyed segment of its per-segment substitution: each scalar blocktile the plan
@@ -7470,22 +7571,23 @@ module Make (D : Driver) = struct
         | Error failure -> Outcome.raise_failure failure)
 
   let seeded_transform ?min_reduction ?seed_gate ?min_serial ?reduction_sink ?seed_narrow
-      ?(on_choice = fun (_ : seeded_choice) -> ()) ctx bindings =
+      ?seed_tensorize ?(on_choice = fun (_ : seeded_choice) -> ()) ctx bindings =
     let facts = D.backend_facts ctx in
     match
-      seeded_settings ?min_reduction ?seed_gate ?min_serial ?reduction_sink ?seed_narrow ~facts
+      seeded_settings ?min_reduction ?seed_gate ?min_serial ?reduction_sink ?seed_narrow
+        ?seed_tensorize ~facts
         ~configured_gate:(fun () -> seeded_default_gate ~limits:(D.hardware_limits ctx))
         ()
     with
     | None -> None
-    | Some (gate, min_serial, sink_enabled, admit_narrow) ->
+    | Some (gate, min_serial, sink_enabled, admit_narrow, tensorize) ->
         let limits = D.hardware_limits ctx in
         let capabilities = D.codegen_capabilities ctx in
         let accum_prec = capabilities.Ir.Backend_intf.accum_prec in
         let static_indices = Idx.bound_symbols bindings in
         Some
           (seeded_apply ~on_choice ~capabilities ~facts ~limits ~accum_prec ~static_indices ~gate
-             ~min_serial ~sink_enabled ~admit_narrow)
+             ~min_serial ~sink_enabled ~admit_narrow ~tensorize)
 
   (* gh-ocannl-1479: the launch sweep's pinned sketch -- one whole-routine scalar blocktile leaf of
      the matmul family, whatever the seeding would pick at the size, so every timed point of a fit
@@ -7533,11 +7635,12 @@ module Make (D : Driver) = struct
     result
 
   let seeded_default ?name ?min_reduction ?seed_gate ?min_serial ?reduction_sink ?seed_narrow
-      ?report ctx comp bindings =
+      ?seed_tensorize ?report ctx comp bindings =
     let choice = ref no_seeded_choice in
     let emit () = Option.iter report ~f:(fun f -> f !choice) in
     match
       seeded_transform ?min_reduction ?seed_gate ?min_serial ?reduction_sink ?seed_narrow
+        ?seed_tensorize
         ~on_choice:(fun c -> choice := c)
         ctx bindings
     with
@@ -7713,7 +7816,7 @@ module Make (D : Driver) = struct
       let seeded_segs ?on_choice seeding opt =
         let gate, min_serial, sink_enabled, admit_narrow = seeding in
         seeded_apply ?on_choice ~capabilities ~facts ~limits ~accum_prec ~static_indices ~gate
-          ~min_serial ~sink_enabled ~admit_narrow opt
+          ~min_serial ~sink_enabled ~admit_narrow ~tensorize:(seeded_tensorize_enabled ()) opt
       in
       (* Whether the applied seeded plan differs from the default pipeline, as [seeded_default]
          judges it: a plan that seeds, splits and sinks nothing IS the default pipeline, so a
@@ -8290,7 +8393,8 @@ module Make (D : Driver) = struct
               seeded_apply
                 ~on_choice:(fun c -> record := c.sd_seeded)
                 ~capabilities:caps ~facts ~limits ~accum_prec ~static_indices ~gate ~min_serial
-                ~sink_enabled ~admit_narrow (scratch_of opt) )
+                ~sink_enabled ~admit_narrow ~tensorize:(seeded_tensorize_enabled ()) (scratch_of opt)
+            )
         | None ->
             ( "default",
               Sched.maybe_default_schedules ~facts ~limits ~static_indices (scratch_of opt) )

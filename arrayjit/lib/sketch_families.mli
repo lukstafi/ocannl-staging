@@ -231,6 +231,10 @@ val detect_matmul_canonical :
 (** The site with its enabling-interchange prefix and the code it was detected on (gh-ocannl-1183);
     see {!Autotune.detect_matmul_canonical}. *)
 
+val operand_prec : matmul_site -> Ir.Tnode.t -> Ir.Ops.prec
+(** The precision an operand's values reach [site] at, accounting for rounded reads ([m_a_round],
+    [m_b_round]) of wider sources. *)
+
 val reduction_sink :
   ?admit_narrow:bool ->
   accum_prec:(Ir.Ops.prec -> Ir.Ops.prec) ->

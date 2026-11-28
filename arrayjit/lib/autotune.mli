@@ -2806,9 +2806,14 @@ val model_operand_loads :
     backend but CUDA). The walk keys only [Loads]. *)
 
 val scalar_blocktile : sketch_params -> bool
-(** The unfused GPU scalar blocktile with no twin flavor. The seeded untuned default draws from this
-    set (gh-ocannl-1324), and {!model_default} admits it under the seeded ranking policy
-    (gh-ocannl-1253). Exposed for tests. *)
+(** The unfused GPU scalar blocktile with no twin flavor. The seeded untuned default draws scalar
+    seeds from this set (gh-ocannl-1324), and {!model_default} admits it under the seeded ranking
+    policy (gh-ocannl-1253). Exposed for tests. *)
+
+val tensorized_blocktile : sketch_params -> bool
+(** The unfused, staged GPU tensorized blocktile with no twin flavor ([sk_mma] with [sk_bk > 0]).
+    The seeded untuned default draws tensorized seeds from this set at f32-accumulating narrow sites
+    when [model_default_tensorize] is enabled (gh-ocannl-2360). Exposed for tests. *)
 
 val model_family_search :
   ?on_rejected:(unit -> unit) ->
@@ -3075,6 +3080,7 @@ val seeded_plan :
   ?min_serial:int ->
   ?reduction_sink:bool ->
   ?seed_narrow:bool ->
+  ?seed_tensorize:bool ->
   ?memo:seeded_memo ->
   ?capabilities:Ir.Backend_intf.codegen_capabilities ->
   facts:Ir.Backend_intf.backend_facts ->
@@ -4319,6 +4325,7 @@ module Make (D : Driver) : sig
     ?min_serial:int ->
     ?reduction_sink:bool ->
     ?seed_narrow:bool ->
+    ?seed_tensorize:bool ->
     ?on_choice:(seeded_choice -> unit) ->
     D.ctx ->
     Ir.Indexing.unit_bindings ->
@@ -4352,6 +4359,7 @@ module Make (D : Driver) : sig
     ?min_serial:int ->
     ?reduction_sink:bool ->
     ?seed_narrow:bool ->
+    ?seed_tensorize:bool ->
     ?report:(seeded_choice -> unit) ->
     D.ctx ->
     D.program ->
